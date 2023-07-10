@@ -5,12 +5,11 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NoSuchElementException;
+import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -86,139 +85,31 @@ public class Recipes {
     //        - Unclear from contract
     //  2. Periodic timeout + allow empty windows
     //    - Prioritizes responding to downstream, even if just noise
+    
     // Augments:
     //  1. Control emission rate / set a maximum rate (throttle)
     //    - Maybe this can be done separately, with a downstream operator?
     
-    public static <T> void groupedWithin(Iterable<T> tasks,
+    // Notes:
+    //  - Multiple open windows would require timeouts for each one (based on when its first element arrived)
+    //    - In that case, multiple producers implies multiple consumers, ie the whole operator is duplicated
+    //  - Multiple producers can accumulate onto the same window, but the locking prevents any parallelism there
+    
+    public static <T> void groupedWithin(Iterable<T> source,
                                          int windowSize,
                                          Duration windowTimeout,
                                          Consumer<? super List<T>> downstream) throws InterruptedException, ExecutionException {
         collectWithin(
-            tasks,
-            ArrayList::new,
-            List::add,
-            list -> list.size() >= windowSize,
+            source,
+            () -> new ArrayList<>(windowSize),
+            Collection::add,
+            window -> window.size() >= windowSize,
             windowTimeout,
             downstream
         );
-//        if (windowSize < 1) {
-//            throw new IllegalArgumentException("windowSize must be positive");
-//        }
-//        if (windowTimeout.isNegative()) {
-//            throw new IllegalArgumentException("windowTimeout must be positive");
-//        }
-//
-//        long tempTimeout;
-//        try {
-//            tempTimeout = windowTimeout.toNanos();
-//        } catch (ArithmeticException e) {
-//            tempTimeout = Long.MAX_VALUE;
-//        }
-//        long timeoutNanos = tempTimeout;
-//
-//        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var openWindow = new ArrayList<T>(windowSize);      // Supplier
-//            var lock = new ReentrantLock();
-//            var opened = lock.newCondition();
-//            var filled = lock.newCondition();
-//            var drained = lock.newCondition();
-//            var state = new Object() {
-//                boolean done = false;
-//                boolean open = false;
-//                long nextDeadline = 0L;
-//            };
-//
-//            // Producer
-//            scope.fork(() -> {
-//                for (var task : tasks) {
-//                    lock.lock();
-//                    try {
-//                        // 1. Wait for consumer to flush
-//                        // 2. Fill the window
-//                        // 3. Wake up consumer to flush
-//                        while (openWindow.size() >= windowSize) {  // Weight function
-//                            drained.await();
-//                        }
-//                        boolean first = openWindow.isEmpty();
-//                        first &= openWindow.add(task);             // Accumulator
-//                        if (first) {
-//                            state.nextDeadline = System.nanoTime() + timeoutNanos;
-//                            state.open = true;
-//                            opened.signal();
-//                        }
-//                        if (openWindow.size() >= windowSize) {     // Weight function
-//                            filled.signal();
-//                        }
-//                    } finally {
-//                        lock.unlock();
-//                    }
-//                }
-//
-//                // If there were multiple producers, this would come after ALL of them.
-//                lock.lock();
-//                try {
-//                    state.done = state.open = true;
-//                    opened.signal();
-//                    filled.signal();
-//                } finally {
-//                    lock.unlock();
-//                }
-//
-//                return null;
-//            });
-//
-//            // Consumer
-//            scope.fork(() -> {
-//                while (true) {
-//                    List<T> closedWindow;
-//                    lock.lock();
-//                    try {
-//                        // Wait if no window is open
-//                        while (!state.open && !state.done) {
-//                            opened.await();
-//                        }
-//                        if (!state.done) {
-//                            // 1. Wait for producer(s) to fill the window, finish, or timeout
-//                            // 2. Drain the window
-//                            // 3. Wake up producer(s) to refill
-//                            if (openWindow.size() < windowSize) {                        // Negated weight function
-//                                do {
-//                                    long nanosRemaining = state.nextDeadline - System.nanoTime();
-//                                    if (nanosRemaining <= 0L) {
-//                                        break;
-//                                    }
-//                                    filled.awaitNanos(nanosRemaining);
-//                                } while (openWindow.size() < windowSize && !state.done); // Negated weight function
-//                            }
-//                            closedWindow = List.copyOf(openWindow);                      //
-//                            openWindow.clear();                                          // 'Supplier' (reset)
-//                            state.open = false;
-//                            drained.signalAll();
-//                        } else if (!openWindow.isEmpty()) {                              // ???
-//                            closedWindow = List.copyOf(openWindow);                      //
-//                            openWindow.clear();                                          // 'Supplier' (reset)
-//                        } else {
-//                            break;
-//                        }
-//                    } finally {
-//                        lock.unlock();
-//                    }
-//                    if (!closedWindow.isEmpty()) {                                       // ???
-//                        downstream.accept(closedWindow);                                 // (Finisher)
-//                    }
-//                }
-//                return null;
-//            });
-//
-//            scope.join().throwIfFailed();
-//        }
     }
     
-    
-    
-    
-    public static <T,A> void collectWithin(Iterable<? extends T> tasks,
+    public static <T,A> void collectWithin(Iterable<? extends T> source,
                                            Supplier<? extends A> supplier,
                                            BiConsumer<? super A, ? super T> accumulator,
                                            Predicate<? super A> windowReady,
@@ -236,95 +127,106 @@ public class Recipes {
         }
         long timeoutNanos = tempTimeout;
         
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var lock = new ReentrantLock();
-            var opened = lock.newCondition();
-            var filled = lock.newCondition();
-            var drained = lock.newCondition();
-            var state = new Object() {
-                boolean done = false;
-                boolean open = false;
-                long nextDeadline = 0L;
-                A acc = null;
-            };
+        class Organizer {
+            final Lock lock = new ReentrantLock();
+            final Condition opened = lock.newCondition();
+            final Condition filled = lock.newCondition();
+            final Condition drained = lock.newCondition();
+            boolean done = false;
+            boolean open = false;
+            long nextDeadline = 0L;
+            A openWindow = null;
             
-            // Producer
-            scope.fork(() -> {
-                for (var task : tasks) {
-                    lock.lock();
-                    try {
-                        // 1. Wait for consumer to flush
-                        // 2. Fill the window
-                        // 3. Wake up consumer to flush
-                        while (state.open && windowReady.test(state.acc)) {
-                            drained.await();
-                        }
-                        if (!state.open) {
-                            state.acc = supplier.get();
-                        }
-                        accumulator.accept(state.acc, task);
-                        if (!state.open) {
-                            state.nextDeadline = System.nanoTime() + timeoutNanos;
-                            state.open = true;
-                            opened.signal();
-                        }
-                        if (windowReady.test(state.acc)) {
-                            filled.signal();
-                        }
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                
-                // If there were multiple producers, this would come after ALL of them.
+            void accumulate(T item) throws InterruptedException {
                 lock.lock();
                 try {
-                    state.done = true;
+                    // 1. Wait for consumer to flush
+                    // 2. Fill the window
+                    // 3. Wake up consumer to flush
+                    while (open && windowReady.test(openWindow)) {
+                        drained.await();
+                    }
+                    if (!open) {
+                        openWindow = supplier.get();
+                    }
+                    accumulator.accept(openWindow, item);
+                    if (!open) {
+                        nextDeadline = System.nanoTime() + timeoutNanos;
+                        open = true;
+                        opened.signal();
+                    }
+                    if (windowReady.test(openWindow)) {
+                        filled.signal();
+                    }
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            void finish() {
+                lock.lock();
+                try {
+                    done = true;
                     opened.signal();
                     filled.signal();
                 } finally {
                     lock.unlock();
                 }
-                
-                return null;
-            });
+            }
             
-            // Consumer
-            scope.fork(() -> {
+            void consume() throws InterruptedException {
                 while (true) {
                     A closedWindow;
                     lock.lock();
                     try {
                         // Wait if no window is open
-                        while (!state.open && !state.done) {
+                        while (!open && !done) {
                             opened.await();
                         }
-                        if (!state.done) {
+                        if (!done) {
                             // 1. Wait for producer(s) to fill the window, finish, or timeout
                             // 2. Drain the window
                             // 3. Wake up producer(s) to refill
-                            if (!windowReady.test(state.acc)) {
+                            if (!windowReady.test(openWindow)) {
                                 do {
-                                    long nanosRemaining = state.nextDeadline - System.nanoTime();
+                                    long nanosRemaining = nextDeadline - System.nanoTime();
                                     if (nanosRemaining <= 0L) {
                                         break;
                                     }
                                     filled.awaitNanos(nanosRemaining);
-                                } while (!windowReady.test(state.acc) && !state.done);
+                                } while (!windowReady.test(openWindow) && !done);
                             }
                         }
-                        if (!state.open) {
+                        if (!open) {
                             break;
                         }
-                        closedWindow = state.acc;
-                        state.acc = null;
-                        state.open = false;
+                        closedWindow = openWindow;
+                        openWindow = null;
+                        open = false;
                         drained.signalAll();
                     } finally {
                         lock.unlock();
                     }
                     downstream.accept(closedWindow);
                 }
+            }
+        }
+        
+        var organizer = new Organizer();
+        
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            // Producer
+            scope.fork(() -> {
+                for (var item : source) {
+                    organizer.accumulate(item);
+                }
+                organizer.finish();
+                return null;
+            });
+            
+            // Consumer
+            scope.fork(() -> {
+                organizer.consume();
                 return null;
             });
             
