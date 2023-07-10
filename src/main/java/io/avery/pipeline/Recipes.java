@@ -58,11 +58,11 @@ public class Recipes {
         };
         
 //        Recipes.groupedWithin(() -> in, 10, Duration.ofSeconds(5), System.out::println);
-        Recipes.collectWithin(
+        Recipes.collectWithinSync(
             () -> in,
-            StringBuilder::new,
-            (sb, s) -> sb.append(s).append(' '),
-            sb -> sb.length() >= 20,
+            () -> new ArrayList<>(10),
+            Collection::add,
+            window -> window.size() >= 10,
             Duration.ofSeconds(5),
             System.out::println
         );
@@ -108,6 +108,9 @@ public class Recipes {
             downstream
         );
     }
+    
+    // Note this version of collectWithin uses an async boundary, for more accurate timing.
+    // A synchronous version could be written, but could only check timing when elements arrive.
     
     public static <T,A> void collectWithin(Iterable<? extends T> source,
                                            Supplier<? extends A> supplier,
@@ -232,5 +235,64 @@ public class Recipes {
             
             scope.join().throwIfFailed();
         }
+    }
+    
+    public static <T,A> void collectWithinSync(Iterable<? extends T> source,
+                                               Supplier<? extends A> supplier,
+                                               BiConsumer<? super A, ? super T> accumulator,
+                                               Predicate<? super A> windowReady,
+                                               Duration windowTimeout,
+                                               Consumer<? super A> downstream) throws InterruptedException, ExecutionException {
+        if (windowTimeout.isNegative()) {
+            throw new IllegalArgumentException("windowTimeout must be positive");
+        }
+        
+        long tempTimeout;
+        try {
+            tempTimeout = windowTimeout.toNanos();
+        } catch (ArithmeticException e) {
+            tempTimeout = Long.MAX_VALUE;
+        }
+        long timeoutNanos = tempTimeout;
+        
+        class Organizer {
+            boolean open = false;
+            long nextDeadline = 0L;
+            A openWindow = null;
+            
+            void accumulate(T item) {
+                if (!open) {
+                    openWindow = supplier.get();
+                }
+                accumulator.accept(openWindow, item);
+                if (!open) {
+                    nextDeadline = System.nanoTime() + timeoutNanos;
+                    open = true;
+                }
+                if (System.nanoTime() - nextDeadline >= 0 || windowReady.test(openWindow)) {
+                    emit();
+                }
+            }
+            
+            void finish() {
+                if (open) {
+                    emit();
+                }
+            }
+            
+            void emit() {
+                var closedWindow = openWindow;
+                openWindow = null;
+                open = false;
+                downstream.accept(closedWindow);
+            }
+        }
+        
+        var organizer = new Organizer();
+        
+        for (var item : source) {
+            organizer.accumulate(item);
+        }
+        organizer.finish();
     }
 }
