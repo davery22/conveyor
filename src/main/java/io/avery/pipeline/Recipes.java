@@ -5,16 +5,14 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
-import java.util.function.Predicate;
-import java.util.function.Supplier;
+import java.util.function.*;
 
 public class Recipes {
     private Recipes() {} // Utility
@@ -58,7 +56,7 @@ public class Recipes {
         };
         
 //        Recipes.groupedWithin(() -> in, 10, Duration.ofSeconds(5), System.out::println);
-        Recipes.collectWithinSync(
+        Recipes.collectWithin(
             () -> in,
             () -> new ArrayList<>(10),
             Collection::add,
@@ -141,7 +139,7 @@ public class Recipes {
             A openWindow = null;
             
             void accumulate(T item) throws InterruptedException {
-                lock.lock();
+                lock.lockInterruptibly();
                 try {
                     // 1. Wait for consumer to flush
                     // 2. Fill the window
@@ -166,8 +164,8 @@ public class Recipes {
                 }
             }
             
-            void finish() {
-                lock.lock();
+            void finish() throws InterruptedException {
+                lock.lockInterruptibly();
                 try {
                     done = true;
                     opened.signal();
@@ -180,13 +178,13 @@ public class Recipes {
             void consume() throws InterruptedException {
                 while (true) {
                     A closedWindow;
-                    lock.lock();
+                    lock.lockInterruptibly();
                     try {
                         // Wait if no window is open
                         while (!open && !done) {
                             opened.await();
                         }
-                        if (!done) {
+                        if (!done) { // Implies open
                             // 1. Wait for producer(s) to fill the window, finish, or timeout
                             // 2. Drain the window
                             // 3. Wake up producer(s) to refill
@@ -200,7 +198,7 @@ public class Recipes {
                                 } while (!windowReady.test(openWindow) && !done);
                             }
                         }
-                        if (!open) {
+                        if (!open) { // Implies done
                             break;
                         }
                         closedWindow = openWindow;
@@ -294,5 +292,259 @@ public class Recipes {
             organizer.accumulate(item);
         }
         organizer.finish();
+    }
+    
+    public static <T> void delay(Iterable<? extends T> source,
+                                 Function<? super T, Instant> deadline,
+                                 Consumer<? super T> downstream) throws InterruptedException, ExecutionException {
+        class Organizer {
+            final DelayedT<T> SENTINEL = null;
+            final DelayQueue<DelayedT<T>> queue = new DelayQueue<>();
+            
+            void accumulate(T item) {
+                queue.put(new DelayedT<>(item, deadline.apply(item)));
+            }
+            
+            void finish() {
+                // TODO: A sentinel won't work here, because it would need to be a Delayed whose deadline is
+                //  *just after* the last normal element's deadline.
+                //  What we really want is to tell the consumer that no more elements are coming (so don't bother waiting).
+                queue.put(SENTINEL);
+            }
+            
+            void consume() throws InterruptedException {
+                for (DelayedT<T> d; (d = queue.take()) != SENTINEL; ) {
+                    downstream.accept(d.el);
+                }
+            }
+        }
+        
+        var organizer = new Organizer();
+        
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            scope.fork(() -> {
+                for (var item : source) {
+                    organizer.accumulate(item);
+                }
+                organizer.finish();
+                return null;
+            });
+            
+            scope.fork(() -> {
+                organizer.consume();
+                return null;
+            });
+            
+            scope.join().throwIfFailed();
+        }
+    }
+    
+    private static class DelayedT<T> implements Delayed {
+        T el;
+        Instant deadline;
+        
+        DelayedT(T el, Instant deadline) {
+            this.el = el;
+            this.deadline = deadline;
+        }
+        
+        @Override
+        public long getDelay(TimeUnit unit) {
+            return unit.toChronoUnit().between(Instant.now(), deadline);
+        }
+        
+        @Override
+        public int compareTo(Delayed o) {
+            if (o instanceof DelayedT<?> dt) {
+                return this.deadline.compareTo(dt.deadline);
+            }
+            return this.deadline.compareTo(Instant.now().plusNanos(o.getDelay(TimeUnit.NANOSECONDS)));
+        }
+    }
+    
+    // TODO: Should we prevent accumulating after finish()? (Guaranteed? Even with concurrent producers?)
+    //       Should we prevent consuming after finish()?
+    //       Should we control the consume loop, or only consume one item per invocation?
+    //       Can downstream cancel? Does emission return boolean?
+    
+    public static void backpressureTimeout() {
+        // Throws if a timeout elapses between upstream emission and downstream consumption.
+        // Probably does not block upstream. Unbounded buffer?
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    // -------
+    
+    public static void batchWeighted() {
+        // Like collectWithin, but downstream does not wait for an open window to be 'full'.
+        // Downstream will consume an open window as soon as it sees it.
+        // No waiting = no timeout.
+        // Upstream blocks if the open window is 'full'.
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    public static void buffer() {
+        // Like batchWeighted, but is not limited to blocking upstream when the open window is 'full'.
+        // It can alternatively adjust (DropHead, DropTail) or reset (DropBuffer) the window, or throw (Fail).
+        // (Blocking or dropping would essentially be a form of throttling, esp. if downstream is fixed-rate.)
+        // Might be obviated by a general impl of batchWeighted.
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    public static void conflateWithSeed() {
+        // Like batchWeighted, but accumulates instead of blocking upstream when the open window is 'full'.
+        // Would be obviated by a general impl of buffer.
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    // -------
+    
+    public static void delayWith() {
+        // Shifts element emission in time by a specified amount.
+        // Implement by buffering each element with a deadline.
+        // Maybe change to allow reordering if new elements have a sooner deadline than older elements?
+        
+        // Could be async or sync (sync would of course be constrained to run on arrivals).
+    }
+    
+    public static void extrapolate() {
+        // Continually flatmaps the most recent element from upstream until upstream emits again.
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    public static void keepAlive() {
+        // Injects additional elements if upstream does not emit for a configured amount of time.
+        
+        // Inherently async (addresses speed mismatch between upstream/downstream).
+    }
+    
+    public static void throttle() {
+        // Limits upstream emission rate, while allowing for some 'burstiness'.
+        
+        // Could be async or sync (sync would of course be constrained to run on arrivals).
+    }
+    
+    public static void throttleFirst() {
+        // Drops elements that arrive within a timeout since the last emission.
+        // (Close to throttleLatest, but that buffers the last element for emission in the next window.)
+        // OR
+        // Partitions into sequential fixed-duration time windows, and emits the first element of each window.
+        
+        // This can actually be fully synchronous!
+    }
+    
+    public static void debounce() {
+        // aka throttleWithTimeout
+        // Drops elements if another (different?) element arrives before a deadline.
+        // Deadline may be computed per-element.
+        // Elements will be emitted no sooner than their deadline expires.
+        
+        // Could be async or sync (sync would of course be constrained to run on arrivals).
+    }
+    
+    // TODO: Version of collectWithin that saturates timeout until minWeight is reached?
+    //   ie: [ cannot emit | can emit if timed-out | can emit asap ]
+    //                     ^ minWeight             ^ maxWeight
+    //   A non-blocking overflow strategy might allow 'overweight' windows to go back to 'underweight'/'in-weight'
+    
+    // Could return multiple sides of a channel, ie Producer & Consumer (like Rust mpsc)
+    // But this feels like layering that needn't exist?
+    // What if there are more than two sides? eg, need a third party to poll
+    
+    // What if we derived a timeout from the window, rather than a 'weight' or 'readiness'?
+    //  Inf timeout -> Not Ready; <=0 timeout -> Ready
+    //  In that case, should upstream block when Ready? Or allow transitioning back to Not Ready?
+    
+    // What if we could still adjust a Ready window in response to new elements?
+    //  'readiness' is already user-defined - user could store this on the window itself
+    //  It would be the (user-defined) accumulator's problem to block on a Ready window if desired
+    
+    // Throttling - provideToken() for user-controlled token rate? Or baked-in rate controls?
+    
+    // collectWithin -> expiringBatch ?
+    
+    // Types of timeout:
+    //  1. Sequential fixed-duration time windows
+    //    - ex: throttleFirst
+    //  2. Sequential expiring batches from time-of-creation (or first element)
+    //    - ex: groupedWithin
+    //    - riff: Updating batch updates expiration
+    //  3. Overlapping expiring emissions / delay-queue
+    //    - ex: delayWith
+    
+    // debounce could be done with sequential expiring batches, if deadline could be adjusted
+    //  - batch: { deadline, element }
+    //  - if newElement != element, set batch = { newDeadline, newElement }
+    
+    // upstream:   () -> state
+    // upstream:   (state, item) -> deadline
+    // downstream: (state, sink) -> deadline
+    // TODO: downstream emit should be lockless
+    
+    public interface Waiter {
+        void await();
+    }
+    
+    public static <T,A,R> void boundary(Iterable<? extends T> source,
+                                        Function<? super Waiter, ? extends A> factory,
+                                        BiFunction<? super A, ? super T, Instant> feeder,
+                                        BiFunction<? super A, Consumer<? super R>, Instant> flusher) {
+        // 0. initial
+        //   - downstream is waiting on upstream to start
+        // 1. factory is initially called with Blocker to produce initial state
+        //   - can store Blocker on state
+        // 2. feeder is called with state and element
+        //   - can accumulate element onto state
+        //   - can store weight on state to tell if we should block, drop tail, etc
+        //   - return an instant to indicate when flushing should resume
+        // 3. flusher is called with state
+        //   - can emit output to consumer
+        //   - can update state to reset window or remove element(s)
+        //   - return an instant to indicate when feeding should resume
+        
+        // Problem?: upstream can block before downstream has a deadline
+        // Problem: feeder/flusher can throw checked exceptions
+        
+        // Upstream blocks waiting for downstream to consume state
+        // Downstream blocks waiting for upstream to prepare state
+        
+        Waiter waiter = () -> {};
+    }
+    
+    public static void main() {
+        boundary(List.of(1),
+                 b -> new Object(){
+                     final Waiter waiter = b;
+                     List<Integer> window = null;
+                     Instant nextDeadline = Instant.MAX;
+                 },
+                 (state, el) -> {
+                     while (state.window != null && state.window.size() >= 10) {
+                         state.waiter.await();
+                     }
+                     boolean open = state.window != null;
+                     if (!open) {
+                         state.window = new ArrayList<>(10);
+                     }
+                     state.window.add(el);
+                     if (!open) {
+                         state.nextDeadline = Instant.now().plusSeconds(5);
+                     }
+                     return state.nextDeadline;
+                 },
+                 (state, sink) -> {
+                     state.waiter.await();
+                     sink.accept(state.window);
+                     state.window = null;
+                     return Instant.MIN; // Do not block upstream
+                 }
+        );
+        
+        // Is this worth it, over just implementing accumulate(), finish(), consume()?
     }
 }
