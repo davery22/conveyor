@@ -6,6 +6,7 @@ import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.TimeUnit;
@@ -13,6 +14,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
+import java.util.stream.Stream;
 
 public class Recipes {
     private Recipes() {} // Utility
@@ -130,12 +132,11 @@ public class Recipes {
         
         class Organizer {
             final Lock lock = new ReentrantLock();
-            final Condition opened = lock.newCondition();
             final Condition filled = lock.newCondition();
-            final Condition drained = lock.newCondition();
+            final Condition flushed = lock.newCondition();
+            long nextDeadline = System.nanoTime() + Long.MAX_VALUE; // 'Infinite' timeout
             boolean done = false;
             boolean open = false;
-            long nextDeadline = 0L;
             A openWindow = null;
             
             void accumulate(T item) throws InterruptedException {
@@ -145,7 +146,7 @@ public class Recipes {
                     // 2. Fill the window
                     // 3. Wake up consumer to flush
                     while (open && windowReady.test(openWindow)) {
-                        drained.await();
+                        flushed.await();
                     }
                     if (!open) {
                         openWindow = supplier.get();
@@ -154,7 +155,7 @@ public class Recipes {
                     if (!open) {
                         nextDeadline = System.nanoTime() + timeoutNanos;
                         open = true;
-                        opened.signal();
+                        filled.signal(); // Wake up consumer to update its deadline
                     }
                     if (windowReady.test(openWindow)) {
                         filled.signal();
@@ -168,7 +169,6 @@ public class Recipes {
                 lock.lockInterruptibly();
                 try {
                     done = true;
-                    opened.signal();
                     filled.signal();
                 } finally {
                     lock.unlock();
@@ -180,23 +180,17 @@ public class Recipes {
                     A closedWindow;
                     lock.lockInterruptibly();
                     try {
-                        // Wait if no window is open
-                        while (!open && !done) {
-                            opened.await();
-                        }
-                        if (!done) { // Implies open
-                            // 1. Wait for producer(s) to fill the window, finish, or timeout
-                            // 2. Drain the window
-                            // 3. Wake up producer(s) to refill
-                            if (!windowReady.test(openWindow)) {
-                                do {
-                                    long nanosRemaining = nextDeadline - System.nanoTime();
-                                    if (nanosRemaining <= 0L) {
-                                        break;
-                                    }
-                                    filled.awaitNanos(nanosRemaining);
-                                } while (!windowReady.test(openWindow) && !done);
-                            }
+                        // 1. Wait for producer(s) to fill the window, finish, or timeout
+                        // 2. Drain the window
+                        // 3. Wake up producer(s) to refill
+                        if ((!open || !windowReady.test(openWindow)) && !done) {
+                            do {
+                                long nanosRemaining = nextDeadline - System.nanoTime();
+                                if (nanosRemaining <= 0L) {
+                                    break;
+                                }
+                                filled.awaitNanos(nanosRemaining);
+                            } while ((!open || !windowReady.test(openWindow)) && !done);
                         }
                         if (!open) { // Implies done
                             break;
@@ -204,7 +198,8 @@ public class Recipes {
                         closedWindow = openWindow;
                         openWindow = null;
                         open = false;
-                        drained.signalAll();
+                        nextDeadline = System.nanoTime() + Long.MAX_VALUE; // 'Infinite' timeout
+                        flushed.signalAll();
                     } finally {
                         lock.unlock();
                     }
@@ -367,6 +362,7 @@ public class Recipes {
     //       Should we control the consume loop, or only consume one item per invocation?
     //       Can downstream cancel? Does emission return boolean?
     
+    // ✅
     public static void backpressureTimeout() {
         // Throws if a timeout elapses between upstream emission and downstream consumption.
         // Probably does not block upstream. Unbounded buffer?
@@ -376,6 +372,7 @@ public class Recipes {
     
     // -------
     
+    // ✅
     public static void batchWeighted() {
         // Like collectWithin, but downstream does not wait for an open window to be 'full'.
         // Downstream will consume an open window as soon as it sees it.
@@ -385,6 +382,7 @@ public class Recipes {
         // Inherently async (addresses speed mismatch between upstream/downstream).
     }
     
+    // ✅
     public static void buffer() {
         // Like batchWeighted, but is not limited to blocking upstream when the open window is 'full'.
         // It can alternatively adjust (DropHead, DropTail) or reset (DropBuffer) the window, or throw (Fail).
@@ -394,6 +392,7 @@ public class Recipes {
         // Inherently async (addresses speed mismatch between upstream/downstream).
     }
     
+    // ✅
     public static void conflateWithSeed() {
         // Like batchWeighted, but accumulates instead of blocking upstream when the open window is 'full'.
         // Would be obviated by a general impl of buffer.
@@ -403,6 +402,7 @@ public class Recipes {
     
     // -------
     
+    // ✅
     public static void delayWith() {
         // Shifts element emission in time by a specified amount.
         // Implement by buffering each element with a deadline.
@@ -411,33 +411,35 @@ public class Recipes {
         // Could be async or sync (sync would of course be constrained to run on arrivals).
     }
     
+    // ✅
     public static void extrapolate() {
-        // Continually flatmaps the most recent element from upstream until upstream emits again.
+        // Flatmaps the most recent element from upstream until upstream emits again.
         
         // Inherently async (addresses speed mismatch between upstream/downstream).
     }
     
+    // ✅
     public static void keepAlive() {
         // Injects additional elements if upstream does not emit for a configured amount of time.
         
         // Inherently async (addresses speed mismatch between upstream/downstream).
     }
     
+    // ✅
     public static void throttle() {
         // Limits upstream emission rate, while allowing for some 'burstiness'.
         
         // Could be async or sync (sync would of course be constrained to run on arrivals).
     }
     
-    public static void throttleFirst() {
-        // Drops elements that arrive within a timeout since the last emission.
-        // (Close to throttleLatest, but that buffers the last element for emission in the next window.)
-        // OR
-        // Partitions into sequential fixed-duration time windows, and emits the first element of each window.
+    // ✅
+    public static void throttleLast() {
+        // Partitions into sequential fixed-duration time windows, and emits the last element of each window.
         
-        // This can actually be fully synchronous!
+        // Could be async or sync (sync would of course be constrained to run on arrivals).
     }
     
+    // ✅
     public static void debounce() {
         // aka throttleWithTimeout
         // Drops elements if another (different?) element arrives before a deadline.
@@ -470,11 +472,11 @@ public class Recipes {
     
     // Types of timeout:
     //  1. Sequential fixed-duration time windows
-    //    - ex: throttleFirst
+    //    - ex: throttleLast
     //  2. Sequential expiring batches from time-of-creation (or first element)
     //    - ex: groupedWithin
     //    - riff: Updating batch updates expiration
-    //  3. Overlapping expiring emissions / delay-queue
+    //  3. Overlapping expiring emissions
     //    - ex: delayWith
     
     // debounce could be done with sequential expiring batches, if deadline could be adjusted
@@ -486,26 +488,51 @@ public class Recipes {
     // downstream: (state, sink) -> deadline
     // TODO: downstream emit should be lockless
     
-    public interface Waiter {
-        void await();
+    // Seems like a good idea to 'start' in the consumer (ie create initial state, deadline, etc),
+    // Maybe have a method that creates the state + consumer (+ producer?)
+    
+    // What if state was created outside the handlers?
+    // state;
+    // (producerControl) -> deadline
+    // (consumerControl) -> deadline
+    
+    // ctl.deadline() isn't very useful if the deadline may have been Instant.MIN / Instant.MAX
+    // But, used carefully, it is more accurate than relying on Instant.now() (since downstream may be late)
+    // May be better to schedule using Instant.now() instead of Instant.MIN
+    
+    public interface Sink<T> {
+        void accept(T in) throws Exception;
     }
     
-    public static <T,A,R> void boundary(Iterable<? extends T> source,
-                                        Function<? super Waiter, ? extends A> factory,
-                                        BiFunction<? super A, ? super T, Instant> feeder,
-                                        BiFunction<? super A, Consumer<? super R>, Instant> flusher) {
-        // 0. initial
-        //   - downstream is waiting on upstream to start
-        // 1. factory is initially called with Blocker to produce initial state
-        //   - can store Blocker on state
-        // 2. feeder is called with state and element
+    public interface ProducerControl<T> {
+        Instant deadline();
+        void deferDeadline(Instant deadline);
+        void awaitConsumer() throws InterruptedException;
+        T input();
+    }
+    
+    public interface ConsumerControl<T> {
+        Instant deadline();
+        void deferDeadline(Instant deadline);
+        void deferOutput(T output);
+    }
+    
+    public static <T,U> void boundary(Iterable<? extends T> source,
+                                      Instant initialDeadline,
+                                      Sink<? super ProducerControl<T>> producer,
+                                      Sink<? super ConsumerControl<U>> consumer) {
+        // TODO: Handle 'done' signal and downstream short-circuiting
+        
+        // initial
+        //   - downstream waits for initial deadline
+        // when producer is called:
         //   - can accumulate element onto state
         //   - can store weight on state to tell if we should block, drop tail, etc
-        //   - return an instant to indicate when flushing should resume
-        // 3. flusher is called with state
-        //   - can emit output to consumer
+        //   - return an instant to indicate when consumer should be called next
+        // when consumer is called: (deadline expires)
+        //   - can flush output to consumer
         //   - can update state to reset window or remove element(s)
-        //   - return an instant to indicate when feeding should resume
+        //   - return an instant to indicate when consumer should be called next
         
         // Problem?: upstream can block before downstream has a deadline
         // Problem: feeder/flusher can throw checked exceptions
@@ -513,38 +540,365 @@ public class Recipes {
         // Upstream blocks waiting for downstream to consume state
         // Downstream blocks waiting for upstream to prepare state
         
-        Waiter waiter = () -> {};
     }
     
+    private static final Iterator<Object> FAKE_ITER = new Iterator<>() {
+        @Override public boolean hasNext() { return true; }
+        @Override public Object next() { return null; }
+    };
+    @SuppressWarnings("unchecked")
+    private static <T> Iterator<T> fakeIter() {
+        return (Iterator<T>) FAKE_ITER;
+    }
+    
+    // TODO: Fix broken usages of Instant.now() over ctl.deadline()
+    
     public static void main() {
-        boundary(List.of(1),
-                 b -> new Object(){
-                     final Waiter waiter = b;
-                     List<Integer> window = null;
-                     Instant nextDeadline = Instant.MAX;
-                 },
-                 (state, el) -> {
-                     while (state.window != null && state.window.size() >= 10) {
-                         state.waiter.await();
-                     }
-                     boolean open = state.window != null;
-                     if (!open) {
-                         state.window = new ArrayList<>(10);
-                     }
-                     state.window.add(el);
-                     if (!open) {
-                         state.nextDeadline = Instant.now().plusSeconds(5);
-                     }
-                     return state.nextDeadline;
-                 },
-                 (state, sink) -> {
-                     state.waiter.await();
-                     sink.accept(state.window);
-                     state.window = null;
-                     return Instant.MIN; // Do not block upstream
-                 }
+        // collectWithin
+        var state1 = new Object(){
+            List<Integer> window = null;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                while (state1.window != null && state1.window.size() >= 10) {
+                    ctl.awaitConsumer();
+                }
+                boolean open = state1.window != null;
+                if (!open) {
+                    state1.window = new ArrayList<>(10);
+                }
+                state1.window.add(ctl.input());
+                if (!open) {
+                    ctl.deferDeadline(Instant.now().plusSeconds(5));
+                }
+            },
+            ctl -> {
+                ctl.deferOutput(state1.window);
+                state1.window = null;
+                ctl.deferDeadline(Instant.MAX); // Wait indefinitely for next window
+            }
         );
         
-        // Is this worth it, over just implementing accumulate(), finish(), consume()?
+        // batchWeighted (+ buffer/conflate)
+        var state9 = new Object(){
+            List<Integer> window = null;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                // For buffer/conflate, adjust or reset the window, or throw, instead of waiting
+                while (state9.window != null && state9.window.size() >= 10) {
+                    ctl.awaitConsumer();
+                }
+                if (state9.window == null) {
+                    state9.window = new ArrayList<>(10);
+                }
+                state9.window.add(ctl.input());
+                ctl.deferDeadline(Instant.MIN);
+            },
+            ctl -> {
+                ctl.deferOutput(state9.window);
+                state9.window = null;
+                ctl.deferDeadline(Instant.MAX);
+            }
+        );
+        
+        // throttleFirst
+        var state2 = new Object(){
+            int element;
+            boolean present;
+            Instant coolDownDeadline = Instant.MIN;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                if (state2.present || state2.coolDownDeadline.isAfter(Instant.now())) {
+                    return;
+                }
+                state2.present = true;
+                state2.element = ctl.input();
+                ctl.deferDeadline(Instant.MIN);
+            },
+            ctl -> {
+                state2.present = false;
+                ctl.deferOutput(state2.element);
+                ctl.deferDeadline(Instant.MAX);
+                state2.coolDownDeadline = Instant.now().plusSeconds(5);
+            }
+        );
+        
+        // throttleLast
+        var state3 = new Object(){
+            int element;
+            boolean present;
+        };
+        boundary(
+            List.of(1),
+            Instant.now().plusSeconds(5),
+            ctl -> {
+                state3.present = true;
+                state3.element = ctl.input();
+            },
+            ctl -> {
+                if (state3.present) {
+                    state3.present = false;
+                    ctl.deferOutput(state3.element);
+                }
+                ctl.deferDeadline(ctl.deadline().plusSeconds(5));
+            }
+        );
+        
+        // throttleLatest
+        var state4 = new Object(){
+            int curr;
+            int next;
+            boolean currPresent;
+            boolean nextPresent;
+            Instant coolDownDeadline = Instant.MIN;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                if (!state4.currPresent) {
+                    state4.curr = ctl.input();
+                    state4.currPresent = true;
+                    ctl.deferDeadline(state4.coolDownDeadline);
+                } else {
+                    state4.next = ctl.input();
+                    state4.nextPresent = true;
+                }
+            },
+            ctl -> {
+                state4.coolDownDeadline = Instant.now().plusSeconds(5);
+                ctl.deferOutput(state4.curr);
+                if (state4.currPresent = state4.nextPresent) {
+                    state4.curr = state4.next;
+                    state4.nextPresent = false;
+                    ctl.deferDeadline(state4.coolDownDeadline);
+                } else {
+                    ctl.deferDeadline(Instant.MAX);
+                }
+            }
+        );
+        
+        // delayWith
+        class Expiring implements Comparable<Expiring> {
+            final int element;
+            final Instant deadline;
+            
+            Expiring(int element, Instant deadline) {
+                this.element = element;
+                this.deadline = deadline;
+            }
+            
+            public int compareTo(Expiring other) {
+                return deadline.compareTo(other.deadline);
+            }
+        }
+        var state7 = new Object(){
+            final PriorityQueue<Expiring> pq = new PriorityQueue<>();
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                Instant deadline = Instant.now().plusSeconds(ctl.input());
+                Expiring e = new Expiring(ctl.input(), deadline);
+                state7.pq.offer(e);
+                if (state7.pq.peek() == e) {
+                    ctl.deferDeadline(deadline);
+                }
+            },
+            ctl -> {
+                ctl.deferOutput(state7.pq.poll().element);
+                Expiring head = state7.pq.peek();
+                if (head != null) {
+                    ctl.deferDeadline(head.deadline);
+                } else {
+                    ctl.deferDeadline(Instant.MAX);
+                }
+            }
+        );
+        
+        // extrapolate
+        var state5 = new Object(){
+            final Deque<Integer> queue = new ArrayDeque<>(10);
+            Iterator<Integer> iter;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                // Optional blocking for boundedness
+                while (state5.queue.size() >= 10) {
+                    ctl.awaitConsumer();
+                }
+                state5.queue.offer(ctl.input());
+                state5.iter = null;
+                ctl.deferDeadline(Instant.MIN);
+            },
+            ctl -> {
+                if (state5.queue.size() > 1) {
+                    ctl.deferOutput(state5.queue.poll());
+                    ctl.deferDeadline(Instant.MIN);
+                } else {
+                    if (state5.iter == null) {
+                        int out = state5.queue.poll();
+                        state5.iter = Stream.iterate(out + 1,
+                                                     i -> i < out + 10,
+                                                     i -> i + 1).iterator();
+                        ctl.deferOutput(out);
+                    } else {
+                        ctl.deferOutput(state5.iter.next());
+                    }
+                    ctl.deferDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
+                }
+            }
+        );
+        
+        // backpressureTimeout
+        var state6 = new Object(){
+            final Deque<Expiring> queue = new ArrayDeque<>();
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                Instant now = Instant.now();
+                Expiring head = state6.queue.peek();
+                if (head != null && head.deadline.isBefore(now)) {
+                    throw new IllegalStateException();
+                }
+                Expiring e = new Expiring(ctl.input(), now.plusSeconds(5));
+                state6.queue.offer(e);
+                ctl.deferDeadline(Instant.MIN);
+            },
+            ctl -> {
+                Instant now = Instant.now();
+                Expiring head = state6.queue.poll();
+                if (head.deadline.isBefore(now)) {
+                    throw new IllegalStateException();
+                }
+                ctl.deferOutput(head.element);
+                ctl.deferDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
+            }
+        );
+        
+        // debounce
+        var state8 = new Object(){
+            int element;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                state8.element = ctl.input();
+                ctl.deferDeadline(Instant.now().plusSeconds(5));
+            },
+            ctl -> {
+                ctl.deferOutput(state8.element);
+                ctl.deferDeadline(Instant.MAX);
+            }
+        );
+        
+        // keepAlive
+        var state0 = new Object(){
+            final Deque<Integer> queue = new ArrayDeque<>();
+        };
+        boundary(
+            List.of(1),
+            Instant.now().plusSeconds(5),
+            ctl -> {
+                // Optional blocking for boundedness
+                while (state0.queue.size() >= 10) {
+                    ctl.awaitConsumer();
+                }
+                state0.queue.offer(ctl.input());
+                ctl.deferDeadline(Instant.MIN);
+            },
+            ctl -> {
+                Integer next = state0.queue.poll();
+                if (next != null) {
+                    ctl.deferOutput(next);
+                    ctl.deferDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
+                } else {
+                    ctl.deferOutput(22);
+                    ctl.deferDeadline(Instant.now().plusSeconds(5));
+                }
+            }
+        );
+        
+        // throttleLeakyBucket
+        var state10 = new Object(){
+            final Deque<Integer> queue = new ArrayDeque<>();
+            Instant coolDownDeadline = Instant.MIN;
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                if (state10.queue.size() >= 10) {
+                    return;
+                }
+                state10.queue.offer(ctl.input());
+                ctl.deferDeadline(state10.coolDownDeadline);
+            },
+            ctl -> {
+                state10.coolDownDeadline = Instant.now().plusSeconds(1);
+                ctl.deferOutput(state10.queue.poll());
+                ctl.deferDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
+            }
+        );
+        
+        // throttleTokenBucket
+        var state11 = new Object(){
+            final Deque<Integer> queue = new ArrayDeque<>();
+            final long accrualRateNanos = Duration.ofSeconds(1).toNanos();
+            final long tokenLimit = 5;
+            long tokens = 0;
+            Instant lastObservedAccrual = Instant.now();
+        };
+        boundary(
+            List.of(1),
+            Instant.MAX,
+            ctl -> {
+                if (state11.queue.size() >= 10) {
+                    return;
+                }
+                state11.queue.offer(ctl.input());
+                if (state11.queue.size() == 1) {
+                    ctl.deferDeadline(Instant.MIN);
+                }
+            },
+            ctl -> {
+                // Increase tokens based on actual amount of time that passed, and emit if we can
+                Instant now = Instant.now();
+                long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(state11.lastObservedAccrual, now);
+                long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % state11.accrualRateNanos;
+                long newTokens = nanosSinceLastObservedAccrual / state11.accrualRateNanos;
+                if (newTokens > 0) {
+                    state11.lastObservedAccrual = now.minusNanos(nanosSinceLastAccrual);
+                    state11.tokens = Math.min(state11.tokens + newTokens, state11.tokenLimit) - 1; // Use one token now
+                    ctl.deferOutput(state11.queue.poll());
+                } else if (state11.tokens > 0) {
+                    state11.tokens--;
+                    ctl.deferOutput(state11.queue.poll());
+                }
+                // Schedule next emission
+                if (state11.queue.isEmpty()) {
+                    ctl.deferDeadline(Instant.MAX);
+                } else if (state11.tokens > 0) {
+                    ctl.deferDeadline(Instant.MIN);
+                } else {
+                    long nanosTilNextAccrual = state11.accrualRateNanos - nanosSinceLastAccrual;
+                    ctl.deferDeadline(now.plusNanos(nanosTilNextAccrual));
+                }
+            }
+        );
     }
 }
