@@ -687,11 +687,11 @@ public class Recipes {
         );
         
         // delayWith
-        class Expiring implements Comparable<Expiring> {
-            final int element;
+        class Expiring<T> implements Comparable<Expiring<T>> {
+            final T element;
             final Instant deadline;
             
-            Expiring(int element, Instant deadline) {
+            Expiring(T element, Instant deadline) {
                 this.element = element;
                 this.deadline = deadline;
             }
@@ -701,14 +701,14 @@ public class Recipes {
             }
         }
         var state7 = new Object(){
-            final PriorityQueue<Expiring> pq = new PriorityQueue<>();
+            final PriorityQueue<Expiring<Integer>> pq = new PriorityQueue<>();
         };
         boundary(
             List.of(1),
             Instant.MAX,
             ctl -> {
                 Instant deadline = Instant.now().plusSeconds(ctl.input());
-                Expiring e = new Expiring(ctl.input(), deadline);
+                Expiring<Integer> e = new Expiring<>(ctl.input(), deadline);
                 state7.pq.offer(e);
                 if (state7.pq.peek() == e) {
                     ctl.deferDeadline(deadline);
@@ -716,7 +716,7 @@ public class Recipes {
             },
             ctl -> {
                 ctl.deferOutput(state7.pq.poll().element);
-                Expiring head = state7.pq.peek();
+                Expiring<Integer> head = state7.pq.peek();
                 if (head != null) {
                     ctl.deferDeadline(head.deadline);
                 } else {
@@ -856,48 +856,76 @@ public class Recipes {
         );
         
         // throttleTokenBucket
+        class Weighted<T> {
+            final T element;
+            final long cost;
+            
+            Weighted(T element, long cost) {
+                this.element = element;
+                this.cost = cost;
+            }
+        }
         var state11 = new Object(){
-            final Deque<Integer> queue = new ArrayDeque<>();
+            final Deque<Weighted<Integer>> queue = new ArrayDeque<>();
+            final ToLongFunction<Integer> costFn = el -> el;
             final long accrualRateNanos = Duration.ofSeconds(1).toNanos();
             final long tokenLimit = 5;
+            final long costLimit = 10;
+            long tempTokenLimit = 0;
             long tokens = 0;
+            long cost = 0;
             Instant lastObservedAccrual = Instant.now();
         };
         boundary(
             List.of(1),
             Instant.MAX,
             ctl -> {
-                if (state11.queue.size() >= 10) {
-                    return;
+                // Optional blocking for boundedness, here based on cost rather than queue size
+                while (state11.cost >= state11.costLimit) {
+                    ctl.awaitConsumer();
                 }
-                state11.queue.offer(ctl.input());
+                int element = ctl.input();
+                long cost = state11.costFn.applyAsLong(element);
+                state11.cost += cost;
+                state11.queue.offer(new Weighted<>(element, cost));
                 if (state11.queue.size() == 1) {
                     ctl.deferDeadline(Instant.MIN);
                 }
             },
             ctl -> {
-                // Increase tokens based on actual amount of time that passed, and emit if we can
+                // Increase tokens based on actual amount of time that passed
                 Instant now = Instant.now();
                 long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(state11.lastObservedAccrual, now);
                 long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % state11.accrualRateNanos;
                 long newTokens = nanosSinceLastObservedAccrual / state11.accrualRateNanos;
                 if (newTokens > 0) {
                     state11.lastObservedAccrual = now.minusNanos(nanosSinceLastAccrual);
-                    state11.tokens = Math.min(state11.tokens + newTokens, state11.tokenLimit) - 1; // Use one token now
-                    ctl.deferOutput(state11.queue.poll());
-                } else if (state11.tokens > 0) {
-                    state11.tokens--;
-                    ctl.deferOutput(state11.queue.poll());
+                    state11.tokens = Math.min(state11.tokens + newTokens, Math.max(state11.tokenLimit, state11.tempTokenLimit));
                 }
-                // Schedule next emission
-                if (state11.queue.isEmpty()) {
-                    ctl.deferDeadline(Instant.MAX);
-                } else if (state11.tokens > 0) {
-                    ctl.deferDeadline(Instant.MIN);
+                // Emit if we can, then schedule next emission
+                Weighted<Integer> head = state11.queue.peek();
+                if (state11.tokens >= head.cost) {
+                    ctl.deferOutput(head.element);
+                    state11.tempTokenLimit = 0;
+                    state11.tokens = Math.min(state11.tokens - head.cost, state11.tokenLimit); // handles negative costs
+                    state11.cost -= head.cost; // TODO? Allow negative cumulative cost?
+                    state11.queue.poll();
+                    head = state11.queue.peek();
+                    if (head == null) {
+                        ctl.deferDeadline(Instant.MAX);
+                        return;
+                    }
+                    if (state11.tokens >= head.cost) {
+                        ctl.deferDeadline(Instant.MIN);
+                        return;
+                    }
                 } else {
-                    long nanosTilNextAccrual = state11.accrualRateNanos - nanosSinceLastAccrual;
-                    ctl.deferDeadline(now.plusNanos(nanosTilNextAccrual));
+                    // This will temporarily allow a higher token limit if head.cost > tokenLimit
+                    state11.tempTokenLimit = head.cost;
                 }
+                // Schedule to wake up when we have enough tokens for next emission
+                long tokensNeeded = head.cost - state11.tokens;
+                ctl.deferDeadline(now.plusNanos(state11.accrualRateNanos * tokensNeeded - nanosSinceLastAccrual));
             }
         );
     }
