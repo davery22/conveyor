@@ -22,52 +22,80 @@ public class Recipes {
     private Recipes() {} // Utility
     
     public static void main(String[] args) throws ExecutionException, InterruptedException {
-        var in = new Iterator<String>() {
-            final BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-            boolean done = false;
-            String next = null;
-            
-            @Override
-            public boolean hasNext() {
-                if (done) {
-                    return false;
-                }
-                if (next != null) {
-                    return true;
-                }
-                try {
-                    next = reader.readLine();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-                if ("stop".equalsIgnoreCase(next)) {
-                    next = null;
-                    done = true;
-                    return false;
-                }
-                return true;
-            }
-            
-            @Override
-            public String next() {
-                if (done) {
-                    throw new NoSuchElementException();
-                }
-                String s = next;
-                next = null;
-                return s;
-            }
-        };
+//        var in = new Iterator<String>() {
+//            final BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+//            boolean done = false;
+//            String next = null;
+//
+//            @Override
+//            public boolean hasNext() {
+//                if (done) {
+//                    return false;
+//                }
+//                if (next != null) {
+//                    return true;
+//                }
+//                try {
+//                    next = reader.readLine();
+//                } catch (IOException e) {
+//                    throw new UncheckedIOException(e);
+//                }
+//                if ("stop".equalsIgnoreCase(next)) {
+//                    next = null;
+//                    done = true;
+//                    return false;
+//                }
+//                return true;
+//            }
+//
+//            @Override
+//            public String next() {
+//                if (done) {
+//                    throw new NoSuchElementException();
+//                }
+//                String s = next;
+//                next = null;
+//                return s;
+//            }
+//        };
         
 //        Recipes.groupedWithin(() -> in, 10, Duration.ofSeconds(5), System.out::println);
-        Recipes.collectWithin(
-            () -> in,
-            () -> new ArrayList<>(10),
-            Collection::add,
-            window -> window.size() >= 10,
-            Duration.ofSeconds(5),
-            System.out::println
-        );
+//        Recipes.collectWithin(
+//            () -> in,
+//            () -> new ArrayList<>(10),
+//            Collection::add,
+//            window -> window.size() >= 10,
+//            Duration.ofSeconds(5),
+//            System.out::println
+//        );
+        
+        
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            var tunnel = Recipes.collectWithin(
+                () -> new ArrayList<>(10),
+                Collection::add,
+                window -> window.size() >= 10,
+                Duration.ofSeconds(5)
+            );
+            
+            // Producer
+            scope.fork(() -> {
+                BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+                for (String line; !"stop".equalsIgnoreCase(line = reader.readLine());) {
+                    tunnel.offer(line);
+                }
+                tunnel.complete();
+                return null;
+            });
+            
+            // Consumer
+            scope.fork(() -> {
+                tunnel.forEach(System.out::println);
+                return null;
+            });
+            
+            scope.join().throwIfFailed();
+        }
     }
     
     // Emits a window when any of the following occurs:
@@ -549,7 +577,7 @@ public class Recipes {
         default Clock clock() {
             return Clock.systemUTC();
         }
-        Instant initialDeadline();
+        Instant init();
         void produce(ProducerControl<In> ctl) throws InterruptedException;
         void consume(ConsumerControl<Out> ctl) throws InterruptedException;
         void complete(CompleterControl ctl) throws InterruptedException;
@@ -569,6 +597,7 @@ public class Recipes {
     public interface ConsumerControl<T> {
         void latchDeadline(Instant deadline);
         void latchOutput(T output);
+        void latchClose();
     }
     
     private static class TimedTunnel<In, Out> implements Tunnel<In, Out> {
@@ -576,11 +605,13 @@ public class Recipes {
         final ReentrantLock lock = new ReentrantLock();
         final Condition produced = lock.newCondition();
         final Condition consumed = lock.newCondition();
+        final Condition noProducers = lock.newCondition();
         final TimedProducerControl pctl = new TimedProducerControl();
         final TimedConsumerControl cctl = new TimedConsumerControl();
         Instant deadline = null;
         int state = NOT_STARTED;
         int consumerCallId = 0;
+        boolean isProducerRunning = false;
         
         private static final int NOT_STARTED = 0;
         private static final int STARTED = 1;
@@ -634,6 +665,7 @@ public class Recipes {
         
         class TimedConsumerControl implements ConsumerControl<Out> {
             boolean accessible = false;
+            boolean close = false;
             Out latchedOutput = null;
             Instant latchedDeadline = null;
             
@@ -652,11 +684,19 @@ public class Recipes {
                 }
                 latchedOutput = Objects.requireNonNull(output);
             }
+            
+            @Override
+            public void latchClose() {
+                if (!accessible) {
+                    throw new IllegalStateException();
+                }
+                close = true;
+            }
         }
         
-        protected void init() throws InterruptedException {
+        private void init() throws InterruptedException {
             //assert lock.isHeldByCurrentThread();
-            deadline = config.initialDeadline();
+            deadline = config.init();
         }
         
         private void initIfNeeded() throws InterruptedException {
@@ -678,11 +718,30 @@ public class Recipes {
             }
         }
         
+        // We use an extra Condition and flag to prevent other producers from
+        // grabbing the lock when a producer calls awaitConsumer().
+        // This is particularly important for ensuring that complete() cannot
+        // proceed while another producer is sleeping in awaitConsumer().
+        private void waitToBecomeExclusiveProducer() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            while (isProducerRunning) {
+                noProducers.await();
+            }
+            isProducerRunning = true;
+        }
+        
+        private void releaseExclusiveProducer() {
+            //assert lock.isHeldByCurrentThread();
+            isProducerRunning = false;
+            noProducers.signal();
+        }
+        
         @Override
         public boolean offer(In input) throws InterruptedException {
             Objects.requireNonNull(input);
             lock.lockInterruptibly();
             try {
+                waitToBecomeExclusiveProducer();
                 if (state >= COMPLETED) {
                     return false;
                 }
@@ -697,6 +756,7 @@ public class Recipes {
             } finally {
                 pctl.latchedDeadline = null;
                 pctl.input = null;
+                releaseExclusiveProducer();
                 lock.unlock();
             }
         }
@@ -705,6 +765,7 @@ public class Recipes {
         public void complete() throws InterruptedException {
             lock.lockInterruptibly();
             try {
+                waitToBecomeExclusiveProducer();
                 if (state >= COMPLETED) {
                     return;
                 }
@@ -723,65 +784,73 @@ public class Recipes {
             } finally {
                 pctl.latchedDeadline = null;
                 pctl.input = null;
+                releaseExclusiveProducer();
                 lock.unlock();
             }
         }
         
         @Override
         public Out poll() throws InterruptedException {
-            lock.lockInterruptibly();
-            try {
-                if (state == CLOSED) {
-                    return null;
-                }
-                initIfNeeded();
-                
-                // Await deadline, but try to minimize work
-                Clock clock = config.clock();
-                Instant savedDeadline = null;
-                long nanosRemaining = 0;
-                do {
-                    if (savedDeadline != (savedDeadline = deadline)) {
-                        // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
-                        if (savedDeadline == Instant.MIN) {
-                            break;
-                        } else if (savedDeadline == Instant.MAX) {
-                            nanosRemaining = Long.MAX_VALUE;
-                        } else {
-                            Instant now = clock.instant();
-                            try {
-                                nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
-                            } catch (ArithmeticException e) {
-                                nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
-                            }
-                        }
-                    }
-                    if (nanosRemaining <= 0) {
-                        break;
-                    } else if (nanosRemaining == Long.MAX_VALUE) {
-                        produced.await();
-                    } else {
-                        nanosRemaining = produced.awaitNanos(nanosRemaining);
-                    }
+            for (;;) {
+                lock.lockInterruptibly();
+                try {
                     if (state == CLOSED) {
                         return null;
                     }
-                } while (true);
-                
-                cctl.accessible = true;
-                config.consume(cctl);
-                updateDeadline(cctl.latchedDeadline);
-                return cctl.latchedOutput;
-            } catch (Error | RuntimeException | InterruptedException e) {
-                close();
-                throw e;
-            } finally {
-                cctl.latchedOutput = null;
-                cctl.latchedDeadline = null;
-                cctl.accessible = false;
-                consumerCallId++;
-                consumed.signalAll();
-                lock.unlock();
+                    initIfNeeded();
+                    
+                    // Await deadline, but try to minimize work
+                    Clock clock = config.clock();
+                    Instant savedDeadline = null;
+                    long nanosRemaining = 0;
+                    do {
+                        if (savedDeadline != (savedDeadline = deadline)) {
+                            // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
+                            if (savedDeadline == Instant.MIN) {
+                                break;
+                            } else if (savedDeadline == Instant.MAX) {
+                                nanosRemaining = Long.MAX_VALUE;
+                            } else {
+                                Instant now = clock.instant();
+                                try {
+                                    nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
+                                } catch (ArithmeticException e) {
+                                    nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
+                                }
+                            }
+                        }
+                        if (nanosRemaining <= 0) {
+                            break;
+                        } else if (nanosRemaining == Long.MAX_VALUE) {
+                            produced.await();
+                        } else {
+                            nanosRemaining = produced.awaitNanos(nanosRemaining);
+                        }
+                        if (state == CLOSED) {
+                            return null;
+                        }
+                    } while (true);
+                    
+                    cctl.accessible = true;
+                    config.consume(cctl);
+                    updateDeadline(cctl.latchedDeadline);
+                    if (cctl.close) {
+                        close();
+                    }
+                    if (cctl.latchedOutput != null) {
+                        return cctl.latchedOutput;
+                    }
+                } catch (Error | RuntimeException | InterruptedException e) {
+                    close();
+                    throw e;
+                } finally {
+                    cctl.latchedOutput = null;
+                    cctl.latchedDeadline = null;
+                    cctl.accessible = false;
+                    consumerCallId++;
+                    consumed.signalAll();
+                    lock.unlock();
+                }
             }
         }
         
@@ -799,6 +868,60 @@ public class Recipes {
                 lock.unlock();
             }
         }
+    }
+    
+    public static <T,A> Tunnel<T,A> collectWithin(Supplier<? extends A> supplier,
+                                                  BiConsumer<? super A, ? super T> accumulator,
+                                                  Predicate<? super A> windowReady,
+                                                  Duration windowTimeout) {
+        class CollectWithinConfig implements TimedTunnelConfig<T,A> {
+            boolean done = false;
+            A window = null;
+            
+            @Override
+            public Instant init() {
+                return Instant.MAX;
+            }
+            
+            @Override
+            public void produce(ProducerControl<T> ctl) throws InterruptedException {
+                while (window != null && windowReady.test(window)) {
+                    ctl.awaitConsumer();
+                }
+                boolean open = window != null;
+                if (!open) {
+                    window = Objects.requireNonNull(supplier.get());
+                }
+                accumulator.accept(window, ctl.input());
+                if (windowReady.test(window)) {
+                    ctl.latchDeadline(Instant.MIN);
+                } else if (!open) {
+                    ctl.latchDeadline(Instant.now().plus(windowTimeout));
+                }
+            }
+            
+            @Override
+            public void consume(ConsumerControl<A> ctl) {
+                if (done) {
+                    ctl.latchClose();
+                    if (window == null) {
+                        return;
+                    }
+                }
+                ctl.latchOutput(window);
+                window = null;
+                ctl.latchDeadline(Instant.MAX); // Wait indefinitely for next window to open
+            }
+            
+            @Override
+            public void complete(CompleterControl ctl) {
+                done = true;
+                ctl.latchDeadline(Instant.MIN); // Emit whatever is left right away
+            }
+        }
+        
+        var config = new CollectWithinConfig();
+        return new TimedTunnel<>(config);
     }
     
     public interface Sink<T> {
