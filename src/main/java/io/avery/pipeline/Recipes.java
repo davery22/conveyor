@@ -10,7 +10,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.Collector;
@@ -20,61 +19,7 @@ public class Recipes {
     private Recipes() {} // Utility
     
     public static void main(String[] args) throws ExecutionException, InterruptedException {
-//        var in = new Iterator<String>() {
-//            final BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-//            boolean done = false;
-//            String next = null;
-//
-//            @Override
-//            public boolean hasNext() {
-//                if (done) {
-//                    return false;
-//                }
-//                if (next != null) {
-//                    return true;
-//                }
-//                try {
-//                    next = reader.readLine();
-//                } catch (IOException e) {
-//                    throw new UncheckedIOException(e);
-//                }
-//                if ("stop".equalsIgnoreCase(next)) {
-//                    next = null;
-//                    done = true;
-//                    return false;
-//                }
-//                return true;
-//            }
-//
-//            @Override
-//            public String next() {
-//                if (done) {
-//                    throw new NoSuchElementException();
-//                }
-//                String s = next;
-//                next = null;
-//                return s;
-//            }
-//        };
-        
-//        Recipes.groupedWithin(() -> in, 10, Duration.ofSeconds(5), System.out::println);
-//        Recipes.collectWithin(
-//            () -> in,
-//            () -> new ArrayList<>(10),
-//            Collection::add,
-//            window -> window.size() >= 10,
-//            Duration.ofSeconds(5),
-//            System.out::println
-//        );
-        
-        
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var tunnel = Recipes.collectWithin(
-//                () -> new ArrayList<>(10),
-//                Collection::add,
-//                window -> window.size() >= 10,
-//                Duration.ofSeconds(5)
-//            );
+       try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
             var tunnel = Recipes.throttle(
                 Duration.ofSeconds(1),
                 String::length,
@@ -101,300 +46,6 @@ public class Recipes {
             scope.join().throwIfFailed();
         }
     }
-    
-    // Emits a window when any of the following occurs:
-    //  - The window is filled
-    //  - The upstream completes and the window is non-empty
-    //  - A timeout elapses since the first element of the window arrived
-    
-    // Alternatives:
-    //  1. A timeout elapses since the last window was emitted
-    //    - But this means the new window may be empty when the timeout elapses!
-    //    - Two options:
-    //      1. Reset the timeout when it elapses
-    //        - This means that the next actual window may emit at an arbitrary time
-    //        - Surprising, and arguably a violation of contract (says 'last window', not 'last timeout')
-    //      2. Saturate the timeout, emit when the first element of the next window arrives
-    //        - Prioritizes responding to the downstream over batching
-    //        - Unclear from contract
-    //  2. Periodic timeout + allow empty windows
-    //    - Prioritizes responding to downstream, even if just noise
-    
-    // Augments:
-    //  1. Control emission rate / set a maximum rate (throttle)
-    //    - Maybe this can be done separately, with a downstream operator?
-    
-    // Notes:
-    //  - Multiple open windows would require timeouts for each one (based on when its first element arrived)
-    //    - In that case, multiple producers implies multiple consumers, ie the whole operator is duplicated
-    //  - Multiple producers can accumulate onto the same window, but the locking prevents any parallelism there
-    
-    public static <T> void groupedWithin(Iterable<T> source,
-                                         int windowSize,
-                                         Duration windowTimeout,
-                                         Consumer<? super List<T>> downstream) throws InterruptedException, ExecutionException {
-        collectWithin(
-            source,
-            () -> new ArrayList<>(windowSize),
-            Collection::add,
-            window -> window.size() >= windowSize,
-            windowTimeout,
-            downstream
-        );
-    }
-    
-    // Note this version of collectWithin uses an async boundary, for more accurate timing.
-    // A synchronous version could be written, but could only check timing when elements arrive.
-    
-    public static <T,A> void collectWithin(Iterable<? extends T> source,
-                                           Supplier<? extends A> supplier,
-                                           BiConsumer<? super A, ? super T> accumulator,
-                                           Predicate<? super A> windowReady,
-                                           Duration windowTimeout,
-                                           Consumer<? super A> downstream) throws InterruptedException, ExecutionException {
-        if (windowTimeout.isNegative()) {
-            throw new IllegalArgumentException("windowTimeout must be positive");
-        }
-        
-        long tempTimeout;
-        try {
-            tempTimeout = windowTimeout.toNanos();
-        } catch (ArithmeticException e) {
-            tempTimeout = Long.MAX_VALUE;
-        }
-        long timeoutNanos = tempTimeout;
-        
-        class Organizer {
-            final Lock lock = new ReentrantLock();
-            final Condition filled = lock.newCondition();
-            final Condition flushed = lock.newCondition();
-            long nextDeadline = System.nanoTime() + Long.MAX_VALUE; // 'Infinite' timeout
-            boolean done = false;
-            boolean open = false;
-            A openWindow = null;
-            
-            void accumulate(T item) throws InterruptedException {
-                lock.lockInterruptibly();
-                try {
-                    // 1. Wait for consumer to flush
-                    // 2. Fill the window
-                    // 3. Wake up consumer to flush
-                    while (open && windowReady.test(openWindow)) {
-                        flushed.await();
-                    }
-                    if (!open) {
-                        openWindow = supplier.get();
-                    }
-                    accumulator.accept(openWindow, item);
-                    if (!open) {
-                        nextDeadline = System.nanoTime() + timeoutNanos;
-                        open = true;
-                        filled.signal(); // Wake up consumer to update its deadline
-                    }
-                    if (windowReady.test(openWindow)) {
-                        filled.signal();
-                    }
-                } finally {
-                    lock.unlock();
-                }
-            }
-            
-            void finish() throws InterruptedException {
-                lock.lockInterruptibly();
-                try {
-                    done = true;
-                    filled.signal();
-                } finally {
-                    lock.unlock();
-                }
-            }
-            
-            void consume() throws InterruptedException {
-                while (true) {
-                    A closedWindow;
-                    lock.lockInterruptibly();
-                    try {
-                        // 1. Wait for producer(s) to fill the window, finish, or timeout
-                        // 2. Drain the window
-                        // 3. Wake up producer(s) to refill
-                        if ((!open || !windowReady.test(openWindow)) && !done) {
-                            do {
-                                long nanosRemaining = nextDeadline - System.nanoTime();
-                                if (nanosRemaining <= 0L) {
-                                    break;
-                                }
-                                filled.awaitNanos(nanosRemaining);
-                            } while ((!open || !windowReady.test(openWindow)) && !done);
-                        }
-                        if (!open) { // Implies done
-                            break;
-                        }
-                        closedWindow = openWindow;
-                        openWindow = null;
-                        open = false;
-                        nextDeadline = System.nanoTime() + Long.MAX_VALUE; // 'Infinite' timeout
-                        flushed.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                    downstream.accept(closedWindow);
-                }
-            }
-        }
-        
-        var organizer = new Organizer();
-        
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            // Producer
-            scope.fork(() -> {
-                for (var item : source) {
-                    organizer.accumulate(item);
-                }
-                organizer.finish();
-                return null;
-            });
-            
-            // Consumer
-            scope.fork(() -> {
-                organizer.consume();
-                return null;
-            });
-            
-            scope.join().throwIfFailed();
-        }
-    }
-    
-    public static <T,A> void collectWithinSync(Iterable<? extends T> source,
-                                               Supplier<? extends A> supplier,
-                                               BiConsumer<? super A, ? super T> accumulator,
-                                               Predicate<? super A> windowReady,
-                                               Duration windowTimeout,
-                                               Consumer<? super A> downstream) throws InterruptedException, ExecutionException {
-        if (windowTimeout.isNegative()) {
-            throw new IllegalArgumentException("windowTimeout must be positive");
-        }
-        
-        long tempTimeout;
-        try {
-            tempTimeout = windowTimeout.toNanos();
-        } catch (ArithmeticException e) {
-            tempTimeout = Long.MAX_VALUE;
-        }
-        long timeoutNanos = tempTimeout;
-        
-        class Organizer {
-            boolean open = false;
-            long nextDeadline = 0L;
-            A openWindow = null;
-            
-            void accumulate(T item) {
-                if (!open) {
-                    openWindow = supplier.get();
-                }
-                accumulator.accept(openWindow, item);
-                if (!open) {
-                    nextDeadline = System.nanoTime() + timeoutNanos;
-                    open = true;
-                }
-                if (System.nanoTime() - nextDeadline >= 0 || windowReady.test(openWindow)) {
-                    emit();
-                }
-            }
-            
-            void finish() {
-                if (open) {
-                    emit();
-                }
-            }
-            
-            void emit() {
-                var closedWindow = openWindow;
-                openWindow = null;
-                open = false;
-                downstream.accept(closedWindow);
-            }
-        }
-        
-        var organizer = new Organizer();
-        
-        for (var item : source) {
-            organizer.accumulate(item);
-        }
-        organizer.finish();
-    }
-    
-    public static <T> void delay(Iterable<? extends T> source,
-                                 Function<? super T, Instant> deadline,
-                                 Consumer<? super T> downstream) throws InterruptedException, ExecutionException {
-        class Organizer {
-            final DelayedT<T> SENTINEL = null;
-            final DelayQueue<DelayedT<T>> queue = new DelayQueue<>();
-            
-            void accumulate(T item) {
-                queue.put(new DelayedT<>(item, deadline.apply(item)));
-            }
-            
-            void finish() {
-                // TODO: A sentinel won't work here, because it would need to be a Delayed whose deadline is
-                //  *just after* the last normal element's deadline.
-                //  What we really want is to tell the consumer that no more elements are coming (so don't bother waiting).
-                queue.put(SENTINEL);
-            }
-            
-            void consume() throws InterruptedException {
-                for (DelayedT<T> d; (d = queue.take()) != SENTINEL; ) {
-                    downstream.accept(d.el);
-                }
-            }
-        }
-        
-        var organizer = new Organizer();
-        
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            scope.fork(() -> {
-                for (var item : source) {
-                    organizer.accumulate(item);
-                }
-                organizer.finish();
-                return null;
-            });
-            
-            scope.fork(() -> {
-                organizer.consume();
-                return null;
-            });
-            
-            scope.join().throwIfFailed();
-        }
-    }
-    
-    private static class DelayedT<T> implements Delayed {
-        T el;
-        Instant deadline;
-        
-        DelayedT(T el, Instant deadline) {
-            this.el = el;
-            this.deadline = deadline;
-        }
-        
-        @Override
-        public long getDelay(TimeUnit unit) {
-            return unit.toChronoUnit().between(Instant.now(), deadline);
-        }
-        
-        @Override
-        public int compareTo(Delayed o) {
-            if (o instanceof DelayedT<?> dt) {
-                return this.deadline.compareTo(dt.deadline);
-            }
-            return this.deadline.compareTo(Instant.now().plusNanos(o.getDelay(TimeUnit.NANOSECONDS)));
-        }
-    }
-    
-    // TODO: Should we prevent accumulating after finish()? (Guaranteed? Even with concurrent producers?)
-    //       Should we prevent consuming after finish()?
-    //       Should we control the consume loop, or only consume one item per invocation?
-    //       Can downstream cancel? Does emission return boolean?
     
     // ✅
     public static void backpressureTimeout() {
@@ -556,11 +207,10 @@ public class Recipes {
         void complete() throws InterruptedException;
         
         Out poll() throws InterruptedException;
-        void close() throws InterruptedException;
+        void close();
         
         default void forEach(Consumer<? super Out> action) throws InterruptedException {
-            Out e;
-            while ((e = poll()) != null) {
+            for (Out e; (e = poll()) !=null; ) {
                 action.accept(e);
             }
         }
@@ -569,8 +219,7 @@ public class Recipes {
             BiConsumer<A, ? super Out> accumulator = collector.accumulator();
             Function<A, R> finisher = collector.finisher();
             A acc = collector.supplier().get();
-            Out e;
-            while ((e = poll()) != null) {
+            for (Out e; (e = poll()) != null; ) {
                 accumulator.accept(acc, e);
             }
             return finisher.apply(acc);
@@ -585,23 +234,24 @@ public class Recipes {
         void produce(ProducerControl<In> ctl) throws InterruptedException;
         void consume(ConsumerControl<Out> ctl) throws InterruptedException;
         void complete(CompleterControl ctl) throws InterruptedException;
-    }
-    
-    public interface CompleterControl {
-        void latchDeadline(Instant deadline);
-        boolean awaitConsumer() throws InterruptedException;
-    }
-    
-    public interface ProducerControl<T> {
-        void latchDeadline(Instant deadline);
-        boolean awaitConsumer() throws InterruptedException;
-        T input();
-    }
-    
-    public interface ConsumerControl<T> {
-        void latchDeadline(Instant deadline);
-        void latchOutput(T output);
-        void latchClose();
+        
+        interface CompleterControl {
+            void latchDeadline(Instant deadline);
+            boolean awaitConsumer() throws InterruptedException;
+        }
+        
+        interface ProducerControl<T> {
+            T input();
+            void latchDeadline(Instant deadline);
+            boolean awaitConsumer() throws InterruptedException;
+        }
+        
+        interface ConsumerControl<T> {
+            void latchClose();
+            void latchOutput(T output);
+            void latchDeadline(Instant deadline);
+            void signalProducer();
+        }
     }
     
     private static class TimedTunnel<In, Out> implements Tunnel<In, Out> {
@@ -613,26 +263,31 @@ public class Recipes {
         final TimedProducerControl pctl = new TimedProducerControl();
         final TimedConsumerControl cctl = new TimedConsumerControl();
         Instant deadline = null;
-        int state = NOT_STARTED;
-        int consumerCallId = 0;
+        boolean isProducerWaiting = false;
         boolean isProducerRunning = false;
+        int state = NEW;
         
-        private static final int NOT_STARTED = 0;
-        private static final int STARTED = 1;
-        private static final int COMPLETED = 2;
+        // Possible state transitions:
+        // NEW -> RUNNING -> COMPLETING -> CLOSED
+        // NEW -> RUNNING -> CLOSED
+        // NEW -> CLOSED
+        private static final int NEW = 0;
+        private static final int RUNNING = 1;
+        private static final int COMPLETING = 2;
         private static final int CLOSED = 3;
         
         TimedTunnel(TimedTunnelConfig<In, Out> config) {
             this.config = config;
         }
         
-        class TimedProducerControl implements ProducerControl<In>, CompleterControl {
+        class TimedProducerControl implements TimedTunnelConfig.ProducerControl<In>, TimedTunnelConfig.CompleterControl {
+            boolean accessible = false;
             In input = null;
             Instant latchedDeadline = null;
             
             @Override
             public void latchDeadline(Instant deadline) {
-                if (input == null) {
+                if (!accessible) {
                     throw new IllegalStateException();
                 }
                 latchedDeadline = Objects.requireNonNull(deadline);
@@ -640,34 +295,29 @@ public class Recipes {
             
             @Override
             public boolean awaitConsumer() throws InterruptedException {
-                // Other producers may run and overwrite this shared control while we wait, so save/restore its fields.
-                In savedInput = input;
-                Instant savedDeadline = latchedDeadline;
-                int savedConsumerCallId = consumerCallId;
-                try {
-                    while (savedConsumerCallId == consumerCallId) {
-                        consumed.await(); // Throws IMSE if lock is not held
-                        if (state == CLOSED) {
-                            return false;
-                        }
-                    }
-                    return true;
-                } finally {
-                    input = savedInput;
-                    latchedDeadline = savedDeadline;
+                if (!accessible) {
+                    throw new IllegalStateException();
                 }
+                isProducerWaiting = true;
+                do {
+                    consumed.await();
+                    if (state == CLOSED) {
+                        return false;
+                    }
+                } while (isProducerWaiting);
+                return true;
             }
             
             @Override
             public In input() {
-                if (input == null) {
+                if (!accessible) {
                     throw new IllegalStateException();
                 }
                 return input;
             }
         }
         
-        class TimedConsumerControl implements ConsumerControl<Out> {
+        class TimedConsumerControl implements TimedTunnelConfig.ConsumerControl<Out> {
             boolean accessible = false;
             boolean close = false;
             Out latchedOutput = null;
@@ -696,19 +346,22 @@ public class Recipes {
                 }
                 close = true;
             }
+            
+            @Override
+            public void signalProducer() {
+                if (!accessible) {
+                    throw new IllegalStateException();
+                }
+                isProducerWaiting = false;
+                consumed.signal();
+            }
         }
         
-        private void init() {
+        private void initIfNew() {
             //assert lock.isHeldByCurrentThread();
-            deadline = config.init();
-        }
-        
-        private void initIfNeeded() {
-            //assert lock.isHeldByCurrentThread();
-            if (state == NOT_STARTED) {
-                init();
-                Objects.requireNonNull(deadline);
-                state = STARTED;
+            if (state == NEW) {
+                deadline = Objects.requireNonNull(config.init());
+                state = RUNNING;
             }
         }
         
@@ -726,69 +379,76 @@ public class Recipes {
         // grabbing the lock when a producer calls awaitConsumer().
         // This is particularly important for ensuring that complete() cannot
         // proceed while another producer is sleeping in awaitConsumer().
-        private void acquireExclusiveProducer() throws InterruptedException {
-            //assert lock.isHeldByCurrentThread();
-            while (isProducerRunning) {
-                noProducers.await();
-            }
-            isProducerRunning = true;
-        }
-        
-        private void releaseExclusiveProducer() {
-            //assert lock.isHeldByCurrentThread();
-            isProducerRunning = false;
-            noProducers.signal();
-        }
         
         @Override
         public boolean offer(In input) throws InterruptedException {
             Objects.requireNonNull(input);
+            boolean acquired = false;
             lock.lockInterruptibly();
             try {
-                acquireExclusiveProducer();
-                if (state >= COMPLETED) {
+                if (state >= COMPLETING) {
                     return false;
                 }
-                initIfNeeded();
+                while (isProducerRunning) {
+                    noProducers.await();
+                    if (state >= COMPLETING) {
+                        return false;
+                    }
+                }
+                isProducerRunning = acquired = true;
+                initIfNew();
                 pctl.input = input;
+                
                 config.produce(pctl);
+                
                 updateDeadline(pctl.latchedDeadline);
                 return true;
             } catch (Error | RuntimeException | InterruptedException e) {
                 close();
                 throw e;
             } finally {
-                pctl.latchedDeadline = null;
-                pctl.input = null;
-                releaseExclusiveProducer();
+                if (acquired) {
+                    pctl.latchedDeadline = null;
+                    pctl.input = null;
+                    isProducerRunning = false;
+                    noProducers.signal();
+                }
                 lock.unlock();
             }
         }
         
         @Override
         public void complete() throws InterruptedException {
+            boolean acquired = false;
             lock.lockInterruptibly();
             try {
-                acquireExclusiveProducer();
-                if (state >= COMPLETED) {
+                if (state >= COMPLETING) {
                     return;
                 }
-                initIfNeeded();
-                // This cast is incorrect, but CompleterControl only uses the value for null-checking.
-                // A callback that casts the CompleterControl to ProducerControl and calls input() could see the fake value.
-                @SuppressWarnings("unchecked")
-                In fake = (In) new Object();
-                pctl.input = fake;
+                while (isProducerRunning) {
+                    noProducers.await();
+                    if (state >= COMPLETING) {
+                        return;
+                    }
+                }
+                isProducerRunning = acquired = true;
+                initIfNew();
+                pctl.accessible = true;
+                
                 config.complete(pctl);
+                
                 updateDeadline(pctl.latchedDeadline);
-                state = COMPLETED;
+                state = COMPLETING;
             } catch (Error | RuntimeException | InterruptedException e) {
                 close();
                 throw e;
             } finally {
-                pctl.latchedDeadline = null;
-                pctl.input = null;
-                releaseExclusiveProducer();
+                if (acquired) {
+                    pctl.latchedDeadline = null;
+                    pctl.accessible = false;
+                    isProducerRunning = false;
+                    noProducers.signal();
+                }
                 lock.unlock();
             }
         }
@@ -801,7 +461,7 @@ public class Recipes {
                     if (state == CLOSED) {
                         return null;
                     }
-                    initIfNeeded();
+                    initIfNew();
                     
                     // Await deadline, but try to minimize work
                     Clock clock = config.clock();
@@ -836,7 +496,9 @@ public class Recipes {
                     } while (true);
                     
                     cctl.accessible = true;
+                    
                     config.consume(cctl);
+                    
                     updateDeadline(cctl.latchedDeadline);
                     if (cctl.close) {
                         close();
@@ -851,16 +513,14 @@ public class Recipes {
                     cctl.latchedOutput = null;
                     cctl.latchedDeadline = null;
                     cctl.accessible = false;
-                    consumerCallId++;
-                    consumed.signalAll();
                     lock.unlock();
                 }
             }
         }
         
         @Override
-        public void close() throws InterruptedException {
-            lock.lockInterruptibly();
+        public void close() {
+            lock.lock();
             try {
                 if (state == CLOSED) {
                     return;
@@ -920,6 +580,7 @@ public class Recipes {
                 ctl.latchOutput(window);
                 window = null;
                 ctl.latchDeadline(Instant.MAX); // Wait indefinitely for next window to open
+                ctl.signalProducer();
             }
             
             @Override
@@ -933,16 +594,23 @@ public class Recipes {
         return new TimedTunnel<>(config);
     }
     
-    public static <T> Tunnel<T, T> throttle(Duration tokenRate,
+    public static <T> Tunnel<T, T> throttle(Duration tokenInterval,
                                             ToLongFunction<T> costMapper,
                                             long tokenLimit,
                                             long costLimit) {
-        Objects.requireNonNull(tokenRate);
+        Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
-        long tokenRateNanos = tokenRate.toNanos();
-        if ((tokenLimit | costLimit) < 0 || tokenRateNanos <= 0) {
+        if ((tokenLimit | costLimit) < 0 || !tokenInterval.isPositive()) {
             throw new IllegalArgumentException();
         }
+        
+        long tmpTokenInterval;
+        try {
+            tmpTokenInterval = tokenInterval.toNanos();
+        } catch (ArithmeticException e) {
+            tmpTokenInterval = Long.MAX_VALUE; // Correct, though unreasonable
+        }
+        long tokenIntervalNanos = tmpTokenInterval;
         
         class ThrottleConfig implements TimedTunnelConfig<T, T> {
             final Deque<Weighted<T>> queue = new ArrayDeque<>();
@@ -968,7 +636,7 @@ public class Recipes {
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
-                cost += elementCost;
+                cost = Math.addExact(cost, elementCost);
                 queue.offer(new Weighted<>(element, elementCost));
                 if (queue.size() == 1) {
                     ctl.latchDeadline(Instant.MIN);
@@ -980,8 +648,8 @@ public class Recipes {
                 // Increase tokens based on actual amount of time that passed
                 Instant now = clock().instant();
                 long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(lastObservedAccrual, now);
-                long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % tokenRateNanos;
-                long newTokens = nanosSinceLastObservedAccrual / tokenRateNanos;
+                long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % tokenIntervalNanos;
+                long newTokens = nanosSinceLastObservedAccrual / tokenIntervalNanos;
                 if (newTokens > 0) {
                     lastObservedAccrual = now.minusNanos(nanosSinceLastAccrual);
                     tokens = Math.min(tokens + newTokens, Math.max(tokenLimit, tempTokenLimit));
@@ -993,11 +661,12 @@ public class Recipes {
                         ctl.latchClose();
                         return;
                     }
-                    ctl.latchOutput(head.element);
                     tempTokenLimit = 0;
                     tokens -= head.cost;
                     cost -= head.cost;
                     queue.poll();
+                    ctl.signalProducer();
+                    ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head == null) {
                         ctl.latchDeadline(Instant.MAX);
@@ -1013,7 +682,7 @@ public class Recipes {
                 }
                 // Schedule to wake up when we have enough tokens for next emission
                 long tokensNeeded = head.cost - tokens;
-                ctl.latchDeadline(now.plusNanos(tokenRateNanos * tokensNeeded - nanosSinceLastAccrual));
+                ctl.latchDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
             }
             
             @Override
@@ -1035,8 +704,8 @@ public class Recipes {
     
     public static <T,U> void boundary(Iterable<? extends T> source,
                                       Instant initialDeadline,
-                                      Sink<? super ProducerControl<T>> producer,
-                                      Sink<? super ConsumerControl<U>> consumer) {
+                                      Sink<? super TimedTunnelConfig.ProducerControl<T>> producer,
+                                      Sink<? super TimedTunnelConfig.ConsumerControl<U>> consumer) {
         // initial
         //   - downstream waits for initial deadline
         // when producer is called:
@@ -1164,19 +833,6 @@ public class Recipes {
         );
         
         // delayWith
-        class Expiring<T> implements Comparable<Expiring<T>> {
-            final T element;
-            final Instant deadline;
-            
-            Expiring(T element, Instant deadline) {
-                this.element = element;
-                this.deadline = deadline;
-            }
-            
-            public int compareTo(Expiring other) {
-                return deadline.compareTo(other.deadline);
-            }
-        }
         var state7 = new Object(){
             final PriorityQueue<Expiring<Integer>> pq = new PriorityQueue<>();
         };
@@ -1331,83 +987,6 @@ public class Recipes {
                 ctl.latchDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
             }
         );
-        
-        // throttleTokenBucket
-        class Weighted<T> {
-            final T element;
-            final long cost;
-            
-            Weighted(T element, long cost) {
-                this.element = element;
-                this.cost = cost;
-            }
-        }
-        var state11 = new Object(){
-            final Deque<Weighted<Integer>> queue = new ArrayDeque<>();
-            final ToLongFunction<Integer> costFn = el -> el;
-            final long accrualRateNanos = Duration.ofSeconds(1).toNanos();
-            final long tokenLimit = 5;
-            final long costLimit = 10;
-            long tempTokenLimit = 0;
-            long tokens = 0;
-            long cost = 0;
-            Instant lastObservedAccrual = Instant.now();
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                // Optional blocking for boundedness, here based on cost rather than queue size
-                while (state11.cost >= state11.costLimit) {
-                    ctl.awaitConsumer();
-                }
-                int element = ctl.input();
-                long cost = state11.costFn.applyAsLong(element);
-                if (cost < 0) {
-                    throw new IllegalStateException("Cost cannot be negative");
-                }
-                state11.cost += cost;
-                state11.queue.offer(new Weighted<>(element, cost));
-                if (state11.queue.size() == 1) {
-                    ctl.latchDeadline(Instant.MIN);
-                }
-            },
-            ctl -> {
-                // Increase tokens based on actual amount of time that passed
-                Instant now = Instant.now();
-                long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(state11.lastObservedAccrual, now);
-                long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % state11.accrualRateNanos;
-                long newTokens = nanosSinceLastObservedAccrual / state11.accrualRateNanos;
-                if (newTokens > 0) {
-                    state11.lastObservedAccrual = now.minusNanos(nanosSinceLastAccrual);
-                    state11.tokens = Math.min(state11.tokens + newTokens, Math.max(state11.tokenLimit, state11.tempTokenLimit));
-                }
-                // Emit if we can, then schedule next emission
-                Weighted<Integer> head = state11.queue.peek();
-                if (state11.tokens >= head.cost) {
-                    ctl.latchOutput(head.element);
-                    state11.tempTokenLimit = 0;
-                    state11.tokens -= head.cost;
-                    state11.cost -= head.cost;
-                    state11.queue.poll();
-                    head = state11.queue.peek();
-                    if (head == null) {
-                        ctl.latchDeadline(Instant.MAX);
-                        return;
-                    }
-                    if (state11.tokens >= head.cost) {
-                        ctl.latchDeadline(Instant.MIN);
-                        return;
-                    }
-                } else {
-                    // This will temporarily allow a higher token limit if head.cost > tokenLimit
-                    state11.tempTokenLimit = head.cost;
-                }
-                // Schedule to wake up when we have enough tokens for next emission
-                long tokensNeeded = head.cost - state11.tokens;
-                ctl.latchDeadline(now.plusNanos(state11.accrualRateNanos * tokensNeeded - nanosSinceLastAccrual));
-            }
-        );
     }
     
     private static class Weighted<T> {
@@ -1417,6 +996,20 @@ public class Recipes {
         Weighted(T element, long cost) {
             this.element = element;
             this.cost = cost;
+        }
+    }
+    
+    private static class Expiring<T> implements Comparable<Expiring<T>> {
+        final T element;
+        final Instant deadline;
+        
+        Expiring(T element, Instant deadline) {
+            this.element = element;
+            this.deadline = deadline;
+        }
+        
+        public int compareTo(Expiring other) {
+            return deadline.compareTo(other.deadline);
         }
     }
 }
