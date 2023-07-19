@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -14,6 +15,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
+import java.util.stream.Collector;
 import java.util.stream.Stream;
 
 public class Recipes {
@@ -500,29 +502,313 @@ public class Recipes {
     // But, used carefully, it is more accurate than relying on Instant.now() (since downstream may be late)
     // May be better to schedule using Instant.now() instead of Instant.MIN
     
-    public interface Sink<T> {
-        void accept(T in) throws Exception;
+    // Terminal conditions:
+    //  1. Producer or consumer throws an uncaught exception
+    //    - If run with ShutdownOnFailure, this will commence cleanup, by interrupting other threads
+    //    - TODO: Should this also set some 'done' state, etc, in case cleanup tries to call methods again?
+    //  2. Downstream indicates cancellation to producer
+    //    - TODO: If consumer decides to stop processing, how does it notify producer? Interrupt?
+    //    - cancel() ??
+    //  3. Producer indicates completion to consumer
+    //    - complete()
+    //    - TODO: What do later calls to producer (completion or otherwise) do?
+    //    - When/how is the consumer informed of completion?
+    //      - A: Consumer's poll() returns false
+    
+    // TODO: What happens if producer tries to awaitConsumer() that has been cancelled? Does anything wake it?
+    //  - Maybe awaitConsumer() can return a boolean - false iff the consumer is cancelled
+    //    - Still does not address any unmanaged blocking the producer might do (and only interrupt() can help there)
+    
+    public interface Tunnel<In, Out> extends AutoCloseable {
+        boolean offer(In input) throws InterruptedException;
+        void complete() throws InterruptedException;
+        
+        Out poll() throws InterruptedException;
+        void close() throws InterruptedException;
+        
+        default void forEach(Consumer<? super Out> action) throws InterruptedException {
+            Out e;
+            while ((e = poll()) != null) {
+                action.accept(e);
+            }
+        }
+        
+        default <A,R> R collect(Collector<? super Out, A, R> collector) throws InterruptedException {
+            BiConsumer<A, ? super Out> accumulator = collector.accumulator();
+            Function<A, R> finisher = collector.finisher();
+            A acc = collector.supplier().get();
+            Out e;
+            while ((e = poll()) != null) {
+                accumulator.accept(acc, e);
+            }
+            return finisher.apply(acc);
+        }
+    }
+    
+    public interface TimedTunnelConfig<In, Out> {
+        default Clock clock() {
+            return Clock.systemUTC();
+        }
+        Instant initialDeadline();
+        void produce(ProducerControl<In> ctl) throws InterruptedException;
+        void consume(ConsumerControl<Out> ctl) throws InterruptedException;
+        void complete(CompleterControl ctl) throws InterruptedException;
+    }
+    
+    public interface CompleterControl {
+        void latchDeadline(Instant deadline);
+        boolean awaitConsumer() throws InterruptedException;
     }
     
     public interface ProducerControl<T> {
-        Instant deadline();
-        void deferDeadline(Instant deadline);
-        void awaitConsumer() throws InterruptedException;
+        void latchDeadline(Instant deadline);
+        boolean awaitConsumer() throws InterruptedException;
         T input();
     }
     
     public interface ConsumerControl<T> {
-        Instant deadline();
-        void deferDeadline(Instant deadline);
-        void deferOutput(T output);
+        void latchDeadline(Instant deadline);
+        void latchOutput(T output);
+    }
+    
+    private static class TimedTunnel<In, Out> implements Tunnel<In, Out> {
+        final TimedTunnelConfig<In, Out> config;
+        final ReentrantLock lock = new ReentrantLock();
+        final Condition produced = lock.newCondition();
+        final Condition consumed = lock.newCondition();
+        final TimedProducerControl pctl = new TimedProducerControl();
+        final TimedConsumerControl cctl = new TimedConsumerControl();
+        Instant deadline = null;
+        int state = NOT_STARTED;
+        int consumerCallId = 0;
+        
+        private static final int NOT_STARTED = 0;
+        private static final int STARTED = 1;
+        private static final int COMPLETED = 2;
+        private static final int CLOSED = 3;
+        
+        TimedTunnel(TimedTunnelConfig<In, Out> config) {
+            this.config = config;
+        }
+        
+        class TimedProducerControl implements ProducerControl<In>, CompleterControl {
+            In input = null;
+            Instant latchedDeadline = null;
+            
+            @Override
+            public void latchDeadline(Instant deadline) {
+                if (input == null) {
+                    throw new IllegalStateException();
+                }
+                latchedDeadline = Objects.requireNonNull(deadline);
+            }
+            
+            @Override
+            public boolean awaitConsumer() throws InterruptedException {
+                // Other producers may run and overwrite this shared control while we wait, so save/restore its fields.
+                In savedInput = input;
+                Instant savedDeadline = latchedDeadline;
+                int savedConsumerCallId = consumerCallId;
+                try {
+                    while (savedConsumerCallId == consumerCallId) {
+                        consumed.await(); // Throws IMSE if lock is not held
+                        if (state == CLOSED) {
+                            return false;
+                        }
+                    }
+                    return true;
+                } finally {
+                    input = savedInput;
+                    latchedDeadline = savedDeadline;
+                }
+            }
+            
+            @Override
+            public In input() {
+                if (input == null) {
+                    throw new IllegalStateException();
+                }
+                return input;
+            }
+        }
+        
+        class TimedConsumerControl implements ConsumerControl<Out> {
+            boolean accessible = false;
+            Out latchedOutput = null;
+            Instant latchedDeadline = null;
+            
+            @Override
+            public void latchDeadline(Instant deadline) {
+                if (!accessible) {
+                    throw new IllegalStateException();
+                }
+                latchedDeadline = Objects.requireNonNull(deadline);
+            }
+            
+            @Override
+            public void latchOutput(Out output) {
+                if (!accessible) {
+                    throw new IllegalStateException();
+                }
+                latchedOutput = Objects.requireNonNull(output);
+            }
+        }
+        
+        protected void init() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            deadline = config.initialDeadline();
+        }
+        
+        private void initIfNeeded() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            if (state == NOT_STARTED) {
+                init();
+                Objects.requireNonNull(deadline);
+                state = STARTED;
+            }
+        }
+        
+        private void updateDeadline(Instant nextDeadline) {
+            //assert lock.isHeldByCurrentThread();
+            if (nextDeadline != null) {
+                if (nextDeadline.isBefore(deadline)) {
+                    produced.signalAll();
+                }
+                deadline = nextDeadline;
+            }
+        }
+        
+        @Override
+        public boolean offer(In input) throws InterruptedException {
+            Objects.requireNonNull(input);
+            lock.lockInterruptibly();
+            try {
+                if (state >= COMPLETED) {
+                    return false;
+                }
+                initIfNeeded();
+                pctl.input = input;
+                config.produce(pctl);
+                updateDeadline(pctl.latchedDeadline);
+                return true;
+            } catch (Error | RuntimeException | InterruptedException e) {
+                close();
+                throw e;
+            } finally {
+                pctl.latchedDeadline = null;
+                pctl.input = null;
+                lock.unlock();
+            }
+        }
+        
+        @Override
+        public void complete() throws InterruptedException {
+            lock.lockInterruptibly();
+            try {
+                if (state >= COMPLETED) {
+                    return;
+                }
+                initIfNeeded();
+                // This cast is incorrect, but CompleterControl only uses the value for null-checking.
+                // A callback that casts the CompleterControl to ProducerControl and calls input() could see the fake value.
+                @SuppressWarnings("unchecked")
+                In fake = (In) new Object();
+                pctl.input = fake;
+                config.complete(pctl);
+                updateDeadline(pctl.latchedDeadline);
+                state = COMPLETED;
+            } catch (Error | RuntimeException | InterruptedException e) {
+                close();
+                throw e;
+            } finally {
+                pctl.latchedDeadline = null;
+                pctl.input = null;
+                lock.unlock();
+            }
+        }
+        
+        @Override
+        public Out poll() throws InterruptedException {
+            lock.lockInterruptibly();
+            try {
+                if (state == CLOSED) {
+                    return null;
+                }
+                initIfNeeded();
+                
+                // Await deadline, but try to minimize work
+                Clock clock = config.clock();
+                Instant savedDeadline = null;
+                long nanosRemaining = 0;
+                do {
+                    if (savedDeadline != (savedDeadline = deadline)) {
+                        // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
+                        if (savedDeadline == Instant.MIN) {
+                            break;
+                        } else if (savedDeadline == Instant.MAX) {
+                            nanosRemaining = Long.MAX_VALUE;
+                        } else {
+                            Instant now = clock.instant();
+                            try {
+                                nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
+                            } catch (ArithmeticException e) {
+                                nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
+                            }
+                        }
+                    }
+                    if (nanosRemaining <= 0) {
+                        break;
+                    } else if (nanosRemaining == Long.MAX_VALUE) {
+                        produced.await();
+                    } else {
+                        nanosRemaining = produced.awaitNanos(nanosRemaining);
+                    }
+                    if (state == CLOSED) {
+                        return null;
+                    }
+                } while (true);
+                
+                cctl.accessible = true;
+                config.consume(cctl);
+                updateDeadline(cctl.latchedDeadline);
+                return cctl.latchedOutput;
+            } catch (Error | RuntimeException | InterruptedException e) {
+                close();
+                throw e;
+            } finally {
+                cctl.latchedOutput = null;
+                cctl.latchedDeadline = null;
+                cctl.accessible = false;
+                consumerCallId++;
+                consumed.signalAll();
+                lock.unlock();
+            }
+        }
+        
+        @Override
+        public void close() throws InterruptedException {
+            lock.lockInterruptibly();
+            try {
+                if (state == CLOSED) {
+                    return;
+                }
+                state = CLOSED;
+                consumed.signalAll(); // Wake producers blocked in awaitConsumer()
+                produced.signalAll(); // Wake consumers blocked in poll()
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+    
+    public interface Sink<T> {
+        void accept(T in) throws Exception;
     }
     
     public static <T,U> void boundary(Iterable<? extends T> source,
                                       Instant initialDeadline,
                                       Sink<? super ProducerControl<T>> producer,
                                       Sink<? super ConsumerControl<U>> consumer) {
-        // TODO: Handle 'done' signal and downstream short-circuiting
-        
         // initial
         //   - downstream waits for initial deadline
         // when producer is called:
@@ -542,17 +828,6 @@ public class Recipes {
         
     }
     
-    private static final Iterator<Object> FAKE_ITER = new Iterator<>() {
-        @Override public boolean hasNext() { return true; }
-        @Override public Object next() { return null; }
-    };
-    @SuppressWarnings("unchecked")
-    private static <T> Iterator<T> fakeIter() {
-        return (Iterator<T>) FAKE_ITER;
-    }
-    
-    // TODO: Fix broken usages of Instant.now() over ctl.deadline()
-    
     public static void main() {
         // collectWithin
         var state1 = new Object(){
@@ -571,13 +846,13 @@ public class Recipes {
                 }
                 state1.window.add(ctl.input());
                 if (!open) {
-                    ctl.deferDeadline(Instant.now().plusSeconds(5));
+                    ctl.latchDeadline(Instant.now().plusSeconds(5));
                 }
             },
             ctl -> {
-                ctl.deferOutput(state1.window);
+                ctl.latchOutput(state1.window);
                 state1.window = null;
-                ctl.deferDeadline(Instant.MAX); // Wait indefinitely for next window
+                ctl.latchDeadline(Instant.MAX); // Wait indefinitely for next window
             }
         );
         
@@ -597,12 +872,12 @@ public class Recipes {
                     state9.window = new ArrayList<>(10);
                 }
                 state9.window.add(ctl.input());
-                ctl.deferDeadline(Instant.MIN);
+                ctl.latchDeadline(Instant.MIN);
             },
             ctl -> {
-                ctl.deferOutput(state9.window);
+                ctl.latchOutput(state9.window);
                 state9.window = null;
-                ctl.deferDeadline(Instant.MAX);
+                ctl.latchDeadline(Instant.MAX);
             }
         );
         
@@ -616,18 +891,18 @@ public class Recipes {
             List.of(1),
             Instant.MAX,
             ctl -> {
-                if (state2.present || state2.coolDownDeadline.isAfter(Instant.now())) {
+                if (state2.present || Instant.now().isBefore(state2.coolDownDeadline)) {
                     return;
                 }
                 state2.present = true;
                 state2.element = ctl.input();
-                ctl.deferDeadline(Instant.MIN);
+                ctl.latchDeadline(Instant.MIN);
             },
             ctl -> {
-                state2.present = false;
-                ctl.deferOutput(state2.element);
-                ctl.deferDeadline(Instant.MAX);
                 state2.coolDownDeadline = Instant.now().plusSeconds(5);
+                state2.present = false;
+                ctl.latchOutput(state2.element);
+                ctl.latchDeadline(Instant.MAX);
             }
         );
         
@@ -635,10 +910,11 @@ public class Recipes {
         var state3 = new Object(){
             int element;
             boolean present;
+            Instant lastDeadline = Instant.now().plusSeconds(5);
         };
         boundary(
             List.of(1),
-            Instant.now().plusSeconds(5),
+            state3.lastDeadline,
             ctl -> {
                 state3.present = true;
                 state3.element = ctl.input();
@@ -646,9 +922,9 @@ public class Recipes {
             ctl -> {
                 if (state3.present) {
                     state3.present = false;
-                    ctl.deferOutput(state3.element);
+                    ctl.latchOutput(state3.element);
                 }
-                ctl.deferDeadline(ctl.deadline().plusSeconds(5));
+                ctl.latchDeadline(state3.lastDeadline = state3.lastDeadline.plusSeconds(5));
             }
         );
         
@@ -667,7 +943,7 @@ public class Recipes {
                 if (!state4.currPresent) {
                     state4.curr = ctl.input();
                     state4.currPresent = true;
-                    ctl.deferDeadline(state4.coolDownDeadline);
+                    ctl.latchDeadline(state4.coolDownDeadline);
                 } else {
                     state4.next = ctl.input();
                     state4.nextPresent = true;
@@ -675,13 +951,13 @@ public class Recipes {
             },
             ctl -> {
                 state4.coolDownDeadline = Instant.now().plusSeconds(5);
-                ctl.deferOutput(state4.curr);
+                ctl.latchOutput(state4.curr);
                 if (state4.currPresent = state4.nextPresent) {
                     state4.curr = state4.next;
                     state4.nextPresent = false;
-                    ctl.deferDeadline(state4.coolDownDeadline);
+                    ctl.latchDeadline(state4.coolDownDeadline);
                 } else {
-                    ctl.deferDeadline(Instant.MAX);
+                    ctl.latchDeadline(Instant.MAX);
                 }
             }
         );
@@ -711,16 +987,16 @@ public class Recipes {
                 Expiring<Integer> e = new Expiring<>(ctl.input(), deadline);
                 state7.pq.offer(e);
                 if (state7.pq.peek() == e) {
-                    ctl.deferDeadline(deadline);
+                    ctl.latchDeadline(deadline);
                 }
             },
             ctl -> {
-                ctl.deferOutput(state7.pq.poll().element);
+                ctl.latchOutput(state7.pq.poll().element);
                 Expiring<Integer> head = state7.pq.peek();
                 if (head != null) {
-                    ctl.deferDeadline(head.deadline);
+                    ctl.latchDeadline(head.deadline);
                 } else {
-                    ctl.deferDeadline(Instant.MAX);
+                    ctl.latchDeadline(Instant.MAX);
                 }
             }
         );
@@ -740,52 +1016,52 @@ public class Recipes {
                 }
                 state5.queue.offer(ctl.input());
                 state5.iter = null;
-                ctl.deferDeadline(Instant.MIN);
+                ctl.latchDeadline(Instant.MIN);
             },
             ctl -> {
                 if (state5.queue.size() > 1) {
-                    ctl.deferOutput(state5.queue.poll());
-                    ctl.deferDeadline(Instant.MIN);
+                    ctl.latchOutput(state5.queue.poll());
+                    ctl.latchDeadline(Instant.MIN);
                 } else {
                     if (state5.iter == null) {
                         int out = state5.queue.poll();
                         state5.iter = Stream.iterate(out + 1,
                                                      i -> i < out + 10,
                                                      i -> i + 1).iterator();
-                        ctl.deferOutput(out);
+                        ctl.latchOutput(out);
                     } else {
-                        ctl.deferOutput(state5.iter.next());
+                        ctl.latchOutput(state5.iter.next());
                     }
-                    ctl.deferDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
+                    ctl.latchDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
                 }
             }
         );
         
         // backpressureTimeout
         var state6 = new Object(){
-            final Deque<Expiring> queue = new ArrayDeque<>();
+            final Deque<Expiring<Integer>> queue = new ArrayDeque<>();
         };
         boundary(
             List.of(1),
             Instant.MAX,
             ctl -> {
                 Instant now = Instant.now();
-                Expiring head = state6.queue.peek();
+                Expiring<Integer> head = state6.queue.peek();
                 if (head != null && head.deadline.isBefore(now)) {
                     throw new IllegalStateException();
                 }
-                Expiring e = new Expiring(ctl.input(), now.plusSeconds(5));
+                Expiring<Integer> e = new Expiring<>(ctl.input(), now.plusSeconds(5));
                 state6.queue.offer(e);
-                ctl.deferDeadline(Instant.MIN);
+                ctl.latchDeadline(Instant.MIN);
             },
             ctl -> {
                 Instant now = Instant.now();
-                Expiring head = state6.queue.poll();
+                Expiring<Integer> head = state6.queue.poll();
                 if (head.deadline.isBefore(now)) {
                     throw new IllegalStateException();
                 }
-                ctl.deferOutput(head.element);
-                ctl.deferDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
+                ctl.latchOutput(head.element);
+                ctl.latchDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
             }
         );
         
@@ -798,11 +1074,11 @@ public class Recipes {
             Instant.MAX,
             ctl -> {
                 state8.element = ctl.input();
-                ctl.deferDeadline(Instant.now().plusSeconds(5));
+                ctl.latchDeadline(Instant.now().plusSeconds(5));
             },
             ctl -> {
-                ctl.deferOutput(state8.element);
-                ctl.deferDeadline(Instant.MAX);
+                ctl.latchOutput(state8.element);
+                ctl.latchDeadline(Instant.MAX);
             }
         );
         
@@ -819,21 +1095,21 @@ public class Recipes {
                     ctl.awaitConsumer();
                 }
                 state0.queue.offer(ctl.input());
-                ctl.deferDeadline(Instant.MIN);
+                ctl.latchDeadline(Instant.MIN);
             },
             ctl -> {
                 Integer next = state0.queue.poll();
                 if (next != null) {
-                    ctl.deferOutput(next);
-                    ctl.deferDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
+                    ctl.latchOutput(next);
+                    ctl.latchDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
                 } else {
-                    ctl.deferOutput(22);
-                    ctl.deferDeadline(Instant.now().plusSeconds(5));
+                    ctl.latchOutput(22);
+                    ctl.latchDeadline(Instant.now().plusSeconds(5));
                 }
             }
         );
         
-        // throttleLeakyBucket
+        // throttleLeakyBucket ("as a queue")
         var state10 = new Object(){
             final Deque<Integer> queue = new ArrayDeque<>();
             Instant coolDownDeadline = Instant.MIN;
@@ -846,12 +1122,12 @@ public class Recipes {
                     return;
                 }
                 state10.queue.offer(ctl.input());
-                ctl.deferDeadline(state10.coolDownDeadline);
+                ctl.latchDeadline(state10.coolDownDeadline);
             },
             ctl -> {
                 state10.coolDownDeadline = Instant.now().plusSeconds(1);
-                ctl.deferOutput(state10.queue.poll());
-                ctl.deferDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
+                ctl.latchOutput(state10.queue.poll());
+                ctl.latchDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
             }
         );
         
@@ -886,10 +1162,13 @@ public class Recipes {
                 }
                 int element = ctl.input();
                 long cost = state11.costFn.applyAsLong(element);
+                if (cost < 0) {
+                    throw new IllegalStateException("Cost cannot be negative");
+                }
                 state11.cost += cost;
                 state11.queue.offer(new Weighted<>(element, cost));
                 if (state11.queue.size() == 1) {
-                    ctl.deferDeadline(Instant.MIN);
+                    ctl.latchDeadline(Instant.MIN);
                 }
             },
             ctl -> {
@@ -905,18 +1184,18 @@ public class Recipes {
                 // Emit if we can, then schedule next emission
                 Weighted<Integer> head = state11.queue.peek();
                 if (state11.tokens >= head.cost) {
-                    ctl.deferOutput(head.element);
+                    ctl.latchOutput(head.element);
                     state11.tempTokenLimit = 0;
-                    state11.tokens = Math.min(state11.tokens - head.cost, state11.tokenLimit); // handles negative costs
-                    state11.cost -= head.cost; // TODO? Allow negative cumulative cost?
+                    state11.tokens -= head.cost;
+                    state11.cost -= head.cost;
                     state11.queue.poll();
                     head = state11.queue.peek();
                     if (head == null) {
-                        ctl.deferDeadline(Instant.MAX);
+                        ctl.latchDeadline(Instant.MAX);
                         return;
                     }
                     if (state11.tokens >= head.cost) {
-                        ctl.deferDeadline(Instant.MIN);
+                        ctl.latchDeadline(Instant.MIN);
                         return;
                     }
                 } else {
@@ -925,7 +1204,7 @@ public class Recipes {
                 }
                 // Schedule to wake up when we have enough tokens for next emission
                 long tokensNeeded = head.cost - state11.tokens;
-                ctl.deferDeadline(now.plusNanos(state11.accrualRateNanos * tokensNeeded - nanosSinceLastAccrual));
+                ctl.latchDeadline(now.plusNanos(state11.accrualRateNanos * tokensNeeded - nanosSinceLastAccrual));
             }
         );
     }
