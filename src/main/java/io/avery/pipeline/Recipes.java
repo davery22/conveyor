@@ -1,9 +1,7 @@
 package io.avery.pipeline;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -71,11 +69,17 @@ public class Recipes {
         
         
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var tunnel = Recipes.collectWithin(
-                () -> new ArrayList<>(10),
-                Collection::add,
-                window -> window.size() >= 10,
-                Duration.ofSeconds(5)
+//            var tunnel = Recipes.collectWithin(
+//                () -> new ArrayList<>(10),
+//                Collection::add,
+//                window -> window.size() >= 10,
+//                Duration.ofSeconds(5)
+//            );
+            var tunnel = Recipes.throttle(
+                Duration.ofSeconds(1),
+                String::length,
+                10,
+                100
             );
             
             // Producer
@@ -694,12 +698,12 @@ public class Recipes {
             }
         }
         
-        private void init() throws InterruptedException {
+        private void init() {
             //assert lock.isHeldByCurrentThread();
             deadline = config.init();
         }
         
-        private void initIfNeeded() throws InterruptedException {
+        private void initIfNeeded() {
             //assert lock.isHeldByCurrentThread();
             if (state == NOT_STARTED) {
                 init();
@@ -722,7 +726,7 @@ public class Recipes {
         // grabbing the lock when a producer calls awaitConsumer().
         // This is particularly important for ensuring that complete() cannot
         // proceed while another producer is sleeping in awaitConsumer().
-        private void waitToBecomeExclusiveProducer() throws InterruptedException {
+        private void acquireExclusiveProducer() throws InterruptedException {
             //assert lock.isHeldByCurrentThread();
             while (isProducerRunning) {
                 noProducers.await();
@@ -741,7 +745,7 @@ public class Recipes {
             Objects.requireNonNull(input);
             lock.lockInterruptibly();
             try {
-                waitToBecomeExclusiveProducer();
+                acquireExclusiveProducer();
                 if (state >= COMPLETED) {
                     return false;
                 }
@@ -765,7 +769,7 @@ public class Recipes {
         public void complete() throws InterruptedException {
             lock.lockInterruptibly();
             try {
-                waitToBecomeExclusiveProducer();
+                acquireExclusiveProducer();
                 if (state >= COMPLETED) {
                     return;
                 }
@@ -874,6 +878,11 @@ public class Recipes {
                                                   BiConsumer<? super A, ? super T> accumulator,
                                                   Predicate<? super A> windowReady,
                                                   Duration windowTimeout) {
+        Objects.requireNonNull(supplier);
+        Objects.requireNonNull(accumulator);
+        Objects.requireNonNull(windowReady);
+        Objects.requireNonNull(windowTimeout);
+        
         class CollectWithinConfig implements TimedTunnelConfig<T,A> {
             boolean done = false;
             A window = null;
@@ -896,7 +905,7 @@ public class Recipes {
                 if (windowReady.test(window)) {
                     ctl.latchDeadline(Instant.MIN);
                 } else if (!open) {
-                    ctl.latchDeadline(Instant.now().plus(windowTimeout));
+                    ctl.latchDeadline(clock().instant().plus(windowTimeout));
                 }
             }
             
@@ -921,6 +930,102 @@ public class Recipes {
         }
         
         var config = new CollectWithinConfig();
+        return new TimedTunnel<>(config);
+    }
+    
+    public static <T> Tunnel<T, T> throttle(Duration tokenRate,
+                                            ToLongFunction<T> costMapper,
+                                            long tokenLimit,
+                                            long costLimit) {
+        Objects.requireNonNull(tokenRate);
+        Objects.requireNonNull(costMapper);
+        long tokenRateNanos = tokenRate.toNanos();
+        if ((tokenLimit | costLimit) < 0 || tokenRateNanos <= 0) {
+            throw new IllegalArgumentException();
+        }
+        
+        class ThrottleConfig implements TimedTunnelConfig<T, T> {
+            final Deque<Weighted<T>> queue = new ArrayDeque<>();
+            long tempTokenLimit = 0;
+            long tokens = 0;
+            long cost = 0;
+            Instant lastObservedAccrual;
+            
+            @Override
+            public Instant init() {
+                lastObservedAccrual = clock().instant();
+                return Instant.MAX;
+            }
+            
+            @Override
+            public void produce(ProducerControl<T> ctl) throws InterruptedException {
+                // Optional blocking for boundedness, here based on cost rather than queue size
+                while (cost >= costLimit) {
+                    ctl.awaitConsumer();
+                }
+                T element = ctl.input();
+                long elementCost = costMapper.applyAsLong(element);
+                if (elementCost < 0) {
+                    throw new IllegalStateException("Element cost cannot be negative");
+                }
+                cost += elementCost;
+                queue.offer(new Weighted<>(element, elementCost));
+                if (queue.size() == 1) {
+                    ctl.latchDeadline(Instant.MIN);
+                }
+            }
+            
+            @Override
+            public void consume(ConsumerControl<T> ctl) {
+                // Increase tokens based on actual amount of time that passed
+                Instant now = clock().instant();
+                long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(lastObservedAccrual, now);
+                long nanosSinceLastAccrual = nanosSinceLastObservedAccrual % tokenRateNanos;
+                long newTokens = nanosSinceLastObservedAccrual / tokenRateNanos;
+                if (newTokens > 0) {
+                    lastObservedAccrual = now.minusNanos(nanosSinceLastAccrual);
+                    tokens = Math.min(tokens + newTokens, Math.max(tokenLimit, tempTokenLimit));
+                }
+                // Emit if we can, then schedule next emission
+                Weighted<T> head = queue.peek();
+                if (tokens >= head.cost) {
+                    if (head.element == null) {
+                        ctl.latchClose();
+                        return;
+                    }
+                    ctl.latchOutput(head.element);
+                    tempTokenLimit = 0;
+                    tokens -= head.cost;
+                    cost -= head.cost;
+                    queue.poll();
+                    head = queue.peek();
+                    if (head == null) {
+                        ctl.latchDeadline(Instant.MAX);
+                        return;
+                    }
+                    if (tokens >= head.cost) {
+                        ctl.latchDeadline(Instant.MIN);
+                        return;
+                    }
+                } else {
+                    // This will temporarily allow a higher token limit if head.cost > tokenLimit
+                    tempTokenLimit = head.cost;
+                }
+                // Schedule to wake up when we have enough tokens for next emission
+                long tokensNeeded = head.cost - tokens;
+                ctl.latchDeadline(now.plusNanos(tokenRateNanos * tokensNeeded - nanosSinceLastAccrual));
+            }
+            
+            @Override
+            public void complete(CompleterControl ctl) {
+                queue.offer(new Weighted<>(null, 0));
+                if (queue.size() == 1) {
+                    ctl.latchDeadline(Instant.MIN);
+                }
+            }
+        }
+        
+        var config = new ThrottleConfig();
         return new TimedTunnel<>(config);
     }
     
@@ -952,33 +1057,6 @@ public class Recipes {
     }
     
     public static void main() {
-        // collectWithin
-        var state1 = new Object(){
-            List<Integer> window = null;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                while (state1.window != null && state1.window.size() >= 10) {
-                    ctl.awaitConsumer();
-                }
-                boolean open = state1.window != null;
-                if (!open) {
-                    state1.window = new ArrayList<>(10);
-                }
-                state1.window.add(ctl.input());
-                if (!open) {
-                    ctl.latchDeadline(Instant.now().plusSeconds(5));
-                }
-            },
-            ctl -> {
-                ctl.latchOutput(state1.window);
-                state1.window = null;
-                ctl.latchDeadline(Instant.MAX); // Wait indefinitely for next window
-            }
-        );
-        
         // batchWeighted (+ buffer/conflate)
         var state9 = new Object(){
             List<Integer> window = null;
@@ -1330,5 +1408,15 @@ public class Recipes {
                 ctl.latchDeadline(now.plusNanos(state11.accrualRateNanos * tokensNeeded - nanosSinceLastAccrual));
             }
         );
+    }
+    
+    private static class Weighted<T> {
+        final T element;
+        final long cost;
+        
+        Weighted(T element, long cost) {
+            this.element = element;
+            this.cost = cost;
+        }
     }
 }
