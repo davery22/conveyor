@@ -20,12 +20,18 @@ public class Recipes {
     
     public static void main(String[] args) throws ExecutionException, InterruptedException {
        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+//            var tunnel = Recipes.throttle(
+//                Duration.ofSeconds(1),
+//                String::length,
+//                10,
+//                100
+//            );
             var tunnel = Recipes.throttle(
-                Duration.ofSeconds(1),
-                String::length,
-                10,
-                100
-            );
+               Duration.ofNanos(1),
+               (String s) -> s.length() * 1_000_000_000L,
+               0,
+               Long.MAX_VALUE
+           );
             
             // Producer
             scope.fork(() -> {
@@ -39,7 +45,10 @@ public class Recipes {
             
             // Consumer
             scope.fork(() -> {
-                tunnel.forEach(System.out::println);
+//                tunnel.forEach(System.out::println);
+                for (String line; (line = tunnel.poll()) != null; ) {
+                    System.out.println(line + " " + line.length() + " " + Instant.now());
+                }
                 return null;
             });
             
@@ -298,6 +307,9 @@ public class Recipes {
                 if (!accessible) {
                     throw new IllegalStateException();
                 }
+                if (state == CLOSED) {
+                    return false;
+                }
                 isProducerWaiting = true;
                 do {
                     consumed.await();
@@ -375,80 +387,120 @@ public class Recipes {
             }
         }
         
-        // We use an extra Condition and flag to prevent other producers from
-        // grabbing the lock when a producer calls awaitConsumer().
-        // This is particularly important for ensuring that complete() cannot
-        // proceed while another producer is sleeping in awaitConsumer().
+        // We use an extra Condition and flag to effectively prevent other producers
+        // from acquiring the lock when a running producer calls awaitConsumer().
+        // This is particularly important for ensuring that complete() cannot proceed
+        // while another producer is blocked on awaitConsumer().
+        
+        private boolean acquireExclusiveProducer() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            while (isProducerRunning) {
+                noProducers.await();
+                if (state >= COMPLETING) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        private boolean awaitDeadline() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            Instant savedDeadline = null;
+            long nanosRemaining = 0;
+            do {
+                if (savedDeadline != (savedDeadline = deadline)) {
+                    // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
+                    if (savedDeadline == Instant.MIN) {
+                        return true;
+                    } else if (savedDeadline == Instant.MAX) {
+                        nanosRemaining = Long.MAX_VALUE;
+                    } else {
+                        Instant now = config.clock().instant();
+                        try {
+                            nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
+                        } catch (ArithmeticException e) {
+                            nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
+                        }
+                    }
+                }
+                if (nanosRemaining <= 0) {
+                    return true;
+                } else if (nanosRemaining == Long.MAX_VALUE) {
+                    produced.await();
+                } else {
+                    nanosRemaining = produced.awaitNanos(nanosRemaining);
+                }
+                if (state == CLOSED) {
+                    return false;
+                }
+            } while (true);
+        }
         
         @Override
         public boolean offer(In input) throws InterruptedException {
             Objects.requireNonNull(input);
-            boolean acquired = false;
             lock.lockInterruptibly();
             try {
-                if (state >= COMPLETING) {
+                if (state >= COMPLETING || !acquireExclusiveProducer()) {
                     return false;
                 }
-                while (isProducerRunning) {
-                    noProducers.await();
-                    if (state >= COMPLETING) {
+                isProducerRunning = true;
+                try {
+                    initIfNew();
+                    pctl.accessible = true;
+                    pctl.input = input;
+                    
+                    config.produce(pctl);
+                    
+                    if (state == CLOSED) { // Possible if produce() called awaitConsumer()
                         return false;
                     }
+                    updateDeadline(pctl.latchedDeadline);
+                    noProducers.signal();
+                    return true;
+                } finally {
+                    pctl.latchedDeadline = null;
+                    pctl.input = null;
+                    pctl.accessible = false;
+                    isProducerRunning = false;
                 }
-                isProducerRunning = acquired = true;
-                initIfNew();
-                pctl.input = input;
-                
-                config.produce(pctl);
-                
-                updateDeadline(pctl.latchedDeadline);
-                return true;
             } catch (Error | RuntimeException | InterruptedException e) {
                 close();
                 throw e;
             } finally {
-                if (acquired) {
-                    pctl.latchedDeadline = null;
-                    pctl.input = null;
-                    isProducerRunning = false;
-                    noProducers.signal();
-                }
                 lock.unlock();
             }
         }
         
         @Override
         public void complete() throws InterruptedException {
-            boolean acquired = false;
             lock.lockInterruptibly();
             try {
-                if (state >= COMPLETING) {
+                if (state >= COMPLETING || !acquireExclusiveProducer()) {
                     return;
                 }
-                while (isProducerRunning) {
-                    noProducers.await();
-                    if (state >= COMPLETING) {
+                isProducerRunning = true;
+                try {
+                    initIfNew();
+                    pctl.accessible = true;
+                    
+                    config.complete(pctl);
+                    
+                    if (state == CLOSED) { // Possible if complete() called awaitConsumer()
                         return;
                     }
+                    updateDeadline(pctl.latchedDeadline);
+                    state = COMPLETING;
+                    noProducers.signalAll();
+                } finally {
+                    pctl.latchedDeadline = null;
+                    pctl.accessible = false;
+                    isProducerRunning = false;
                 }
-                isProducerRunning = acquired = true;
-                initIfNew();
-                pctl.accessible = true;
-                
-                config.complete(pctl);
-                
-                updateDeadline(pctl.latchedDeadline);
-                state = COMPLETING;
             } catch (Error | RuntimeException | InterruptedException e) {
                 close();
                 throw e;
             } finally {
-                if (acquired) {
-                    pctl.latchedDeadline = null;
-                    pctl.accessible = false;
-                    isProducerRunning = false;
-                    noProducers.signal();
-                }
                 lock.unlock();
             }
         }
@@ -462,39 +514,9 @@ public class Recipes {
                         return null;
                     }
                     initIfNew();
-                    
-                    // Await deadline, but try to minimize work
-                    Clock clock = config.clock();
-                    Instant savedDeadline = null;
-                    long nanosRemaining = 0;
-                    do {
-                        if (savedDeadline != (savedDeadline = deadline)) {
-                            // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
-                            if (savedDeadline == Instant.MIN) {
-                                break;
-                            } else if (savedDeadline == Instant.MAX) {
-                                nanosRemaining = Long.MAX_VALUE;
-                            } else {
-                                Instant now = clock.instant();
-                                try {
-                                    nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
-                                } catch (ArithmeticException e) {
-                                    nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
-                                }
-                            }
-                        }
-                        if (nanosRemaining <= 0) {
-                            break;
-                        } else if (nanosRemaining == Long.MAX_VALUE) {
-                            produced.await();
-                        } else {
-                            nanosRemaining = produced.awaitNanos(nanosRemaining);
-                        }
-                        if (state == CLOSED) {
-                            return null;
-                        }
-                    } while (true);
-                    
+                    if (!awaitDeadline()) {
+                        return null;
+                    }
                     cctl.accessible = true;
                     
                     config.consume(cctl);
@@ -526,26 +548,27 @@ public class Recipes {
                     return;
                 }
                 state = CLOSED;
-                consumed.signalAll(); // Wake producers blocked in awaitConsumer()
+                consumed.signal(); // Wake producer blocked in awaitConsumer()
                 produced.signalAll(); // Wake consumers blocked in poll()
+                noProducers.signalAll(); // Wake producers blocked in offer()
             } finally {
                 lock.unlock();
             }
         }
     }
     
-    public static <T,A> Tunnel<T,A> collectWithin(Supplier<? extends A> supplier,
-                                                  BiConsumer<? super A, ? super T> accumulator,
-                                                  Predicate<? super A> windowReady,
-                                                  Duration windowTimeout) {
-        Objects.requireNonNull(supplier);
+    public static <T, A> Tunnel<T, A> batch(Supplier<? extends A> batchSupplier,
+                                            BiConsumer<? super A, ? super T> accumulator,
+                                            Predicate<? super A> batchFull,
+                                            Duration batchTimeout) {
+        Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
-        Objects.requireNonNull(windowReady);
-        Objects.requireNonNull(windowTimeout);
+        Objects.requireNonNull(batchFull);
+        Objects.requireNonNull(batchTimeout);
         
-        class CollectWithinConfig implements TimedTunnelConfig<T,A> {
+        class BatchConfig implements TimedTunnelConfig<T, A> {
             boolean done = false;
-            A window = null;
+            A batch = null;
             
             @Override
             public Instant init() {
@@ -554,18 +577,21 @@ public class Recipes {
             
             @Override
             public void produce(ProducerControl<T> ctl) throws InterruptedException {
-                while (window != null && windowReady.test(window)) {
-                    ctl.awaitConsumer();
+                // Alternative implementations might adjust or reset the buffer instead of blocking
+                while (batch != null && batchFull.test(batch)) {
+                    if (!ctl.awaitConsumer()) {
+                        return;
+                    }
                 }
-                boolean open = window != null;
+                boolean open = batch != null;
                 if (!open) {
-                    window = Objects.requireNonNull(supplier.get());
+                    batch = Objects.requireNonNull(batchSupplier.get());
                 }
-                accumulator.accept(window, ctl.input());
-                if (windowReady.test(window)) {
+                accumulator.accept(batch, ctl.input());
+                if (batchFull.test(batch)) {
                     ctl.latchDeadline(Instant.MIN);
                 } else if (!open) {
-                    ctl.latchDeadline(clock().instant().plus(windowTimeout));
+                    ctl.latchDeadline(clock().instant().plus(batchTimeout));
                 }
             }
             
@@ -573,24 +599,24 @@ public class Recipes {
             public void consume(ConsumerControl<A> ctl) {
                 if (done) {
                     ctl.latchClose();
-                    if (window == null) {
+                    if (batch == null) {
                         return;
                     }
                 }
-                ctl.latchOutput(window);
-                window = null;
-                ctl.latchDeadline(Instant.MAX); // Wait indefinitely for next window to open
+                ctl.latchOutput(batch);
+                batch = null;
+                ctl.latchDeadline(Instant.MAX);
                 ctl.signalProducer();
             }
             
             @Override
             public void complete(CompleterControl ctl) {
                 done = true;
-                ctl.latchDeadline(Instant.MIN); // Emit whatever is left right away
+                ctl.latchDeadline(Instant.MIN);
             }
         }
         
-        var config = new CollectWithinConfig();
+        var config = new BatchConfig();
         return new TimedTunnel<>(config);
     }
     
@@ -608,7 +634,7 @@ public class Recipes {
         try {
             tmpTokenInterval = tokenInterval.toNanos();
         } catch (ArithmeticException e) {
-            tmpTokenInterval = Long.MAX_VALUE; // Correct, though unreasonable
+            tmpTokenInterval = Long.MAX_VALUE; // Unreasonable but correct
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
@@ -629,7 +655,9 @@ public class Recipes {
             public void produce(ProducerControl<T> ctl) throws InterruptedException {
                 // Optional blocking for boundedness, here based on cost rather than queue size
                 while (cost >= costLimit) {
-                    ctl.awaitConsumer();
+                    if (!ctl.awaitConsumer()) {
+                        return;
+                    }
                 }
                 T element = ctl.input();
                 long elementCost = costMapper.applyAsLong(element);
@@ -639,7 +667,7 @@ public class Recipes {
                 cost = Math.addExact(cost, elementCost);
                 queue.offer(new Weighted<>(element, elementCost));
                 if (queue.size() == 1) {
-                    ctl.latchDeadline(Instant.MIN);
+                    ctl.latchDeadline(Instant.MIN); // Let consumer do token math
                 }
             }
             
@@ -676,11 +704,9 @@ public class Recipes {
                         ctl.latchDeadline(Instant.MIN);
                         return;
                     }
-                } else {
-                    // This will temporarily allow a higher token limit if head.cost > tokenLimit
-                    tempTokenLimit = head.cost;
                 }
                 // Schedule to wake up when we have enough tokens for next emission
+                tempTokenLimit = head.cost;
                 long tokensNeeded = head.cost - tokens;
                 ctl.latchDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
             }
@@ -726,31 +752,6 @@ public class Recipes {
     }
     
     public static void main() {
-        // batchWeighted (+ buffer/conflate)
-        var state9 = new Object(){
-            List<Integer> window = null;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                // For buffer/conflate, adjust or reset the window, or throw, instead of waiting
-                while (state9.window != null && state9.window.size() >= 10) {
-                    ctl.awaitConsumer();
-                }
-                if (state9.window == null) {
-                    state9.window = new ArrayList<>(10);
-                }
-                state9.window.add(ctl.input());
-                ctl.latchDeadline(Instant.MIN);
-            },
-            ctl -> {
-                ctl.latchOutput(state9.window);
-                state9.window = null;
-                ctl.latchDeadline(Instant.MAX);
-            }
-        );
-        
         // throttleFirst
         var state2 = new Object(){
             int element;
