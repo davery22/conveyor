@@ -311,12 +311,16 @@ public class Recipes {
             this.config = config;
         }
         
+        // One instance per TimedTunnel.
+        // Methods protect against some kinds of misuse:
+        //  1. Casting to another interface and calling its methods - protected by checking access()
+        //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership
         private class Control implements TimedTunnelConfig.CompleterControl,
                                          TimedTunnelConfig.ProducerControl<In>,
                                          TimedTunnelConfig.ConsumerControl<Out> {
             @Override
             public void latchDeadline(Instant deadline) {
-                if (access() < CONSUMER) {
+                if (access() < CONSUMER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 latchedDeadline = Objects.requireNonNull(deadline);
@@ -324,7 +328,7 @@ public class Recipes {
             
             @Override
             public void latchOutput(Out output) {
-                if (access() != CONSUMER) {
+                if (access() != CONSUMER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 latchedOutput = Objects.requireNonNull(output);
@@ -332,7 +336,7 @@ public class Recipes {
             
             @Override
             public void latchClose() {
-                if (access() != CONSUMER) {
+                if (access() != CONSUMER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 setLatchedClose();
@@ -340,7 +344,7 @@ public class Recipes {
             
             @Override
             public void signalProducer() {
-                if (access() != CONSUMER) {
+                if (access() != CONSUMER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 setIsProducerWaiting(false);
@@ -349,7 +353,7 @@ public class Recipes {
             
             @Override
             public boolean awaitConsumer() throws InterruptedException {
-                if (access() < PRODUCER) {
+                if (access() < PRODUCER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 if (state() == CLOSED) {
@@ -377,7 +381,7 @@ public class Recipes {
             
             @Override
             public In input() {
-                if (access() != PRODUCER) {
+                if (access() != PRODUCER || !lock.isHeldByCurrentThread()) {
                     throw new IllegalStateException();
                 }
                 return latchedInput;
