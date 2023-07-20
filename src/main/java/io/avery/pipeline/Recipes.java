@@ -236,10 +236,8 @@ public class Recipes {
     }
     
     public interface TimedTunnelConfig<In, Out> {
-        default Clock clock() {
-            return Clock.systemUTC();
-        }
-        Instant init();
+        default Clock clock() { return Clock.systemUTC(); }
+        Instant init() throws InterruptedException;
         void produce(ProducerControl<In> ctl) throws InterruptedException;
         void consume(ConsumerControl<Out> ctl) throws InterruptedException;
         void complete(CompleterControl ctl) throws InterruptedException;
@@ -269,12 +267,17 @@ public class Recipes {
         final Condition produced = lock.newCondition();
         final Condition consumed = lock.newCondition();
         final Condition noProducers = lock.newCondition();
-        final TimedProducerControl pctl = new TimedProducerControl();
-        final TimedConsumerControl cctl = new TimedConsumerControl();
+        final Control ctl = new Control();
         Instant deadline = null;
         boolean isProducerWaiting = false;
         boolean isProducerRunning = false;
         int state = NEW;
+        
+        In latchedInput = null;
+        Out latchedOutput = null;
+        Instant latchedDeadline = null;
+        boolean latchedClose = false;
+        int access = NONE;
         
         // Possible state transitions:
         // NEW -> RUNNING -> COMPLETING -> CLOSED
@@ -285,59 +288,22 @@ public class Recipes {
         private static final int COMPLETING = 2;
         private static final int CLOSED = 3;
         
+        // Control access modes, to verify that calls to the shared instance are legal, regardless of casting.
+        private static final int NONE = 0;
+        private static final int CONSUMER = 1;
+        private static final int PRODUCER = 2;
+        private static final int COMPLETER = 3;
+        
         TimedTunnel(TimedTunnelConfig<In, Out> config) {
             this.config = config;
         }
         
-        class TimedProducerControl implements TimedTunnelConfig.ProducerControl<In>, TimedTunnelConfig.CompleterControl {
-            boolean accessible = false;
-            In input = null;
-            Instant latchedDeadline = null;
-            
+        private class Control implements TimedTunnelConfig.CompleterControl,
+                                         TimedTunnelConfig.ProducerControl<In>,
+                                         TimedTunnelConfig.ConsumerControl<Out> {
             @Override
             public void latchDeadline(Instant deadline) {
-                if (!accessible) {
-                    throw new IllegalStateException();
-                }
-                latchedDeadline = Objects.requireNonNull(deadline);
-            }
-            
-            @Override
-            public boolean awaitConsumer() throws InterruptedException {
-                if (!accessible) {
-                    throw new IllegalStateException();
-                }
-                if (state == CLOSED) {
-                    return false;
-                }
-                isProducerWaiting = true;
-                do {
-                    consumed.await();
-                    if (state == CLOSED) {
-                        return false;
-                    }
-                } while (isProducerWaiting);
-                return true;
-            }
-            
-            @Override
-            public In input() {
-                if (!accessible) {
-                    throw new IllegalStateException();
-                }
-                return input;
-            }
-        }
-        
-        class TimedConsumerControl implements TimedTunnelConfig.ConsumerControl<Out> {
-            boolean accessible = false;
-            boolean close = false;
-            Out latchedOutput = null;
-            Instant latchedDeadline = null;
-            
-            @Override
-            public void latchDeadline(Instant deadline) {
-                if (!accessible) {
+                if (access < CONSUMER) {
                     throw new IllegalStateException();
                 }
                 latchedDeadline = Objects.requireNonNull(deadline);
@@ -345,7 +311,7 @@ public class Recipes {
             
             @Override
             public void latchOutput(Out output) {
-                if (!accessible) {
+                if (access != CONSUMER) {
                     throw new IllegalStateException();
                 }
                 latchedOutput = Objects.requireNonNull(output);
@@ -353,23 +319,59 @@ public class Recipes {
             
             @Override
             public void latchClose() {
-                if (!accessible) {
+                if (access != CONSUMER) {
                     throw new IllegalStateException();
                 }
-                close = true;
+                latchedClose = true;
             }
             
             @Override
             public void signalProducer() {
-                if (!accessible) {
+                if (access != CONSUMER) {
                     throw new IllegalStateException();
                 }
                 isProducerWaiting = false;
                 consumed.signal();
             }
+            
+            @Override
+            public boolean awaitConsumer() throws InterruptedException {
+                if (access < PRODUCER) {
+                    throw new IllegalStateException();
+                }
+                if (state == CLOSED) {
+                    return false;
+                }
+                // These may be overwritten while we wait, so save them to stack and restore after.
+                int savedAccess = access;
+                Instant savedDeadline = latchedDeadline;
+                
+                isProducerWaiting = true;
+                try {
+                    do {
+                        consumed.await();
+                        if (state == CLOSED) {
+                            return false;
+                        }
+                    }
+                    while (isProducerWaiting);
+                    return true;
+                } finally {
+                    latchedDeadline = savedDeadline;
+                    access = savedAccess;
+                }
+            }
+            
+            @Override
+            public In input() {
+                if (access != PRODUCER) {
+                    throw new IllegalStateException();
+                }
+                return latchedInput;
+            }
         }
         
-        private void initIfNew() {
+        private void initIfNew() throws InterruptedException{
             //assert lock.isHeldByCurrentThread();
             if (state == NEW) {
                 deadline = Objects.requireNonNull(config.init());
@@ -385,22 +387,6 @@ public class Recipes {
                 }
                 deadline = nextDeadline;
             }
-        }
-        
-        // We use an extra Condition and flag to effectively prevent other producers
-        // from acquiring the lock when a running producer calls awaitConsumer().
-        // This is particularly important for ensuring that complete() cannot proceed
-        // while another producer is blocked on awaitConsumer().
-        
-        private boolean acquireExclusiveProducer() throws InterruptedException {
-            //assert lock.isHeldByCurrentThread();
-            while (isProducerRunning) {
-                noProducers.await();
-                if (state >= COMPLETING) {
-                    return false;
-                }
-            }
-            return true;
         }
         
         private boolean awaitDeadline() throws InterruptedException {
@@ -436,6 +422,22 @@ public class Recipes {
             } while (true);
         }
         
+        // We use an extra Condition and flag to effectively prevent other producers
+        // from acquiring the lock when a running producer calls awaitConsumer().
+        // This is particularly important for ensuring that complete() cannot proceed
+        // while another producer is blocked on awaitConsumer().
+        
+        private boolean acquireExclusiveProducer() throws InterruptedException {
+            //assert lock.isHeldByCurrentThread();
+            while (isProducerRunning) {
+                noProducers.await();
+                if (state >= COMPLETING) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        
         @Override
         public boolean offer(In input) throws InterruptedException {
             Objects.requireNonNull(input);
@@ -447,21 +449,21 @@ public class Recipes {
                 isProducerRunning = true;
                 try {
                     initIfNew();
-                    pctl.accessible = true;
-                    pctl.input = input;
+                    access = PRODUCER;
+                    latchedInput = input;
                     
-                    config.produce(pctl);
+                    config.produce(ctl);
                     
                     if (state == CLOSED) { // Possible if produce() called awaitConsumer()
                         return false;
                     }
-                    updateDeadline(pctl.latchedDeadline);
+                    updateDeadline(latchedDeadline);
                     noProducers.signal();
                     return true;
                 } finally {
-                    pctl.latchedDeadline = null;
-                    pctl.input = null;
-                    pctl.accessible = false;
+                    latchedDeadline = null;
+                    latchedInput = null;
+                    access = NONE;
                     isProducerRunning = false;
                 }
             } catch (Error | RuntimeException | InterruptedException e) {
@@ -482,19 +484,19 @@ public class Recipes {
                 isProducerRunning = true;
                 try {
                     initIfNew();
-                    pctl.accessible = true;
+                    access = COMPLETER;
                     
-                    config.complete(pctl);
+                    config.complete(ctl);
                     
                     if (state == CLOSED) { // Possible if complete() called awaitConsumer()
                         return;
                     }
-                    updateDeadline(pctl.latchedDeadline);
+                    updateDeadline(latchedDeadline);
                     state = COMPLETING;
                     noProducers.signalAll();
                 } finally {
-                    pctl.latchedDeadline = null;
-                    pctl.accessible = false;
+                    latchedDeadline = null;
+                    access = NONE;
                     isProducerRunning = false;
                 }
             } catch (Error | RuntimeException | InterruptedException e) {
@@ -517,24 +519,24 @@ public class Recipes {
                     if (!awaitDeadline()) {
                         return null;
                     }
-                    cctl.accessible = true;
+                    access = CONSUMER;
                     
-                    config.consume(cctl);
+                    config.consume(ctl);
                     
-                    updateDeadline(cctl.latchedDeadline);
-                    if (cctl.close) {
+                    updateDeadline(latchedDeadline);
+                    if (latchedClose) {
                         close();
                     }
-                    if (cctl.latchedOutput != null) {
-                        return cctl.latchedOutput;
+                    if (latchedOutput != null) {
+                        return latchedOutput;
                     }
                 } catch (Error | RuntimeException | InterruptedException e) {
                     close();
                     throw e;
                 } finally {
-                    cctl.latchedOutput = null;
-                    cctl.latchedDeadline = null;
-                    cctl.accessible = false;
+                    latchedOutput = null;
+                    latchedDeadline = null;
+                    access = NONE;
                     lock.unlock();
                 }
             }
