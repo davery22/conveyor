@@ -7,6 +7,9 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.StructuredTaskScope.Subtask;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.Stream;
 
@@ -14,7 +17,7 @@ public class Tunnels {
     private Tunnels() {} // Utility
     
     public static void main(String[] args) throws ExecutionException, InterruptedException {
-       try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 //            var tunnel = Recipes.throttle(
 //                Duration.ofSeconds(1),
 //                String::length,
@@ -47,7 +50,8 @@ public class Tunnels {
                 return null;
             });
             
-            scope.join().throwIfFailed();
+            // zip:
+            // Wait for an element from both tunnels, then combine the elements and offer that
         }
     }
     
@@ -206,6 +210,150 @@ public class Tunnels {
     //  - Maybe awaitConsumer() can return a boolean - false iff the consumer is cancelled
     //    - Still does not address any unmanaged blocking the producer might do (and only interrupt() can help there)
     
+    public static <R1, R2, R> TunnelSource<R> zip(TunnelSource<R1> source1,
+                                                  TunnelSource<R2> source2,
+                                                  BiFunction<? super R1, ? super R2, R> merger) {
+        Objects.requireNonNull(source1);
+        Objects.requireNonNull(source2);
+        Objects.requireNonNull(merger);
+        
+        class Zip implements TunnelSource<R> {
+            @Override
+            public R poll() throws ExecutionException, InterruptedException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    Subtask<R1> task1 = scope.fork(source1::poll);
+                    Subtask<R2> task2 = scope.fork(source2::poll);
+                    scope.join().throwIfFailed();
+                    R1 a = task1.get();
+                    R2 b = task2.get();
+                    if (a == null || b == null) {
+                        return null;
+                    }
+                    return Objects.requireNonNull(merger.apply(a, b));
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                try (source1; source2) {}
+            }
+        }
+        
+        return new Zip();
+    }
+    
+    public static <T1, T2, T> void combineLatest(TunnelSource<T1> source1,
+                                                 TunnelSource<T2> source2,
+                                                 BiFunction<? super T1, ? super T2, T> merger,
+                                                 TunnelSink<? super T> sink) throws ExecutionException, InterruptedException {
+        Objects.requireNonNull(source1);
+        Objects.requireNonNull(source2);
+        Objects.requireNonNull(merger);
+        Objects.requireNonNull(sink);
+        
+        interface Accessor<X, Y> {
+            void setLatest1(X x);
+            Y latest2();
+        }
+        
+        class CombineLatest {
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition ready = lock.newCondition();
+            T1 latest1 = null;
+            T2 latest2 = null;
+            boolean quit = false;
+            
+            <X, Y> Void runSource(TunnelSource<X> source, Accessor<X, Y> access) throws ExecutionException, InterruptedException {
+                X e;
+                if ((e = source.poll()) == null) {
+                    // If either source is empty, we will never emit
+                    lock.lockInterruptibly();
+                    try {
+                        quit = true;
+                        ready.signal();
+                        return null;
+                    } finally {
+                        lock.unlock();
+                    }
+                } else {
+                    // Wait until we have the first element from both sources
+                    lock.lockInterruptibly();
+                    try {
+                        if (quit) {
+                            return null;
+                        }
+                        access.setLatest1(e);
+                        if (access.latest2() == null) {
+                            do {
+                                ready.await();
+                                if (quit) {
+                                    return null;
+                                }
+                            } while (access.latest2() == null);
+                        } else {
+                            ready.signal();
+                            T t = merger.apply(latest1, latest2);
+                            if (!sink.offer(t)) {
+                                quit = true;
+                                return null;
+                            }
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                // Normal mode
+                while ((e = source.poll()) != null) {
+                    lock.lockInterruptibly();
+                    try {
+                        if (quit) {
+                            return null;
+                        }
+                        access.setLatest1(e);
+                        T t = merger.apply(latest1, latest2);
+                        if (!sink.offer(t)) {
+                            // TODO: Wake up other thread from poll()?
+                            //  But if we interrupt during poll(), we close the source when we might not have wanted to
+                            quit = true;
+                            return null;
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                return null;
+            }
+            
+            void run() throws ExecutionException, InterruptedException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var accessor1 = new Accessor<T1, T2>() {
+                        public void setLatest1(T1 t1) { latest1 = t1; }
+                        public T2 latest2() { return latest2; }
+                    };
+                    var accessor2 = new Accessor<T2, T1>() {
+                        public void setLatest1(T2 t1) { latest2 = t1; }
+                        public T1 latest2() { return latest1; }
+                    };
+                    scope.fork(() -> runSource(source1, accessor1));
+                    scope.fork(() -> runSource(source2, accessor2));
+                    scope.join().throwIfFailed();
+                }
+            }
+        }
+        
+        new CombineLatest().run();
+    }
+    
+    // We don't necessarily want to close() the source when we are done - may want to continue polling it later (or concurrently)
+    // We don't necessarily want to complete() the sink when we are done - may want to continue offering to it later (or concurrently)
+    //  - Completing a sink tends to affect what (final) elements are emitted downstream of it
+    //  - TODO: Would some sinks behave differently if we could completeExceptionally(e) them? And/or close() them?
+    // When combineLatest() returns normally, either all sources completed, some source was empty, or sink canceled.
+    // When combineLatest() throws... who knows? Could be source.poll(), or sink.offer(), or merger.apply(), or interrupt.
+    //  - If source.poll() threw we can presume that source is closed(?). Maybe same with sink.offer().
+    //  - Whichever thread threw will interrupt the other, so could close() sources or sinks.
+    // It is up to the caller to catch an exception in combineLatest() and decide to close() sources or complete() sinks
+    
     public static <T, A> Tunnel<T, A> batch(Supplier<? extends A> batchSupplier,
                                             BiConsumer<? super A, ? super T> accumulator,
                                             Predicate<? super A> batchFull,
@@ -215,7 +363,7 @@ public class Tunnels {
         Objects.requireNonNull(batchFull);
         Objects.requireNonNull(batchTimeout);
         
-        class BatchCore implements TimedTunnel.Core<T, A> {
+        class Batch implements TimedTunnel.Core<T, A> {
             boolean done = false;
             A batch = null;
             
@@ -265,7 +413,7 @@ public class Tunnels {
             }
         }
         
-        var config = new BatchCore();
+        var config = new Batch();
         return new TimedTunnel<>(config);
     }
     
@@ -287,7 +435,7 @@ public class Tunnels {
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
-        class ThrottleCore implements TimedTunnel.Core<T, T> {
+        class Throttle implements TimedTunnel.Core<T, T> {
             final Deque<Weighted<T>> queue = new ArrayDeque<>();
             long tempTokenLimit = 0;
             long tokens = 0;
@@ -369,7 +517,7 @@ public class Tunnels {
             }
         }
         
-        var config = new ThrottleCore();
+        var config = new Throttle();
         return new TimedTunnel<>(config);
     }
     
