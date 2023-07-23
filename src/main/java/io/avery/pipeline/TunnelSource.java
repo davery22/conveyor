@@ -10,6 +10,14 @@ public interface TunnelSource<T> extends AutoCloseable {
     T poll() throws ExecutionException, InterruptedException;
     default void close() throws Exception {}
     
+    default void forEach(TunnelSink<? super T> sink) throws ExecutionException, InterruptedException {
+        for (T e; (e = poll()) != null; ) {
+            if (!sink.offer(e)) {
+                return;
+            }
+        }
+    }
+    
     default void forEach(Consumer<? super T> action) throws ExecutionException, InterruptedException {
         for (T e; (e = poll()) != null; ) {
             action.accept(e);
