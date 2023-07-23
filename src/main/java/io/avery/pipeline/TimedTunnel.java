@@ -4,17 +4,16 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
-        Instant init() throws ExecutionException, InterruptedException;
-        void produce(Producer<In> ctl) throws ExecutionException, InterruptedException;
-        void consume(Consumer<Out> ctl) throws ExecutionException, InterruptedException;
-        void complete(Completer ctl) throws ExecutionException, InterruptedException;
+        Instant init() throws Exception;
+        void produce(Producer<In> ctl) throws Exception;
+        void consume(Consumer<Out> ctl) throws Exception;
+        void complete(Completer ctl) throws Exception;
     }
     
     public interface Producer<T> {
@@ -159,7 +158,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
         }
     }
     
-    private void initIfNew() throws ExecutionException, InterruptedException{
+    private void initIfNew() throws Exception {
         //assert lock.isHeldByCurrentThread();
         if (state() == NEW) {
             deadline = Objects.requireNonNull(core.init());
@@ -227,7 +226,12 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     }
     
     @Override
-    public boolean offer(In input) throws ExecutionException, InterruptedException {
+    public ReentrantLock lock() {
+        return lock;
+    }
+    
+    @Override
+    public boolean offer(In input) throws Exception {
         Objects.requireNonNull(input);
         lock.lockInterruptibly();
         try {
@@ -263,7 +267,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     }
     
     @Override
-    public void complete() throws ExecutionException, InterruptedException {
+    public void complete() throws Exception {
         lock.lockInterruptibly();
         try {
             if (state() >= COMPLETING || !acquireExclusiveProducer()) {
@@ -296,7 +300,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     }
     
     @Override
-    public Out poll() throws ExecutionException, InterruptedException {
+    public Out poll() throws Exception {
         for (;;) {
             lock.lockInterruptibly();
             try {

@@ -11,12 +11,41 @@ import java.util.concurrent.StructuredTaskScope.Subtask;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 public class Tunnels {
     private Tunnels() {} // Utility
     
-    public static void main(String[] args) throws ExecutionException, InterruptedException {
+    public static void main(String[] args) throws Exception {
+        Gatherer<String, Void, String> flatMap3 = new Gatherer<>() {
+            @Override
+            public Supplier<Void> supplier() {
+                return () -> (Void) null;
+            }
+            
+            @Override
+            public Integrator<Void, String, String> integrator() {
+                return (state, element, downstream) ->
+                    IntStream.range(0, 3).allMatch(i -> downstream.flush(element));
+            }
+            
+            @Override
+            public BinaryOperator<Void> combiner() {
+                return (l, r) -> l;
+            }
+            
+            @Override
+            public BiConsumer<Void, Sink<? super String>> finisher() {
+                return (state, downstream) -> {};
+            }
+            
+            @Override
+            public Set<Characteristics> characteristics() {
+                return Set.of(Characteristics.GREEDY, Characteristics.STATELESS);
+            }
+        };
+        
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 //            var tunnel = Recipes.throttle(
 //                Duration.ofSeconds(1),
@@ -24,12 +53,13 @@ public class Tunnels {
 //                10,
 //                100
 //            );
-            var tunnel = Tunnels.throttle(
+            var tunnel1 = Tunnels.throttle(
                Duration.ofNanos(1),
                (String s) -> s.length() * 1_000_000_000L,
                0,
                Long.MAX_VALUE
             );
+            var tunnel = tunnel1.prepend(flatMap3);
             
             // Producer
             scope.fork(() -> {
@@ -218,125 +248,165 @@ public class Tunnels {
     //  Seems like it would work better to do this manually
     //   - poll() + offer() to another [Prepended]Tunnel, so we can control the asynchrony
     
-    static <In, T, A, Out> Tunnel<In, Out> compose(Gatherer<In, A, T> gatherer, Tunnel<T, Out> tunnel) {
-        class PrependedTunnel implements Tunnel<In, Out> {
-            @Override
-            public boolean offer(In input) throws ExecutionException, InterruptedException {
-                // TODO: A single input may trigger several offers to the underlying tunnel
-                //  We should wait for all of them before returning true
-                return false;
-            }
-            
-            @Override
-            public void complete() throws ExecutionException, InterruptedException {
-                // TODO: Call finisher, which may trigger several more offers
-                tunnel.complete();
-            }
-            
-            @Override
-            public Out poll() throws ExecutionException, InterruptedException {
-                return tunnel.poll();
-            }
-            
-            @Override
-            public void close() throws Exception {
-                tunnel.close();
-            }
+    static class WrappingException extends RuntimeException {
+        WrappingException(Exception e) {
+            super(e);
         }
         
-        return new PrependedTunnel();
+        @Override
+        public synchronized Exception getCause() {
+            return (Exception) super.getCause();
+        }
     }
     
-    static <In, T, A> TunnelSink<In> compose(Gatherer<In, A, T> gatherer, TunnelSink<T> sink) {
-        Supplier<A> supplier = gatherer.supplier();
-        Gatherer.Integrator<A, In, T> integrator = gatherer.integrator();
-        BiConsumer<A, Gatherer.Sink<? super T>> finisher = gatherer.finisher();
+    static class PrependedTunnelSink<In, T, A> implements TunnelSink<In> {
+        final Supplier<A> supplier;
+        final Gatherer.Integrator<A, In, T> integrator;
+        final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
+        final TunnelSink<T> tunnel;
+        final Gatherer.Sink<T> gsink;
+        A acc = null;
+        int state = NEW;
         
-        class WrappingException extends RuntimeException {
-            WrappingException(Exception e) {
-                super(e);
-            }
-        }
+        static final int NEW = 0;
+        static final int RUNNING = 1;
+        static final int COMPLETING = 2;
+        static final int CLOSED = 3;
         
-        class PrependedTunnelSink implements TunnelSink<In> {
-            A acc = null;
-            final ReentrantLock lock = new ReentrantLock();
-            int state = NEW;
-            
-            static final int NEW = 0;
-            static final int RUNNING = 1;
-            static final int CLOSED = 2;
-            
-            final Gatherer.Sink<T> gsink = el -> {
+        PrependedTunnelSink(Gatherer<In, A, T> gatherer, TunnelSink<T> tunnel) {
+            this.supplier = gatherer.supplier();
+            this.integrator = gatherer.integrator();
+            this.finisher = gatherer.finisher();
+            this.tunnel = tunnel;
+            this.gsink = el -> {
                 try {
-                    return sink.offer(el);
-                } catch (ExecutionException e) {
-                    throw new WrappingException(e);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+                    return tunnel().offer(el);
+                } catch (Exception e) {
+                    if (e instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
                     throw new WrappingException(e);
                 }
             };
-            
-            void initIfNew() {
-                //assert lock.isHeldByCurrentThread();
-                if (state == NEW) {
-                    acc = supplier.get();
-                    state = RUNNING;
-                }
-            }
-            
-            @Override
-            public boolean offer(In input) throws ExecutionException, InterruptedException {
-                lock.lockInterruptibly();
-                try {
-                    if (state == CLOSED) {
-                        return false;
-                    }
-                    initIfNew();
-                    try {
-                        return integrator.integrate(acc, input, gsink);
-                    } catch (WrappingException e) {
-                        switch (e.getCause()) {
-                            case ExecutionException x -> throw x;
-                            case InterruptedException x -> { Thread.interrupted(); throw x; }
-                            default -> throw new AssertionError();
-                        }
-                    }
-                } catch (Error | RuntimeException e) {
-                    state = CLOSED;
-                    throw e;
-                } finally {
-                    lock.unlock();
-                }
-            }
-            
-            @Override
-            public void complete() throws ExecutionException, InterruptedException {
-                lock.lockInterruptibly();
-                try {
-                    if (state == CLOSED) {
-                        return;
-                    }
-                    initIfNew();
-                    try {
-                        finisher.accept(acc, gsink);
-                    } catch (WrappingException e) {
-                        switch (e.getCause()) {
-                            case ExecutionException x -> throw x;
-                            case InterruptedException x -> { Thread.interrupted(); throw x; }
-                            default -> throw new AssertionError();
-                        }
-                    }
-                    sink.complete();
-                } finally {
-                    state = CLOSED;
-                    lock.unlock();
-                }
+        }
+        
+        TunnelSink<T> tunnel() {
+            return tunnel;
+        }
+        
+        @Override
+        public ReentrantLock lock() {
+            return tunnel.lock();
+        }
+        
+        void initIfNew() {
+            //assert lock.isHeldByCurrentThread();
+            if (state == NEW) {
+                acc = supplier.get();
+                state = RUNNING;
             }
         }
         
-        return new PrependedTunnelSink();
+        @Override
+        public boolean offer(In input) throws Exception {
+            lock().lockInterruptibly();
+            try {
+                if (state >= COMPLETING) {
+                    return false;
+                }
+                initIfNew();
+                return integrator.integrate(acc, input, gsink);
+            } catch (WrappingException e) {
+                state = CLOSED;
+                if (e.getCause() instanceof InterruptedException) {
+                    Thread.interrupted();
+                }
+                throw e.getCause();
+            } catch (Error | Exception e) {
+                state = CLOSED;
+                throw e;
+            } finally {
+                lock().unlock();
+            }
+        }
+        
+        @Override
+        public void complete() throws Exception {
+            lock().lockInterruptibly();
+            try {
+                if (state >= COMPLETING) {
+                    return;
+                }
+                initIfNew();
+                finisher.accept(acc, gsink);
+                tunnel().complete();
+                state = COMPLETING;
+            } catch (WrappingException e) {
+                state = CLOSED;
+                if (e.getCause() instanceof InterruptedException) {
+                    Thread.interrupted();
+                }
+                throw e.getCause();
+            } catch (Error | Exception e) {
+                state = CLOSED;
+                throw e;
+            } finally {
+                lock().unlock();
+            }
+        }
+    }
+    
+    static class PrependedTunnel<In, T, A, Out> extends PrependedTunnelSink<In, T, A> implements Tunnel<In, Out> {
+        PrependedTunnel(Gatherer<In, A, T> gatherer, Tunnel<T, Out> tunnel) {
+            super(gatherer, tunnel);
+        }
+        
+        @Override
+        Tunnel<T, Out> tunnel() {
+            return (Tunnel<T, Out>) tunnel;
+        }
+        
+        @Override
+        public Out poll() throws Exception {
+            lock().lockInterruptibly();
+            try {
+                if (state == CLOSED) {
+                    return null;
+                }
+                Out o = tunnel().poll(); // TODO: Does not release my lock, so can't offer...
+                if (o == null) {
+                    close();
+                }
+                return o;
+            } catch (Error | Exception e) {
+                state = CLOSED;
+                throw e;
+            } finally {
+                lock().unlock();
+            }
+        }
+        
+        @Override
+        public void close() throws Exception {
+            lock().lockInterruptibly();
+            try {
+                if (state == CLOSED) {
+                    return;
+                }
+                state = CLOSED;
+                tunnel().close();
+            } finally {
+                lock().unlock();
+            }
+        }
+    }
+    
+    static <In, T, A> TunnelSink<In> prepend(Gatherer<In, A, T> gatherer, TunnelSink<T> sink) {
+        return new PrependedTunnelSink<>(gatherer, sink);
+    }
+    
+    static <In, T, A, Out> Tunnel<In, Out> prepend(Gatherer<In, A, T> gatherer, Tunnel<T, Out> tunnel) {
+        return new PrependedTunnel<>(gatherer, tunnel);
     }
     
     public static <R1, R2, R> TunnelSource<R> zip(TunnelSource<R1> source1,
@@ -392,7 +462,7 @@ public class Tunnels {
             T2 latest2 = null;
             boolean quit = false;
             
-            <X, Y> Void runSource(TunnelSource<X> source, Accessor<X, Y> access) throws ExecutionException, InterruptedException {
+            <X, Y> Void runSource(TunnelSource<X> source, Accessor<X, Y> access) throws Exception {
                 X e;
                 if ((e = source.poll()) == null) {
                     // If either source is empty, we will never emit
@@ -453,7 +523,7 @@ public class Tunnels {
                 return null;
             }
             
-            void run() throws ExecutionException, InterruptedException {
+            void run() throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var accessor1 = new Accessor<T1, T2>() {
                         public void setLatest1(T1 t1) { latest1 = t1; }
