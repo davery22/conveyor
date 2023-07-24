@@ -12,7 +12,6 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
 public class Tunnels {
     private Tunnels() {} // Utility
@@ -260,6 +259,7 @@ public class Tunnels {
     }
     
     static class PrependedTunnelSink<In, T, A> implements TunnelSink<In> {
+        final ReentrantLock producerLock = new ReentrantLock();
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
@@ -270,8 +270,7 @@ public class Tunnels {
         
         static final int NEW = 0;
         static final int RUNNING = 1;
-        static final int COMPLETING = 2;
-        static final int CLOSED = 3;
+        static final int CLOSED = 2;
         
         PrependedTunnelSink(Gatherer<In, A, T> gatherer, TunnelSink<T> tunnel) {
             this.supplier = gatherer.supplier();
@@ -281,7 +280,12 @@ public class Tunnels {
             this.gsink = el -> {
                 try {
                     return tunnel().offer(el);
+                } catch (Error | RuntimeException e) {
+                    throw e;
                 } catch (Exception e) {
+                    // We are not allowed to throw checked exceptions in this context;
+                    // wrap them so that we might rediscover them farther up the stack.
+                    // (They might still be dropped or re-wrapped between here and there.)
                     if (e instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
                     }
@@ -294,13 +298,8 @@ public class Tunnels {
             return tunnel;
         }
         
-        @Override
-        public ReentrantLock lock() {
-            return tunnel.lock();
-        }
-        
         void initIfNew() {
-            //assert lock.isHeldByCurrentThread();
+            //assert producerLock.isHeldByCurrentThread();
             if (state == NEW) {
                 acc = supplier.get();
                 state = RUNNING;
@@ -309,13 +308,17 @@ public class Tunnels {
         
         @Override
         public boolean offer(In input) throws Exception {
-            lock().lockInterruptibly();
+            producerLock.lockInterruptibly();
             try {
-                if (state >= COMPLETING) { // TODO: acquireProducer?
+                if (state == CLOSED) {
                     return false;
                 }
                 initIfNew();
-                return integrator.integrate(acc, input, gsink);
+                if (!integrator.integrate(acc, input, gsink)) {
+                    state = CLOSED;
+                    return false;
+                }
+                return true;
             } catch (WrappingException e) {
                 state = CLOSED;
                 if (e.getCause() instanceof InterruptedException) {
@@ -326,32 +329,28 @@ public class Tunnels {
                 state = CLOSED;
                 throw e;
             } finally {
-                lock().unlock();
+                producerLock.unlock();
             }
         }
         
         @Override
         public void complete() throws Exception {
-            lock().lockInterruptibly();
+            producerLock.lockInterruptibly();
             try {
-                if (state >= COMPLETING) { // TODO: acquireProducer?
+                if (state == CLOSED) {
                     return;
                 }
                 initIfNew();
                 finisher.accept(acc, gsink);
                 tunnel().complete();
-                state = COMPLETING;
             } catch (WrappingException e) {
-                state = CLOSED;
                 if (e.getCause() instanceof InterruptedException) {
                     Thread.interrupted();
                 }
                 throw e.getCause();
-            } catch (Error | Exception e) {
-                state = CLOSED;
-                throw e;
             } finally {
-                lock().unlock();
+                state = CLOSED;
+                producerLock.unlock();
             }
         }
     }
@@ -368,45 +367,25 @@ public class Tunnels {
         
         @Override
         public Out poll() throws Exception {
-            lock().lockInterruptibly();
-            try {
-                if (state == CLOSED) {
-                    return null;
-                }
-                Out o = tunnel().poll(); // TODO: Does not release my lock, so can't offer...
-                if (o == null) {
-                    close();
-                }
-                return o;
-            } catch (Error | Exception e) {
-                state = CLOSED;
-                throw e;
-            } finally {
-                lock().unlock();
-            }
+            return tunnel().poll();
         }
         
         @Override
         public void close() throws Exception {
-            lock().lockInterruptibly();
-            try {
-                if (state == CLOSED) {
-                    return;
-                }
-                state = CLOSED;
-                tunnel().close();
-            } finally {
-                lock().unlock();
-            }
+            tunnel().close();
         }
     }
     
-    static <In, T, A> TunnelSink<In> prepend(Gatherer<In, A, T> gatherer, TunnelSink<T> sink) {
-        return new PrependedTunnelSink<>(gatherer, sink);
+    static <In, T, A> TunnelSink<In> prepend(Gatherer<In, A, ? extends T> gatherer, TunnelSink<T> sink) {
+        @SuppressWarnings("unchecked")
+        Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
+        return new PrependedTunnelSink<>(g, sink);
     }
     
-    static <In, T, A, Out> Tunnel<In, Out> prepend(Gatherer<In, A, T> gatherer, Tunnel<T, Out> tunnel) {
-        return new PrependedTunnel<>(gatherer, tunnel);
+    static <In, T, A, Out> Tunnel<In, Out> prepend(Gatherer<In, A, ? extends T> gatherer, Tunnel<T, Out> tunnel) {
+        @SuppressWarnings("unchecked")
+        Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
+        return new PrependedTunnel<>(g, tunnel);
     }
     
     public static <R1, R2, R> TunnelSource<R> zip(TunnelSource<R1> source1,
