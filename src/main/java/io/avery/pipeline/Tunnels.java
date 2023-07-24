@@ -311,7 +311,7 @@ public class Tunnels {
         public boolean offer(In input) throws Exception {
             lock().lockInterruptibly();
             try {
-                if (state >= COMPLETING) {
+                if (state >= COMPLETING) { // TODO: acquireProducer?
                     return false;
                 }
                 initIfNew();
@@ -334,7 +334,7 @@ public class Tunnels {
         public void complete() throws Exception {
             lock().lockInterruptibly();
             try {
-                if (state >= COMPLETING) {
+                if (state >= COMPLETING) { // TODO: acquireProducer?
                     return;
                 }
                 initIfNew();
@@ -572,7 +572,7 @@ public class Tunnels {
             }
             
             @Override
-            public void produce(TimedTunnel.Producer<T> ctl) throws InterruptedException {
+            public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
                 while (batch != null && batchFull.test(batch)) {
                     if (!ctl.awaitConsumer()) {
@@ -583,7 +583,7 @@ public class Tunnels {
                 if (!open) {
                     batch = Objects.requireNonNull(batchSupplier.get());
                 }
-                accumulator.accept(batch, ctl.input());
+                accumulator.accept(batch, input);
                 if (batchFull.test(batch)) {
                     ctl.latchDeadline(Instant.MIN);
                 } else if (!open) {
@@ -606,7 +606,7 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Completer ctl) {
+            public void complete(TimedTunnel.Producer ctl) {
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
             }
@@ -648,20 +648,19 @@ public class Tunnels {
             }
             
             @Override
-            public void produce(TimedTunnel.Producer<T> ctl) throws InterruptedException {
+            public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
                 // Optional blocking for boundedness, here based on cost rather than queue size
                 while (cost >= costLimit) {
                     if (!ctl.awaitConsumer()) {
                         return;
                     }
                 }
-                T element = ctl.input();
-                long elementCost = costMapper.applyAsLong(element);
+                long elementCost = costMapper.applyAsLong(input);
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
                 cost = Math.addExact(cost, elementCost);
-                queue.offer(new Weighted<>(element, elementCost));
+                queue.offer(new Weighted<>(input, elementCost));
                 if (queue.size() == 1) {
                     ctl.latchDeadline(Instant.MIN); // Let consumer do token math
                 }
@@ -708,7 +707,7 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Completer ctl) {
+            public void complete(TimedTunnel.Producer ctl) {
                 queue.offer(new Weighted<>(null, 0));
                 if (queue.size() == 1) {
                     ctl.latchDeadline(Instant.MIN);
@@ -720,271 +719,244 @@ public class Tunnels {
         return new TimedTunnel<>(config);
     }
     
-    public interface Sink<T> {
-        void accept(T in) throws Exception;
-    }
-    
-    public static <T,U> void boundary(Iterable<? extends T> source,
-                                      Instant initialDeadline,
-                                      Sink<? super TimedTunnel.Producer<T>> producer,
-                                      Sink<? super TimedTunnel.Consumer<U>> consumer) {
-        // initial
-        //   - downstream waits for initial deadline
-        // when producer is called:
-        //   - can accumulate element onto state
-        //   - can store weight on state to tell if we should block, drop tail, etc
-        //   - return an instant to indicate when consumer should be called next
-        // when consumer is called: (deadline expires)
-        //   - can flush output to consumer
-        //   - can update state to reset window or remove element(s)
-        //   - return an instant to indicate when consumer should be called next
-        
-        // Problem?: upstream can block before downstream has a deadline
-        // Problem: feeder/flusher can throw checked exceptions
-        
-        // Upstream blocks waiting for downstream to consume state
-        // Downstream blocks waiting for upstream to prepare state
-        
-    }
-    
-    public static void main() {
-        // throttleFirst
-        var state2 = new Object(){
-            int element;
-            boolean present;
-            Instant coolDownDeadline = Instant.MIN;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                if (state2.present || Instant.now().isBefore(state2.coolDownDeadline)) {
-                    return;
-                }
-                state2.present = true;
-                state2.element = ctl.input();
-                ctl.latchDeadline(Instant.MIN);
-            },
-            ctl -> {
-                state2.coolDownDeadline = Instant.now().plusSeconds(5);
-                state2.present = false;
-                ctl.latchOutput(state2.element);
-                ctl.latchDeadline(Instant.MAX);
-            }
-        );
-        
-        // throttleLast
-        var state3 = new Object(){
-            int element;
-            boolean present;
-            Instant lastDeadline = Instant.now().plusSeconds(5);
-        };
-        boundary(
-            List.of(1),
-            state3.lastDeadline,
-            ctl -> {
-                state3.present = true;
-                state3.element = ctl.input();
-            },
-            ctl -> {
-                if (state3.present) {
-                    state3.present = false;
-                    ctl.latchOutput(state3.element);
-                }
-                ctl.latchDeadline(state3.lastDeadline = state3.lastDeadline.plusSeconds(5));
-            }
-        );
-        
-        // throttleLatest
-        var state4 = new Object(){
-            int curr;
-            int next;
-            boolean currPresent;
-            boolean nextPresent;
-            Instant coolDownDeadline = Instant.MIN;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                if (!state4.currPresent) {
-                    state4.curr = ctl.input();
-                    state4.currPresent = true;
-                    ctl.latchDeadline(state4.coolDownDeadline);
-                } else {
-                    state4.next = ctl.input();
-                    state4.nextPresent = true;
-                }
-            },
-            ctl -> {
-                state4.coolDownDeadline = Instant.now().plusSeconds(5);
-                ctl.latchOutput(state4.curr);
-                if (state4.currPresent = state4.nextPresent) {
-                    state4.curr = state4.next;
-                    state4.nextPresent = false;
-                    ctl.latchDeadline(state4.coolDownDeadline);
-                } else {
-                    ctl.latchDeadline(Instant.MAX);
-                }
-            }
-        );
-        
-        // delayWith
-        var state7 = new Object(){
-            final PriorityQueue<Expiring<Integer>> pq = new PriorityQueue<>();
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                Instant deadline = Instant.now().plusSeconds(ctl.input());
-                Expiring<Integer> e = new Expiring<>(ctl.input(), deadline);
-                state7.pq.offer(e);
-                if (state7.pq.peek() == e) {
-                    ctl.latchDeadline(deadline);
-                }
-            },
-            ctl -> {
-                ctl.latchOutput(state7.pq.poll().element);
-                Expiring<Integer> head = state7.pq.peek();
-                if (head != null) {
-                    ctl.latchDeadline(head.deadline);
-                } else {
-                    ctl.latchDeadline(Instant.MAX);
-                }
-            }
-        );
-        
-        // extrapolate
-        var state5 = new Object(){
-            final Deque<Integer> queue = new ArrayDeque<>(10);
-            Iterator<Integer> iter;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                // Optional blocking for boundedness
-                while (state5.queue.size() >= 10) {
-                    ctl.awaitConsumer();
-                }
-                state5.queue.offer(ctl.input());
-                state5.iter = null;
-                ctl.latchDeadline(Instant.MIN);
-            },
-            ctl -> {
-                if (state5.queue.size() > 1) {
-                    ctl.latchOutput(state5.queue.poll());
-                    ctl.latchDeadline(Instant.MIN);
-                } else {
-                    if (state5.iter == null) {
-                        int out = state5.queue.poll();
-                        state5.iter = Stream.iterate(out + 1,
-                                                     i -> i < out + 10,
-                                                     i -> i + 1).iterator();
-                        ctl.latchOutput(out);
-                    } else {
-                        ctl.latchOutput(state5.iter.next());
-                    }
-                    ctl.latchDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
-                }
-            }
-        );
-        
-        // backpressureTimeout
-        var state6 = new Object(){
-            final Deque<Expiring<Integer>> queue = new ArrayDeque<>();
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                Instant now = Instant.now();
-                Expiring<Integer> head = state6.queue.peek();
-                if (head != null && head.deadline.isBefore(now)) {
-                    throw new IllegalStateException();
-                }
-                Expiring<Integer> e = new Expiring<>(ctl.input(), now.plusSeconds(5));
-                state6.queue.offer(e);
-                ctl.latchDeadline(Instant.MIN);
-            },
-            ctl -> {
-                Instant now = Instant.now();
-                Expiring<Integer> head = state6.queue.poll();
-                if (head.deadline.isBefore(now)) {
-                    throw new IllegalStateException();
-                }
-                ctl.latchOutput(head.element);
-                ctl.latchDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
-            }
-        );
-        
-        // debounce
-        var state8 = new Object(){
-            int element;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                state8.element = ctl.input();
-                ctl.latchDeadline(Instant.now().plusSeconds(5));
-            },
-            ctl -> {
-                ctl.latchOutput(state8.element);
-                ctl.latchDeadline(Instant.MAX);
-            }
-        );
-        
-        // keepAlive
-        var state0 = new Object(){
-            final Deque<Integer> queue = new ArrayDeque<>();
-        };
-        boundary(
-            List.of(1),
-            Instant.now().plusSeconds(5),
-            ctl -> {
-                // Optional blocking for boundedness
-                while (state0.queue.size() >= 10) {
-                    ctl.awaitConsumer();
-                }
-                state0.queue.offer(ctl.input());
-                ctl.latchDeadline(Instant.MIN);
-            },
-            ctl -> {
-                Integer next = state0.queue.poll();
-                if (next != null) {
-                    ctl.latchOutput(next);
-                    ctl.latchDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
-                } else {
-                    ctl.latchOutput(22);
-                    ctl.latchDeadline(Instant.now().plusSeconds(5));
-                }
-            }
-        );
-        
-        // throttleLeakyBucket ("as a queue")
-        var state10 = new Object(){
-            final Deque<Integer> queue = new ArrayDeque<>();
-            Instant coolDownDeadline = Instant.MIN;
-        };
-        boundary(
-            List.of(1),
-            Instant.MAX,
-            ctl -> {
-                if (state10.queue.size() >= 10) {
-                    return;
-                }
-                state10.queue.offer(ctl.input());
-                ctl.latchDeadline(state10.coolDownDeadline);
-            },
-            ctl -> {
-                state10.coolDownDeadline = Instant.now().plusSeconds(1);
-                ctl.latchOutput(state10.queue.poll());
-                ctl.latchDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
-            }
-        );
-    }
+//    public static void main() {
+//        // throttleFirst
+//        var state2 = new Object(){
+//            int element;
+//            boolean present;
+//            Instant coolDownDeadline = Instant.MIN;
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                if (state2.present || Instant.now().isBefore(state2.coolDownDeadline)) {
+//                    return;
+//                }
+//                state2.present = true;
+//                state2.element = ctl.input();
+//                ctl.latchDeadline(Instant.MIN);
+//            },
+//            ctl -> {
+//                state2.coolDownDeadline = Instant.now().plusSeconds(5);
+//                state2.present = false;
+//                ctl.latchOutput(state2.element);
+//                ctl.latchDeadline(Instant.MAX);
+//            }
+//        );
+//
+//        // throttleLast
+//        var state3 = new Object(){
+//            int element;
+//            boolean present;
+//            Instant lastDeadline = Instant.now().plusSeconds(5);
+//        };
+//        boundary(
+//            List.of(1),
+//            state3.lastDeadline,
+//            ctl -> {
+//                state3.present = true;
+//                state3.element = ctl.input();
+//            },
+//            ctl -> {
+//                if (state3.present) {
+//                    state3.present = false;
+//                    ctl.latchOutput(state3.element);
+//                }
+//                ctl.latchDeadline(state3.lastDeadline = state3.lastDeadline.plusSeconds(5));
+//            }
+//        );
+//
+//        // throttleLatest
+//        var state4 = new Object(){
+//            int curr;
+//            int next;
+//            boolean currPresent;
+//            boolean nextPresent;
+//            Instant coolDownDeadline = Instant.MIN;
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                if (!state4.currPresent) {
+//                    state4.curr = ctl.input();
+//                    state4.currPresent = true;
+//                    ctl.latchDeadline(state4.coolDownDeadline);
+//                } else {
+//                    state4.next = ctl.input();
+//                    state4.nextPresent = true;
+//                }
+//            },
+//            ctl -> {
+//                state4.coolDownDeadline = Instant.now().plusSeconds(5);
+//                ctl.latchOutput(state4.curr);
+//                if (state4.currPresent = state4.nextPresent) {
+//                    state4.curr = state4.next;
+//                    state4.nextPresent = false;
+//                    ctl.latchDeadline(state4.coolDownDeadline);
+//                } else {
+//                    ctl.latchDeadline(Instant.MAX);
+//                }
+//            }
+//        );
+//
+//        // delayWith
+//        var state7 = new Object(){
+//            final PriorityQueue<Expiring<Integer>> pq = new PriorityQueue<>();
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                Instant deadline = Instant.now().plusSeconds(ctl.input());
+//                Expiring<Integer> e = new Expiring<>(ctl.input(), deadline);
+//                state7.pq.offer(e);
+//                if (state7.pq.peek() == e) {
+//                    ctl.latchDeadline(deadline);
+//                }
+//            },
+//            ctl -> {
+//                ctl.latchOutput(state7.pq.poll().element);
+//                Expiring<Integer> head = state7.pq.peek();
+//                if (head != null) {
+//                    ctl.latchDeadline(head.deadline);
+//                } else {
+//                    ctl.latchDeadline(Instant.MAX);
+//                }
+//            }
+//        );
+//
+//        // extrapolate
+//        var state5 = new Object(){
+//            final Deque<Integer> queue = new ArrayDeque<>(10);
+//            Iterator<Integer> iter;
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                // Optional blocking for boundedness
+//                while (state5.queue.size() >= 10) {
+//                    ctl.awaitConsumer();
+//                }
+//                state5.queue.offer(ctl.input());
+//                state5.iter = null;
+//                ctl.latchDeadline(Instant.MIN);
+//            },
+//            ctl -> {
+//                if (state5.queue.size() > 1) {
+//                    ctl.latchOutput(state5.queue.poll());
+//                    ctl.latchDeadline(Instant.MIN);
+//                } else {
+//                    if (state5.iter == null) {
+//                        int out = state5.queue.poll();
+//                        state5.iter = Stream.iterate(out + 1,
+//                                                     i -> i < out + 10,
+//                                                     i -> i + 1).iterator();
+//                        ctl.latchOutput(out);
+//                    } else {
+//                        ctl.latchOutput(state5.iter.next());
+//                    }
+//                    ctl.latchDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
+//                }
+//            }
+//        );
+//
+//        // backpressureTimeout
+//        var state6 = new Object(){
+//            final Deque<Expiring<Integer>> queue = new ArrayDeque<>();
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                Instant now = Instant.now();
+//                Expiring<Integer> head = state6.queue.peek();
+//                if (head != null && head.deadline.isBefore(now)) {
+//                    throw new IllegalStateException();
+//                }
+//                Expiring<Integer> e = new Expiring<>(ctl.input(), now.plusSeconds(5));
+//                state6.queue.offer(e);
+//                ctl.latchDeadline(Instant.MIN);
+//            },
+//            ctl -> {
+//                Instant now = Instant.now();
+//                Expiring<Integer> head = state6.queue.poll();
+//                if (head.deadline.isBefore(now)) {
+//                    throw new IllegalStateException();
+//                }
+//                ctl.latchOutput(head.element);
+//                ctl.latchDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
+//            }
+//        );
+//
+//        // debounce
+//        var state8 = new Object(){
+//            int element;
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                state8.element = ctl.input();
+//                ctl.latchDeadline(Instant.now().plusSeconds(5));
+//            },
+//            ctl -> {
+//                ctl.latchOutput(state8.element);
+//                ctl.latchDeadline(Instant.MAX);
+//            }
+//        );
+//
+//        // keepAlive
+//        var state0 = new Object(){
+//            final Deque<Integer> queue = new ArrayDeque<>();
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.now().plusSeconds(5),
+//            ctl -> {
+//                // Optional blocking for boundedness
+//                while (state0.queue.size() >= 10) {
+//                    ctl.awaitConsumer();
+//                }
+//                state0.queue.offer(ctl.input());
+//                ctl.latchDeadline(Instant.MIN);
+//            },
+//            ctl -> {
+//                Integer next = state0.queue.poll();
+//                if (next != null) {
+//                    ctl.latchOutput(next);
+//                    ctl.latchDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
+//                } else {
+//                    ctl.latchOutput(22);
+//                    ctl.latchDeadline(Instant.now().plusSeconds(5));
+//                }
+//            }
+//        );
+//
+//        // throttleLeakyBucket ("as a queue")
+//        var state10 = new Object(){
+//            final Deque<Integer> queue = new ArrayDeque<>();
+//            Instant coolDownDeadline = Instant.MIN;
+//        };
+//        boundary(
+//            List.of(1),
+//            Instant.MAX,
+//            ctl -> {
+//                if (state10.queue.size() >= 10) {
+//                    return;
+//                }
+//                state10.queue.offer(ctl.input());
+//                ctl.latchDeadline(state10.coolDownDeadline);
+//            },
+//            ctl -> {
+//                state10.coolDownDeadline = Instant.now().plusSeconds(1);
+//                ctl.latchOutput(state10.queue.poll());
+//                ctl.latchDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
+//            }
+//        );
+//    }
     
     private static class Weighted<T> {
         final T element;

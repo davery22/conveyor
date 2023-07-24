@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -11,13 +12,12 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant init() throws Exception;
-        void produce(Producer<In> ctl) throws Exception;
         void consume(Consumer<Out> ctl) throws Exception;
-        void complete(Completer ctl) throws Exception;
+        void produce(Producer ctl, In input) throws Exception;
+        void complete(Producer ctl) throws Exception;
     }
     
-    public interface Producer<T> {
-        T input();
+    public interface Producer {
         void latchDeadline(Instant deadline);
         boolean awaitConsumer() throws InterruptedException;
     }
@@ -29,11 +29,6 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
         void signalProducer();
     }
     
-    public interface Completer {
-        void latchDeadline(Instant deadline);
-        boolean awaitConsumer() throws InterruptedException;
-    }
-    
     final Core<In, Out> core;
     final ReentrantLock lock = new ReentrantLock();
     final Condition produced = lock.newCondition();
@@ -42,7 +37,6 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     final Control control = new Control();
     Instant deadline = null;
     Instant latchedDeadline = null;
-    In latchedInput = null;
     Out latchedOutput = null;
     int ctl = 0; // We encode the remaining properties in 7 bits
     
@@ -77,7 +71,6 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     private static final int NONE      = 0 << 2;
     private static final int CONSUMER  = 1 << 2;
     private static final int PRODUCER  = 2 << 2;
-    private static final int COMPLETER = 3 << 2;
     
     TimedTunnel(Core<In, Out> core) {
         this.core = core;
@@ -87,7 +80,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     // Methods protect against some kinds of misuse:
     //  1. Casting to another interface and calling its methods - protected by checking access()
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership
-    private class Control implements Producer<In>, Consumer<Out>, Completer {
+    private class Control implements Producer, Consumer<Out> {
         @Override
         public void latchDeadline(Instant deadline) {
             if (access() < CONSUMER || !lock.isHeldByCurrentThread()) {
@@ -123,7 +116,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
         
         @Override
         public boolean awaitConsumer() throws InterruptedException {
-            if (access() < PRODUCER || !lock.isHeldByCurrentThread()) {
+            if (access() != PRODUCER || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             if (state() == CLOSED) {
@@ -147,14 +140,6 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
                 latchedDeadline = savedDeadline;
                 setAccess(savedAccess);
             }
-        }
-        
-        @Override
-        public In input() {
-            if (access() != PRODUCER || !lock.isHeldByCurrentThread()) {
-                throw new IllegalStateException();
-            }
-            return latchedInput;
         }
     }
     
@@ -226,6 +211,31 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     }
     
     @Override
+    public <U> U callAsSource(Callable<? extends U> callable) throws Exception {
+        // TODO: Ideally(?) we would only block direct offers to the internal tunnel when we are directly offering to the internal tunnel.
+        //  - ie we DO want different locks for outer/inner, but we want to release them at the same time
+        //  - Is this ideal? Maybe we want to know that all of our offers go through atomically
+        //  - But not giving up the lock between offers means that polls can't happen unless offer blocks
+        lock.lockInterruptibly();
+        try {
+            acquireExclusiveProducer(); // TODO: read boolean
+            return callable.call();
+        } finally {
+            lock.unlock();
+        }
+    }
+    
+    @Override
+    public <U> U callAsSink(Callable<? extends U> callable) throws Exception {
+        lock.lockInterruptibly();
+        try {
+            return callable.call();
+        } finally {
+            lock.unlock();
+        }
+    }
+    
+    @Override
     public ReentrantLock lock() {
         return lock;
     }
@@ -242,9 +252,8 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
             try {
                 initIfNew();
                 setAccess(PRODUCER);
-                latchedInput = input;
                 
-                core.produce(control);
+                core.produce(control, input);
                 
                 if (state() == CLOSED) { // Possible if produce() called awaitConsumer()
                     return false;
@@ -254,11 +263,10 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
                 return true;
             } finally {
                 latchedDeadline = null;
-                latchedInput = null;
                 setAccess(NONE);
                 setIsProducerRunning(false);
             }
-        } catch (Error | RuntimeException | InterruptedException e) {
+        } catch (Error | Exception e) {
             close();
             throw e;
         } finally {
@@ -276,7 +284,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
             setIsProducerRunning(true);
             try {
                 initIfNew();
-                setAccess(COMPLETER);
+                setAccess(PRODUCER);
                 
                 core.complete(control);
                 
@@ -291,7 +299,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
                 setAccess(NONE);
                 setIsProducerRunning(false);
             }
-        } catch (Error | RuntimeException | InterruptedException e) {
+        } catch (Error | Exception e) {
             close();
             throw e;
         } finally {
@@ -322,7 +330,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
                 if (latchedOutput != null) {
                     return latchedOutput;
                 }
-            } catch (Error | RuntimeException | InterruptedException e) {
+            } catch (Error | Exception e) {
                 close();
                 throw e;
             } finally {

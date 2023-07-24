@@ -1,10 +1,15 @@
 package io.avery.pipeline;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.locks.ReentrantLock;
 
 public interface TunnelSink<T> {
     boolean offer(T input) throws Exception;
     default void complete() throws Exception {}
+    
+    default <U> U callAsSink(Callable<? extends U> callable) throws Exception {
+        return callable.call();
+    }
     
     default ReentrantLock lock() { return null; }
     
