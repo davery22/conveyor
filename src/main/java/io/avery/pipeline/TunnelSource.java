@@ -9,7 +9,7 @@ public interface TunnelSource<T> extends AutoCloseable {
     T poll() throws Exception;
     default void close() throws Exception {}
     
-    default void forEach(TunnelSink<? super T> sink) throws Exception {
+    default void forEachUntilCancel(TunnelSink<? super T> sink) throws Exception {
         for (T e; (e = poll()) != null; ) {
             if (!sink.offer(e)) {
                 return;

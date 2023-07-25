@@ -52,11 +52,19 @@ public class Tunnels {
 //                10,
 //                100
 //            );
-            var tunnel1 = Tunnels.throttle(
-               Duration.ofNanos(1),
-               (String s) -> s.length() * 1_000_000_000L,
-               0,
-               Long.MAX_VALUE
+//            var tunnel1 = Tunnels.throttle(
+//               Duration.ofNanos(1),
+//               (String s) -> s.length() * 1_000_000_000L,
+//               0,
+//               Long.MAX_VALUE
+//            );
+            var tunnel1 = Tunnels.batch(
+                () -> new ArrayList<>(10),
+                Collection::add,
+                list ->
+                      list.size() ==  1 ? Optional.of(Instant.now().plusSeconds(5))
+                    : list.size() >= 10 ? Optional.of(Instant.MIN)
+                    : Optional.empty()
             );
             var tunnel = tunnel1.prepend(flatMap3);
             
@@ -72,10 +80,10 @@ public class Tunnels {
             
             // Consumer
             scope.fork(() -> {
-//                tunnel.forEach(System.out::println);
-                for (String line; (line = tunnel.poll()) != null; ) {
-                    System.out.println(line + " " + line.length() + " " + Instant.now());
-                }
+                tunnel.forEach(System.out::println);
+//                for (String line; (line = tunnel.poll()) != null; ) {
+//                    System.out.println(line + " " + line.length() + " " + Instant.now());
+//                }
                 return null;
             });
             
@@ -534,12 +542,10 @@ public class Tunnels {
     
     public static <T, A> Tunnel<T, A> batch(Supplier<? extends A> batchSupplier,
                                             BiConsumer<? super A, ? super T> accumulator,
-                                            Predicate<? super A> batchFull,
-                                            Duration batchTimeout) {
+                                            Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
-        Objects.requireNonNull(batchFull);
-        Objects.requireNonNull(batchTimeout);
+        Objects.requireNonNull(deadlineMapper);
         
         class Batch implements TimedTunnel.Core<T, A> {
             boolean done = false;
@@ -553,21 +559,16 @@ public class Tunnels {
             @Override
             public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
-                while (batch != null && batchFull.test(batch)) {
+                while (batch != null && deadlineMapper.apply(batch).orElse(null) == Instant.MIN) {
                     if (!ctl.awaitConsumer()) {
                         return;
                     }
                 }
-                boolean open = batch != null;
-                if (!open) {
+                if (batch == null) {
                     batch = Objects.requireNonNull(batchSupplier.get());
                 }
                 accumulator.accept(batch, input);
-                if (batchFull.test(batch)) {
-                    ctl.latchDeadline(Instant.MIN);
-                } else if (!open) {
-                    ctl.latchDeadline(clock().instant().plus(batchTimeout));
-                }
+                deadlineMapper.apply(batch).ifPresent(ctl::latchDeadline);
             }
             
             @Override

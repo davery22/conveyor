@@ -6,10 +6,6 @@ import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
 import java.util.stream.Collector;
 
-/** @param <T> the element type
- *  @param <A> the (mutable) intermediate accumulation type
- *  @param <R> the (probably immutable) final accumulation type
- */
 interface Gatherer<T,A,R> {
     
     interface Sink<R> {
@@ -33,12 +29,12 @@ interface Gatherer<T,A,R> {
     Set<Characteristics> characteristics();
     
 //    default <AA, RR> Gatherer<T,?,RR> andThen(Gatherer<R,AA,RR> that) {
-//        // Gatherers is analoguous to Collectors
+//        // Gatherers is analogous to Collectors
 //        return Gatherers.Composite.of(this, that);
 //    }
 //
 //    default <RR> Collector<T,?,RR> collect(Collector<R, ?, RR> collector) {
-//        // Gatherers is analoguous to Collectors
+//        // Gatherers is analogous to Collectors
 //        return Gatherers.GathererCollector.of(this, collector);
 //    }
 }
