@@ -2,7 +2,7 @@ package io.avery.pipeline;
 
 public interface TunnelSink<T> {
     boolean offer(T input) throws Exception;
-    default void complete() throws Exception {}
+    default void complete(Throwable error) throws Exception {}
     
     // 1. Call when outer offer starts, with outerLock == null (outer reuses inner lock)
     //   - outer offers run inner offers 'atomically' (can interleave inner/outer polls, but NOT inner/outer offers)

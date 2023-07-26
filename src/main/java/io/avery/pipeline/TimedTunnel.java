@@ -13,7 +13,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
         Instant init() throws Exception;
         void consume(Consumer<Out> ctl) throws Exception;
         void produce(Producer ctl, In input) throws Exception;
-        void complete(Producer ctl) throws Exception;
+        void complete(Producer ctl, Throwable error) throws Exception;
     }
     
     public interface Producer {
@@ -224,7 +224,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     }
     
     @Override
-    public void complete() throws Exception {
+    public void complete(Throwable error) throws Exception {
         producerLock.lockInterruptibly();
         try {
             consumerLock.lockInterruptibly();
@@ -235,7 +235,7 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
                 initIfNew();
                 setAccess(PRODUCER);
                 
-                core.complete(control);
+                core.complete(control, error);
                 
                 if (state() == CLOSED) { // Possible if complete() called awaitConsumer()
                     return;

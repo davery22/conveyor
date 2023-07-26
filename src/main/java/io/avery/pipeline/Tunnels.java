@@ -70,17 +70,22 @@ public class Tunnels {
             
             // Producer
             scope.fork(() -> {
-                BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-                for (String line; !"stop".equalsIgnoreCase(line = reader.readLine());) {
-                    tunnel.offer(line);
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
+                    for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
+                        tunnel.offer(line);
+                    }
+                    tunnel.complete(null);
+                } catch (Throwable error) {
+                    tunnel.complete(error);
                 }
-                tunnel.complete();
                 return null;
             });
             
             // Consumer
             scope.fork(() -> {
-                tunnel.forEach(System.out::println);
+                try (tunnel) {
+                    tunnel.forEach(System.out::println);
+                }
 //                for (String line; (line = tunnel.poll()) != null; ) {
 //                    System.out.println(line + " " + line.length() + " " + Instant.now());
 //                }
@@ -342,15 +347,17 @@ public class Tunnels {
         }
         
         @Override
-        public void complete() throws Exception {
+        public void complete(Throwable error) throws Exception {
             producerLock.lockInterruptibly();
             try {
                 if (state == CLOSED) {
                     return;
                 }
                 initIfNew();
-                finisher.accept(acc, gsink);
-                tunnel().complete();
+                if (error == null) {
+                    finisher.accept(acc, gsink);
+                }
+                tunnel().complete(error);
             } catch (WrappingException e) {
                 if (e.getCause() instanceof InterruptedException) {
                     Thread.interrupted();
@@ -550,6 +557,7 @@ public class Tunnels {
         class Batch implements TimedTunnel.Core<T, A> {
             boolean done = false;
             A batch = null;
+            Throwable err = null;
             
             @Override
             public Instant init() {
@@ -572,8 +580,11 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedTunnel.Consumer<A> ctl) {
+            public void consume(TimedTunnel.Consumer<A> ctl) throws ExecutionException {
                 if (done) {
+                    if (err != null) {
+                        throw new ExecutionException(err);
+                    }
                     ctl.latchClose();
                     if (batch == null) {
                         return;
@@ -586,7 +597,8 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Producer ctl) {
+            public void complete(TimedTunnel.Producer ctl, Throwable error) {
+                err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
             }
@@ -620,6 +632,7 @@ public class Tunnels {
             long tokens = 0;
             long cost = 0;
             Instant lastObservedAccrual;
+            Throwable err = null;
             
             @Override
             public Instant init() {
@@ -647,7 +660,10 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedTunnel.Consumer<T> ctl) {
+            public void consume(TimedTunnel.Consumer<T> ctl) throws ExecutionException {
+                if (err != null) {
+                    throw new ExecutionException(err);
+                }
                 // Increase tokens based on actual amount of time that passed
                 Instant now = clock().instant();
                 long nanosSinceLastObservedAccrual = ChronoUnit.NANOS.between(lastObservedAccrual, now);
@@ -687,10 +703,15 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Producer ctl) {
-                queue.offer(new Weighted<>(null, 0));
-                if (queue.size() == 1) {
+            public void complete(TimedTunnel.Producer ctl, Throwable error) {
+                if (error != null) {
+                    err = error;
                     ctl.latchDeadline(Instant.MIN);
+                } else {
+                    queue.offer(new Weighted<>(null, 0));
+                    if (queue.size() == 1) {
+                        ctl.latchDeadline(Instant.MIN);
+                    }
                 }
             }
         }
