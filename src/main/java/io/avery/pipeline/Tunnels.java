@@ -62,9 +62,9 @@ public class Tunnels {
                 () -> new ArrayList<>(10),
                 Collection::add,
                 list ->
-                      list.size() ==  1 ? Optional.of(Instant.now().plusSeconds(5))
-                    : list.size() >= 10 ? Optional.of(Instant.MIN)
-                    : Optional.empty()
+                      list.size() ==  1 ? Instant.now().plusSeconds(5)
+                    : list.size() == 10 ? Instant.MIN
+                    : null
             );
             var tunnel = tunnel1.prepend(flatMap3);
             
@@ -549,7 +549,7 @@ public class Tunnels {
     
     public static <T, A> Tunnel<T, A> batch(Supplier<? extends A> batchSupplier,
                                             BiConsumer<? super A, ? super T> accumulator,
-                                            Function<? super A, Optional<Instant>> deadlineMapper) {
+                                            Function<? super A, Instant> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
@@ -557,6 +557,7 @@ public class Tunnels {
         class Batch implements TimedTunnel.Core<T, A> {
             boolean done = false;
             A batch = null;
+            Instant currentDeadline = null;
             Throwable err = null;
             
             @Override
@@ -567,7 +568,7 @@ public class Tunnels {
             @Override
             public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
-                while (batch != null && deadlineMapper.apply(batch).orElse(null) == Instant.MIN) {
+                while (batch != null && currentDeadline == Instant.MIN) {
                     if (!ctl.awaitConsumer()) {
                         return;
                     }
@@ -576,7 +577,10 @@ public class Tunnels {
                     batch = Objects.requireNonNull(batchSupplier.get());
                 }
                 accumulator.accept(batch, input);
-                deadlineMapper.apply(batch).ifPresent(ctl::latchDeadline);
+                currentDeadline = deadlineMapper.apply(batch);
+                if (currentDeadline != null) {
+                    ctl.latchDeadline(currentDeadline);
+                }
             }
             
             @Override
@@ -592,6 +596,7 @@ public class Tunnels {
                 }
                 ctl.latchOutput(batch);
                 batch = null;
+                currentDeadline = null;
                 ctl.latchDeadline(Instant.MAX);
                 ctl.signalProducer();
             }
