@@ -7,12 +7,12 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
+public class TimedStage<In, Out> implements Tunnel.Stage<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant init() throws Exception;
-        void consume(Consumer<Out> ctl) throws Exception;
         void produce(Producer ctl, In input) throws Exception;
+        void consume(Consumer<Out> ctl) throws Exception;
         void complete(Producer ctl, Throwable error) throws Exception;
     }
     
@@ -68,11 +68,11 @@ public class TimedTunnel<In, Out> implements Tunnel<In, Out> {
     private static final int CONSUMER  = 1 << 2;
     private static final int PRODUCER  = 2 << 2;
     
-    TimedTunnel(Core<In, Out> core) {
+    TimedStage(Core<In, Out> core) {
         this.core = core;
     }
     
-    // One instance per TimedTunnel.
+    // One instance per TimedStage.
     // Methods protect against some kinds of misuse:
     //  1. Casting to another interface and calling its methods - protected by checking access()
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership

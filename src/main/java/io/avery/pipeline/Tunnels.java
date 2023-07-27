@@ -7,7 +7,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.StructuredTaskScope.Subtask;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
@@ -46,49 +45,42 @@ public class Tunnels {
         };
         
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var tunnel = Recipes.throttle(
-//                Duration.ofSeconds(1),
-//                String::length,
-//                10,
-//                100
-//            );
-//            var tunnel1 = Tunnels.throttle(
-//               Duration.ofNanos(1),
-//               (String s) -> s.length() * 1_000_000_000L,
-//               0,
-//               Long.MAX_VALUE
-//            );
-            var tunnel1 = Tunnels.batch(
-                () -> new ArrayList<>(10),
-                Collection::add,
-                list ->
-                      list.size() ==  1 ? Instant.now().plusSeconds(5)
-                    : list.size() == 10 ? Instant.MIN
-                    : null
+            var stage = Tunnels.chain(
+                flatMap3,
+                Tunnels.tokenBucket(
+                    Duration.ofSeconds(1),
+                    String::length,
+                    10,
+                    100
+                )
+//                Tunnels.batch(
+//                    () -> new ArrayList<>(10),
+//                    Collection::add,
+//                    list ->
+//                          list.size() ==  1 ? Optional.of(Instant.now().plusSeconds(5))
+//                        : list.size() >= 10 ? Optional.of(Instant.MIN)
+//                        : Optional.empty()
+//                )
             );
-            var tunnel = tunnel1.prepend(flatMap3);
             
             // Producer
             scope.fork(() -> {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
                     for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
-                        tunnel.offer(line);
+                        stage.offer(line);
                     }
-                    tunnel.complete(null);
+                    stage.complete(null);
                 } catch (Throwable error) {
-                    tunnel.complete(error);
+                    stage.complete(error);
                 }
                 return null;
             });
             
             // Consumer
             scope.fork(() -> {
-                try (tunnel) {
-                    tunnel.forEach(System.out::println);
+                try (stage) {
+                    stage.forEach(System.out::println);
                 }
-//                for (String line; (line = tunnel.poll()) != null; ) {
-//                    System.out.println(line + " " + line.length() + " " + Instant.now());
-//                }
                 return null;
             });
             
@@ -96,171 +88,7 @@ public class Tunnels {
         }
     }
     
-    // ✅
-    public static void backpressureTimeout() {
-        // Throws if a timeout elapses between upstream emission and downstream consumption.
-        // Probably does not block upstream. Unbounded buffer?
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // -------
-    
-    // ✅
-    public static void batchWeighted() {
-        // Like collectWithin, but downstream does not wait for an open window to be 'full'.
-        // Downstream will consume an open window as soon as it sees it.
-        // No waiting = no timeout.
-        // Upstream blocks if the open window is 'full'.
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // ✅
-    public static void buffer() {
-        // Like batchWeighted, but is not limited to blocking upstream when the open window is 'full'.
-        // It can alternatively adjust (DropHead, DropTail) or reset (DropBuffer) the window, or throw (Fail).
-        // (Blocking or dropping would essentially be a form of throttling, esp. if downstream is fixed-rate.)
-        // Might be obviated by a general impl of batchWeighted.
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // ✅
-    public static void conflateWithSeed() {
-        // Like batchWeighted, but accumulates instead of blocking upstream when the open window is 'full'.
-        // Would be obviated by a general impl of buffer.
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // -------
-    
-    // ✅
-    public static void delayWith() {
-        // Shifts element emission in time by a specified amount.
-        // Implement by buffering each element with a deadline.
-        // Maybe change to allow reordering if new elements have a sooner deadline than older elements?
-        
-        // Could be async or sync (sync would of course be constrained to run on arrivals).
-    }
-    
-    // ✅
-    public static void extrapolate() {
-        // Flatmaps the most recent element from upstream until upstream emits again.
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // ✅
-    public static void keepAlive() {
-        // Injects additional elements if upstream does not emit for a configured amount of time.
-        
-        // Inherently async (addresses speed mismatch between upstream/downstream).
-    }
-    
-    // ✅
-    public static void throttle() {
-        // Limits upstream emission rate, while allowing for some 'burstiness'.
-        
-        // Could be async or sync (sync would of course be constrained to run on arrivals).
-    }
-    
-    // ✅
-    public static void throttleLast() {
-        // Partitions into sequential fixed-duration time windows, and emits the last element of each window.
-        
-        // Could be async or sync (sync would of course be constrained to run on arrivals).
-    }
-    
-    // ✅
-    public static void debounce() {
-        // aka throttleWithTimeout
-        // Drops elements if another (different?) element arrives before a deadline.
-        // Deadline may be computed per-element.
-        // Elements will be emitted no sooner than their deadline expires.
-        
-        // Could be async or sync (sync would of course be constrained to run on arrivals).
-    }
-    
-    // TODO: Version of collectWithin that saturates timeout until minWeight is reached?
-    //   ie: [ cannot emit | can emit if timed-out | can emit asap ]
-    //                     ^ minWeight             ^ maxWeight
-    //   A non-blocking overflow strategy might allow 'overweight' windows to go back to 'underweight'/'in-weight'
-    
-    // Could return multiple sides of a channel, ie Producer & Consumer (like Rust mpsc)
-    // But this feels like layering that needn't exist?
-    // What if there are more than two sides? eg, need a third party to poll
-    
-    // What if we derived a timeout from the window, rather than a 'weight' or 'readiness'?
-    //  Inf timeout -> Not Ready; <=0 timeout -> Ready
-    //  In that case, should upstream block when Ready? Or allow transitioning back to Not Ready?
-    
-    // What if we could still adjust a Ready window in response to new elements?
-    //  'readiness' is already user-defined - user could store this on the window itself
-    //  It would be the (user-defined) accumulator's problem to block on a Ready window if desired
-    
-    // Throttling - provideToken() for user-controlled token rate? Or baked-in rate controls?
-    
-    // collectWithin -> expiringBatch ?
-    
-    // Types of timeout:
-    //  1. Sequential fixed-duration time windows
-    //    - ex: throttleLast
-    //  2. Sequential expiring batches from time-of-creation (or first element)
-    //    - ex: groupedWithin
-    //    - riff: Updating batch updates expiration
-    //  3. Overlapping expiring emissions
-    //    - ex: delayWith
-    
-    // debounce could be done with sequential expiring batches, if deadline could be adjusted
-    //  - batch: { deadline, element }
-    //  - if newElement != element, set batch = { newDeadline, newElement }
-    
-    // upstream:   () -> state
-    // upstream:   (state, item) -> deadline
-    // downstream: (state, sink) -> deadline
-    // TODO: downstream emit should be lockless
-    
-    // Seems like a good idea to 'start' in the consumer (ie create initial state, deadline, etc),
-    // Maybe have a method that creates the state + consumer (+ producer?)
-    
-    // What if state was created outside the handlers?
-    // state;
-    // (producerControl) -> deadline
-    // (consumerControl) -> deadline
-    
-    // ctl.deadline() isn't very useful if the deadline may have been Instant.MIN / Instant.MAX
-    // But, used carefully, it is more accurate than relying on Instant.now() (since downstream may be late)
-    // May be better to schedule using Instant.now() instead of Instant.MIN
-    
-    // Terminal conditions:
-    //  1. Producer or consumer throws an uncaught exception
-    //    - If run with ShutdownOnFailure, this will commence cleanup, by interrupting other threads
-    //    - TODO: Should this also set some 'done' state, etc, in case cleanup tries to call methods again?
-    //  2. Downstream indicates cancellation to producer
-    //    - TODO: If consumer decides to stop processing, how does it notify producer? Interrupt?
-    //    - cancel() ??
-    //  3. Producer indicates completion to consumer
-    //    - complete()
-    //    - TODO: What do later calls to producer (completion or otherwise) do?
-    //    - When/how is the consumer informed of completion?
-    //      - A: Consumer's poll() returns false
-    
-    // TODO: What happens if producer tries to awaitConsumer() that has been cancelled? Does anything wake it?
-    //  - Maybe awaitConsumer() can return a boolean - false iff the consumer is cancelled
-    //    - Still does not address any unmanaged blocking the producer might do (and only interrupt() can help there)
-    
-    
-    // No AppendedTunnel:
-    // TODO: A single output may trigger several returns to the caller
-    //  We should buffer all of them before returning any (unbounded buffering?)
-    //  OR... buffering kinda feels like offering to another Tunnel, no?
-    //  But that could deadlock us if the Tunnel fills up - nothing is polling it
-    //  Seems like it would work better to do this manually
-    //   - poll() + offer() to another [Prepended]Tunnel, so we can control the asynchrony
-    
-    static class WrappingException extends RuntimeException {
+    private static class WrappingException extends RuntimeException {
         WrappingException(Exception e) {
             super(e);
         }
@@ -271,12 +99,12 @@ public class Tunnels {
         }
     }
     
-    static class PrependedTunnelSink<In, T, A> implements TunnelSink<In> {
+    private static class PrependedSink<In, T, A> implements Tunnel.Sink<In> {
         final ReentrantLock producerLock = new ReentrantLock();
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
-        final TunnelSink<T> tunnel;
+        final Tunnel.Sink<T> tunnel;
         final Gatherer.Sink<T> gsink;
         A acc = null;
         int state = NEW;
@@ -285,11 +113,11 @@ public class Tunnels {
         static final int RUNNING = 1;
         static final int CLOSED = 2;
         
-        PrependedTunnelSink(Gatherer<In, A, T> gatherer, TunnelSink<T> tunnel) {
+        PrependedSink(Gatherer<In, A, T> gatherer, Tunnel.Sink<T> sink) {
             this.supplier = gatherer.supplier();
             this.integrator = gatherer.integrator();
             this.finisher = gatherer.finisher();
-            this.tunnel = tunnel;
+            this.tunnel = sink;
             this.gsink = el -> {
                 try {
                     return tunnel().offer(el);
@@ -307,7 +135,7 @@ public class Tunnels {
             };
         }
         
-        TunnelSink<T> tunnel() {
+        Tunnel.Sink<T> tunnel() {
             return tunnel;
         }
         
@@ -370,14 +198,14 @@ public class Tunnels {
         }
     }
     
-    static class PrependedTunnel<In, T, A, Out> extends PrependedTunnelSink<In, T, A> implements Tunnel<In, Out> {
-        PrependedTunnel(Gatherer<In, A, T> gatherer, Tunnel<T, Out> tunnel) {
-            super(gatherer, tunnel);
+    private static class PrependedStage<In, T, A, Out> extends PrependedSink<In, T, A> implements Tunnel.Stage<In, Out> {
+        PrependedStage(Gatherer<In, A, T> gatherer, Tunnel.Stage<T, Out> stage) {
+            super(gatherer, stage);
         }
         
         @Override
-        Tunnel<T, Out> tunnel() {
-            return (Tunnel<T, Out>) tunnel;
+        Tunnel.Stage<T, Out> tunnel() {
+            return (Tunnel.Stage<T, Out>) tunnel;
         }
         
         @Override
@@ -391,38 +219,90 @@ public class Tunnels {
         }
     }
     
-    static <In, T, A> TunnelSink<In> prepend(Gatherer<In, A, ? extends T> gatherer, TunnelSink<T> sink) {
+    public static <In, T, A> Tunnel.Sink<In> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.Sink<T> sink) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
-        return new PrependedTunnelSink<>(g, sink);
+        return new PrependedSink<>(g, sink);
     }
     
-    static <In, T, A, Out> Tunnel<In, Out> prepend(Gatherer<In, A, ? extends T> gatherer, Tunnel<T, Out> tunnel) {
+    public static <In, T, A, Out> Tunnel.Stage<In, Out> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.Stage<T, Out> stage) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
-        return new PrependedTunnel<>(g, tunnel);
+        return new PrependedStage<>(g, stage);
     }
     
-    public static <R1, R2, R> TunnelSource<R> zip(TunnelSource<R1> source1,
-                                                  TunnelSource<R2> source2,
-                                                  BiFunction<? super R1, ? super R2, R> merger) {
+    private interface Accessor<X, Y> {
+        void setLatest1(X x);
+        Y latest2();
+    }
+    
+    private static class Comm {
+        boolean cancelled = false;
+    }
+    
+    public static <T1, T2, T> Tunnel.Push<T> zip(Tunnel.Source<T1> source1,
+                                                 Tunnel.Source<T2> source2,
+                                                 BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class Zip implements TunnelSource<R> {
-            @Override
-            public R poll() throws ExecutionException, InterruptedException {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    Subtask<R1> task1 = scope.fork(source1::poll);
-                    Subtask<R2> task2 = scope.fork(source2::poll);
-                    scope.join().throwIfFailed();
-                    R1 a = task1.get();
-                    R2 b = task2.get();
-                    if (a == null || b == null) {
-                        return null;
+        class Zip implements Tunnel.Push<T> {
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition ready = lock.newCondition();
+            T1 latest1 = null;
+            T2 latest2 = null;
+            
+            <X, Y> Void runSource(Tunnel.Source<X> source,
+                                  Accessor<X, Y> access,
+                                  Comm comm,
+                                  Tunnel.Sink<? super T> sink) throws Exception {
+                for (X e; (e = source.poll()) != null; ) {
+                    lock.lockInterruptibly();
+                    try {
+                        if (comm.cancelled) {
+                            return null;
+                        }
+                        access.setLatest1(e);
+                        if (access.latest2() == null) {
+                            do {
+                                ready.await();
+                                if (comm.cancelled) {
+                                    return null;
+                                }
+                            } while (access.latest2() == null);
+                        } else {
+                            ready.signal();
+                            T t = merger.apply(latest1, latest2);
+                            latest1 = null;
+                            latest2 = null;
+                            if (!sink.offer(t)) {
+                                comm.cancelled = true;
+                                return null;
+                            }
+                        }
+                    } finally {
+                        lock.unlock();
                     }
-                    return Objects.requireNonNull(merger.apply(a, b));
+                }
+                return null;
+            }
+            
+            @Override
+            public void forEachUntilCancel(Tunnel.Sink<? super T> sink) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var comm = new Comm();
+                    var accessor1 = new Accessor<T1, T2>() {
+                        public void setLatest1(T1 t1) { latest1 = t1; }
+                        public T2 latest2() { return latest2; }
+                    };
+                    var accessor2 = new Accessor<T2, T1>() {
+                        public void setLatest1(T2 t1) { latest2 = t1; }
+                        public T1 latest2() { return latest1; }
+                    };
+                    scope.fork(() -> runSource(source1, accessor1, comm, sink));
+                    scope.fork(() -> runSource(source2, accessor2, comm, sink));
+                    scope.join().throwIfFailed();
                 }
             }
             
@@ -435,71 +315,73 @@ public class Tunnels {
         return new Zip();
     }
     
-    public static <T1, T2, T> void combineLatest(TunnelSource<T1> source1,
-                                                 TunnelSource<T2> source2,
-                                                 BiFunction<? super T1, ? super T2, T> merger,
-                                                 TunnelSink<? super T> sink) throws ExecutionException, InterruptedException {
+    // There is no way to know that a source is empty without polling it.
+    // And once we poll it and get something, there is no way to put it back.
+    // So if we need to poll 2 sources to produce 1 output, and 1 source is empty,
+    // we will end up discarding the element from the other source.
+    
+    // What happens when 2 threads run combineLatest.forEachUntilCancel?
+    // If they share the same state, the algorithm ceases to work, because it
+    // assumes only one competing thread, eg when polling, going to sleep,
+    // waking up.
+    // TODO: Does separate state even mitigate this? Still contending to poll, etc...
+    
+    public static <T1, T2, T> Tunnel.Push<T> combineLatest(Tunnel.Source<T1> source1,
+                                                           Tunnel.Source<T2> source2,
+                                                           BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
-        Objects.requireNonNull(sink);
         
-        interface Accessor<X, Y> {
-            void setLatest1(X x);
-            Y latest2();
-        }
-        
-        class CombineLatest {
+        class CombineLatest implements Tunnel.Push<T> {
+            // TODO: Bring-Your-Own-State?
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             T1 latest1 = null;
             T2 latest2 = null;
-            boolean quit = false;
             
-            <X, Y> Void runSource(TunnelSource<X> source, Accessor<X, Y> access) throws Exception {
-                X e;
-                if ((e = source.poll()) == null) {
-                    // If either source is empty, we will never emit
-                    lock.lockInterruptibly();
-                    try {
-                        quit = true;
+            <X, Y> Void runSource(Tunnel.Source<X> source,
+                                  Accessor<X, Y> access,
+                                  Comm comm,
+                                  Tunnel.Sink<? super T> sink) throws Exception {
+                X e = source.poll();
+                lock.lockInterruptibly();
+                try {
+                    if (comm.cancelled) {
+                        return null;
+                    }
+                    if (e == null) {
+                        // If either source is empty, we will never emit
+                        comm.cancelled = true; // TODO
                         ready.signal();
                         return null;
-                    } finally {
-                        lock.unlock();
                     }
-                } else {
                     // Wait until we have the first element from both sources
-                    lock.lockInterruptibly();
-                    try {
-                        if (quit) {
-                            return null;
-                        }
-                        access.setLatest1(e);
-                        if (access.latest2() == null) {
-                            do {
-                                ready.await();
-                                if (quit) {
-                                    return null;
-                                }
-                            } while (access.latest2() == null);
-                        } else {
-                            ready.signal();
-                            T t = merger.apply(latest1, latest2);
-                            if (!sink.offer(t)) {
-                                quit = true;
+                    access.setLatest1(e);
+                    if (access.latest2() == null) {
+                        do {
+                            ready.await();
+                            if (comm.cancelled) {
                                 return null;
                             }
                         }
-                    } finally {
-                        lock.unlock();
+                        while (access.latest2() == null);
+                    } else {
+                        ready.signal();
+                        T t = merger.apply(latest1, latest2);
+                        if (!sink.offer(t)) {
+                            comm.cancelled = true;
+                            return null;
+                        }
                     }
+                } finally {
+                    lock.unlock();
                 }
                 // Normal mode
                 while ((e = source.poll()) != null) {
                     lock.lockInterruptibly();
                     try {
-                        if (quit) {
+                        if (comm.cancelled) {
                             return null;
                         }
                         access.setLatest1(e);
@@ -507,7 +389,7 @@ public class Tunnels {
                         if (!sink.offer(t)) {
                             // TODO: Wake up other thread from poll()?
                             //  But if we interrupt during poll(), we close the source when we might not have wanted to
-                            quit = true;
+                            comm.cancelled = true;
                             return null;
                         }
                     } finally {
@@ -517,8 +399,10 @@ public class Tunnels {
                 return null;
             }
             
-            void run() throws InterruptedException, ExecutionException {
+            @Override
+            public void forEachUntilCancel(Tunnel.Sink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var comm = new Comm();
                     var accessor1 = new Accessor<T1, T2>() {
                         public void setLatest1(T1 t1) { latest1 = t1; }
                         public T2 latest2() { return latest2; }
@@ -527,37 +411,32 @@ public class Tunnels {
                         public void setLatest1(T2 t1) { latest2 = t1; }
                         public T1 latest2() { return latest1; }
                     };
-                    scope.fork(() -> runSource(source1, accessor1));
-                    scope.fork(() -> runSource(source2, accessor2));
+                    scope.fork(() -> runSource(source1, accessor1, comm, sink));
+                    scope.fork(() -> runSource(source2, accessor2, comm, sink));
                     scope.join().throwIfFailed();
                 }
             }
+            
+            @Override
+            public void close() throws Exception {
+                try (source1; source2) {}
+            }
         }
         
-        new CombineLatest().run();
+        return new CombineLatest();
     }
     
-    // We don't necessarily want to close() the source when we are done - may want to continue polling it later (or concurrently)
-    // We don't necessarily want to complete() the sink when we are done - may want to continue offering to it later (or concurrently)
-    //  - Completing a sink tends to affect what (final) elements are emitted downstream of it
-    //  - TODO: Would some sinks behave differently if we could completeExceptionally(e) them? And/or close() them?
-    // When combineLatest() returns normally, either all sources completed, some source was empty, or sink canceled.
-    // When combineLatest() throws... who knows? Could be source.poll(), or sink.offer(), or merger.apply(), or interrupt.
-    //  - If source.poll() threw we can presume that source is closed(?). Maybe same with sink.offer().
-    //  - Whichever thread threw will interrupt the other, so could close() sources or sinks.
-    // It is up to the caller to catch an exception in combineLatest() and decide to close() sources or complete() sinks
-    
-    public static <T, A> Tunnel<T, A> batch(Supplier<? extends A> batchSupplier,
-                                            BiConsumer<? super A, ? super T> accumulator,
-                                            Function<? super A, Instant> deadlineMapper) {
+    public static <T, A> Tunnel.Stage<T, A> batch(Supplier<? extends A> batchSupplier,
+                                                  BiConsumer<? super A, ? super T> accumulator,
+                                                  Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
         
-        class Batch implements TimedTunnel.Core<T, A> {
-            boolean done = false;
+        class Batch implements TimedStage.Core<T, A> {
             A batch = null;
             Instant currentDeadline = null;
+            boolean done = false;
             Throwable err = null;
             
             @Override
@@ -566,7 +445,7 @@ public class Tunnels {
             }
             
             @Override
-            public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
+            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
                 while (batch != null && currentDeadline == Instant.MIN) {
                     if (!ctl.awaitConsumer()) {
@@ -577,14 +456,14 @@ public class Tunnels {
                     batch = Objects.requireNonNull(batchSupplier.get());
                 }
                 accumulator.accept(batch, input);
-                currentDeadline = deadlineMapper.apply(batch);
+                currentDeadline = deadlineMapper.apply(batch).orElse(null);
                 if (currentDeadline != null) {
                     ctl.latchDeadline(currentDeadline);
                 }
             }
             
             @Override
-            public void consume(TimedTunnel.Consumer<A> ctl) throws ExecutionException {
+            public void consume(TimedStage.Consumer<A> ctl) throws ExecutionException {
                 if (done) {
                     if (err != null) {
                         throw new ExecutionException(err);
@@ -602,25 +481,28 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Producer ctl, Throwable error) {
+            public void complete(TimedStage.Producer ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
             }
         }
         
-        var config = new Batch();
-        return new TimedTunnel<>(config);
+        var core = new Batch();
+        return new TimedStage<>(core);
     }
     
-    public static <T> Tunnel<T, T> throttle(Duration tokenInterval,
-                                            ToLongFunction<T> costMapper,
-                                            long tokenLimit,
-                                            long costLimit) {
+    public static <T> Tunnel.Stage<T, T> tokenBucket(Duration tokenInterval,
+                                                     ToLongFunction<T> costMapper,
+                                                     long tokenLimit,
+                                                     long costLimit) { // TODO: Obviate costLimit?
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
-        if ((tokenLimit | costLimit) < 0 || !tokenInterval.isPositive()) {
-            throw new IllegalArgumentException();
+        if ((tokenLimit | costLimit) < 0) {
+            throw new IllegalArgumentException("tokenLimit and costLimit must be non-negative");
+        }
+        if (!tokenInterval.isPositive()) {
+            throw new IllegalArgumentException("tokenInterval must be positive");
         }
         
         long tmpTokenInterval;
@@ -631,22 +513,24 @@ public class Tunnels {
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
-        class Throttle implements TimedTunnel.Core<T, T> {
-            final Deque<Weighted<T>> queue = new ArrayDeque<>();
+        class Throttle implements TimedStage.Core<T, T> {
+            Deque<Weighted<T>> queue = null;
             long tempTokenLimit = 0;
             long tokens = 0;
             long cost = 0;
             Instant lastObservedAccrual;
+            boolean done = false;
             Throwable err = null;
             
             @Override
             public Instant init() {
+                queue = new ArrayDeque<>();
                 lastObservedAccrual = clock().instant();
                 return Instant.MAX;
             }
             
             @Override
-            public void produce(TimedTunnel.Producer ctl, T input) throws InterruptedException {
+            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
                 // Optional blocking for boundedness, here based on cost rather than queue size
                 while (cost >= costLimit) {
                     if (!ctl.awaitConsumer()) {
@@ -658,16 +542,22 @@ public class Tunnels {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
                 cost = Math.addExact(cost, elementCost);
-                queue.offer(new Weighted<>(input, elementCost));
-                if (queue.size() == 1) {
+                var w = new Weighted<>(input, elementCost);
+                queue.offer(w);
+                if (queue.peek() == w) {
                     ctl.latchDeadline(Instant.MIN); // Let consumer do token math
                 }
             }
             
             @Override
-            public void consume(TimedTunnel.Consumer<T> ctl) throws ExecutionException {
+            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
                 if (err != null) {
                     throw new ExecutionException(err);
+                }
+                Weighted<T> head = queue.peek();
+                if (head == null) {
+                    ctl.latchClose();
+                    return;
                 }
                 // Increase tokens based on actual amount of time that passed
                 Instant now = clock().instant();
@@ -679,12 +569,7 @@ public class Tunnels {
                     tokens = Math.min(tokens + newTokens, Math.max(tokenLimit, tempTokenLimit));
                 }
                 // Emit if we can, then schedule next emission
-                Weighted<T> head = queue.peek();
                 if (tokens >= head.cost) {
-                    if (head.element == null) {
-                        ctl.latchClose();
-                        return;
-                    }
                     tempTokenLimit = 0;
                     tokens -= head.cost;
                     cost -= head.cost;
@@ -692,12 +577,17 @@ public class Tunnels {
                     ctl.signalProducer();
                     ctl.latchOutput(head.element);
                     head = queue.peek();
-                    if (head == null) {
+                    if (head != null) {
+                        if (tokens >= head.cost) {
+                            ctl.latchDeadline(Instant.MIN);
+                            return;
+                        }
+                        // Fall-through to scheduling!
+                    } else if (!done) {
                         ctl.latchDeadline(Instant.MAX);
                         return;
-                    }
-                    if (tokens >= head.cost) {
-                        ctl.latchDeadline(Instant.MIN);
+                    } else {
+                        ctl.latchClose();
                         return;
                     }
                 }
@@ -708,261 +598,216 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedTunnel.Producer ctl, Throwable error) {
-                if (error != null) {
-                    err = error;
+            public void complete(TimedStage.Producer ctl, Throwable error) {
+                err = error;
+                done = true;
+                if (error != null || queue.isEmpty()) {
                     ctl.latchDeadline(Instant.MIN);
-                } else {
-                    queue.offer(new Weighted<>(null, 0));
-                    if (queue.size() == 1) {
-                        ctl.latchDeadline(Instant.MIN);
-                    }
                 }
             }
         }
         
-        var config = new Throttle();
-        return new TimedTunnel<>(config);
+        var core = new Throttle();
+        return new TimedStage<>(core);
     }
     
-//    public static void main() {
-//        // throttleFirst
-//        var state2 = new Object(){
-//            int element;
-//            boolean present;
-//            Instant coolDownDeadline = Instant.MIN;
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                if (state2.present || Instant.now().isBefore(state2.coolDownDeadline)) {
-//                    return;
-//                }
-//                state2.present = true;
-//                state2.element = ctl.input();
-//                ctl.latchDeadline(Instant.MIN);
-//            },
-//            ctl -> {
-//                state2.coolDownDeadline = Instant.now().plusSeconds(5);
-//                state2.present = false;
-//                ctl.latchOutput(state2.element);
-//                ctl.latchDeadline(Instant.MAX);
-//            }
-//        );
-//
-//        // throttleLast
-//        var state3 = new Object(){
-//            int element;
-//            boolean present;
-//            Instant lastDeadline = Instant.now().plusSeconds(5);
-//        };
-//        boundary(
-//            List.of(1),
-//            state3.lastDeadline,
-//            ctl -> {
-//                state3.present = true;
-//                state3.element = ctl.input();
-//            },
-//            ctl -> {
-//                if (state3.present) {
-//                    state3.present = false;
-//                    ctl.latchOutput(state3.element);
-//                }
-//                ctl.latchDeadline(state3.lastDeadline = state3.lastDeadline.plusSeconds(5));
-//            }
-//        );
-//
-//        // throttleLatest
-//        var state4 = new Object(){
-//            int curr;
-//            int next;
-//            boolean currPresent;
-//            boolean nextPresent;
-//            Instant coolDownDeadline = Instant.MIN;
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                if (!state4.currPresent) {
-//                    state4.curr = ctl.input();
-//                    state4.currPresent = true;
-//                    ctl.latchDeadline(state4.coolDownDeadline);
-//                } else {
-//                    state4.next = ctl.input();
-//                    state4.nextPresent = true;
-//                }
-//            },
-//            ctl -> {
-//                state4.coolDownDeadline = Instant.now().plusSeconds(5);
-//                ctl.latchOutput(state4.curr);
-//                if (state4.currPresent = state4.nextPresent) {
-//                    state4.curr = state4.next;
-//                    state4.nextPresent = false;
-//                    ctl.latchDeadline(state4.coolDownDeadline);
-//                } else {
-//                    ctl.latchDeadline(Instant.MAX);
-//                }
-//            }
-//        );
-//
-//        // delayWith
-//        var state7 = new Object(){
-//            final PriorityQueue<Expiring<Integer>> pq = new PriorityQueue<>();
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                Instant deadline = Instant.now().plusSeconds(ctl.input());
-//                Expiring<Integer> e = new Expiring<>(ctl.input(), deadline);
-//                state7.pq.offer(e);
-//                if (state7.pq.peek() == e) {
-//                    ctl.latchDeadline(deadline);
-//                }
-//            },
-//            ctl -> {
-//                ctl.latchOutput(state7.pq.poll().element);
-//                Expiring<Integer> head = state7.pq.peek();
-//                if (head != null) {
-//                    ctl.latchDeadline(head.deadline);
-//                } else {
-//                    ctl.latchDeadline(Instant.MAX);
-//                }
-//            }
-//        );
-//
-//        // extrapolate
-//        var state5 = new Object(){
-//            final Deque<Integer> queue = new ArrayDeque<>(10);
-//            Iterator<Integer> iter;
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                // Optional blocking for boundedness
-//                while (state5.queue.size() >= 10) {
-//                    ctl.awaitConsumer();
-//                }
-//                state5.queue.offer(ctl.input());
-//                state5.iter = null;
-//                ctl.latchDeadline(Instant.MIN);
-//            },
-//            ctl -> {
-//                if (state5.queue.size() > 1) {
-//                    ctl.latchOutput(state5.queue.poll());
-//                    ctl.latchDeadline(Instant.MIN);
-//                } else {
-//                    if (state5.iter == null) {
-//                        int out = state5.queue.poll();
-//                        state5.iter = Stream.iterate(out + 1,
-//                                                     i -> i < out + 10,
-//                                                     i -> i + 1).iterator();
-//                        ctl.latchOutput(out);
-//                    } else {
-//                        ctl.latchOutput(state5.iter.next());
-//                    }
-//                    ctl.latchDeadline(state5.iter.hasNext() ? Instant.MIN : Instant.MAX);
-//                }
-//            }
-//        );
-//
-//        // backpressureTimeout
-//        var state6 = new Object(){
-//            final Deque<Expiring<Integer>> queue = new ArrayDeque<>();
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                Instant now = Instant.now();
-//                Expiring<Integer> head = state6.queue.peek();
-//                if (head != null && head.deadline.isBefore(now)) {
-//                    throw new IllegalStateException();
-//                }
-//                Expiring<Integer> e = new Expiring<>(ctl.input(), now.plusSeconds(5));
-//                state6.queue.offer(e);
-//                ctl.latchDeadline(Instant.MIN);
-//            },
-//            ctl -> {
-//                Instant now = Instant.now();
-//                Expiring<Integer> head = state6.queue.poll();
-//                if (head.deadline.isBefore(now)) {
-//                    throw new IllegalStateException();
-//                }
-//                ctl.latchOutput(head.element);
-//                ctl.latchDeadline(state6.queue.peek() != null ? Instant.MIN : Instant.MAX);
-//            }
-//        );
-//
-//        // debounce
-//        var state8 = new Object(){
-//            int element;
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                state8.element = ctl.input();
-//                ctl.latchDeadline(Instant.now().plusSeconds(5));
-//            },
-//            ctl -> {
-//                ctl.latchOutput(state8.element);
-//                ctl.latchDeadline(Instant.MAX);
-//            }
-//        );
-//
-//        // keepAlive
-//        var state0 = new Object(){
-//            final Deque<Integer> queue = new ArrayDeque<>();
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.now().plusSeconds(5),
-//            ctl -> {
-//                // Optional blocking for boundedness
-//                while (state0.queue.size() >= 10) {
-//                    ctl.awaitConsumer();
-//                }
-//                state0.queue.offer(ctl.input());
-//                ctl.latchDeadline(Instant.MIN);
-//            },
-//            ctl -> {
-//                Integer next = state0.queue.poll();
-//                if (next != null) {
-//                    ctl.latchOutput(next);
-//                    ctl.latchDeadline(state0.queue.isEmpty() ? Instant.now().plusSeconds(5) : Instant.MIN);
-//                } else {
-//                    ctl.latchOutput(22);
-//                    ctl.latchDeadline(Instant.now().plusSeconds(5));
-//                }
-//            }
-//        );
-//
-//        // throttleLeakyBucket ("as a queue")
-//        var state10 = new Object(){
-//            final Deque<Integer> queue = new ArrayDeque<>();
-//            Instant coolDownDeadline = Instant.MIN;
-//        };
-//        boundary(
-//            List.of(1),
-//            Instant.MAX,
-//            ctl -> {
-//                if (state10.queue.size() >= 10) {
-//                    return;
-//                }
-//                state10.queue.offer(ctl.input());
-//                ctl.latchDeadline(state10.coolDownDeadline);
-//            },
-//            ctl -> {
-//                state10.coolDownDeadline = Instant.now().plusSeconds(1);
-//                ctl.latchOutput(state10.queue.poll());
-//                ctl.latchDeadline(state10.queue.isEmpty() ? Instant.MAX : state10.coolDownDeadline);
-//            }
-//        );
-//    }
+    public static <T> Tunnel.Stage<T, T> delay(Function<? super T, Instant> deadlineMapper,
+                                               int bufferLimit) {
+        Objects.requireNonNull(deadlineMapper);
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        
+        class Delay implements TimedStage.Core<T, T> {
+            PriorityQueue<Expiring<T>> pq = null;
+            boolean done = false;
+            Throwable err = null;
+            
+            @Override
+            public Instant init() {
+                pq = new PriorityQueue<>(bufferLimit);
+                return Instant.MAX;
+            }
+            
+            @Override
+            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+                while (pq.size() >= bufferLimit) {
+                    if (!ctl.awaitConsumer()) {
+                        return;
+                    }
+                }
+                Instant deadline = Objects.requireNonNull(deadlineMapper.apply(input));
+                Expiring<T> e = new Expiring<>(input, deadline);
+                pq.offer(e);
+                if (pq.peek() == e) {
+                    ctl.latchDeadline(deadline);
+                }
+            }
+            
+            @Override
+            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+                if (err != null) {
+                    throw new ExecutionException(err);
+                }
+                Expiring<T> head = pq.poll();
+                if (head == null) {
+                    ctl.latchClose();
+                    return;
+                }
+                ctl.latchOutput(head.element);
+                head = pq.peek();
+                if (head != null) {
+                    ctl.latchDeadline(head.deadline);
+                } else if (!done) {
+                    ctl.latchDeadline(Instant.MAX);
+                } else {
+                    ctl.latchClose();
+                }
+           }
+            
+            @Override
+            public void complete(TimedStage.Producer ctl, Throwable error) {
+                err = error;
+                done = true;
+                if (error != null || pq.isEmpty()) {
+                    ctl.latchDeadline(Instant.MIN);
+                }
+            }
+        }
+       
+        var core = new Delay();
+        return new TimedStage<>(core);
+    }
+    
+    public static <T> Tunnel.Stage<T, T> keepAlive(Duration timeout,
+                                                   Supplier<? extends T> extraSupplier,
+                                                   int bufferLimit) {
+        Objects.requireNonNull(timeout);
+        Objects.requireNonNull(extraSupplier);
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        if (!timeout.isPositive()) {
+            throw new IllegalArgumentException("timeout must be positive");
+        }
+        
+        class KeepAlive implements TimedStage.Core<T, T> {
+            Deque<T> queue = null;
+            boolean done = false;
+            Throwable err = null;
+            
+            @Override
+            public Instant init() {
+                queue = new ArrayDeque<>(bufferLimit);
+                return clock().instant().plus(timeout);
+            }
+            
+            @Override
+            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+                while (queue.size() >= bufferLimit) {
+                    if (!ctl.awaitConsumer()) {
+                        return;
+                    }
+                }
+                queue.offer(input);
+                ctl.latchDeadline(Instant.MIN);
+            }
+            
+            @Override
+            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+                if (err != null) {
+                    throw new ExecutionException(err);
+                }
+                T head = queue.poll();
+                if (head != null) {
+                    ctl.latchOutput(head);
+                    ctl.latchDeadline((!queue.isEmpty() || done) ? Instant.MIN : clock().instant().plus(timeout));
+                } else if (!done) {
+                    ctl.latchOutput(extraSupplier.get());
+                    ctl.latchDeadline(clock().instant().plus(timeout));
+                } else {
+                    ctl.latchClose();
+                }
+            }
+            
+            @Override
+            public void complete(TimedStage.Producer ctl, Throwable error) {
+                err = error;
+                done = true;
+                ctl.latchDeadline(Instant.MIN);
+            }
+        }
+        
+        var core = new KeepAlive();
+        return new TimedStage<>(core);
+    }
+
+    public static <T> Tunnel.Stage<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
+                                                     int bufferLimit) {
+        Objects.requireNonNull(mapper);
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        
+        class Extrapolate implements TimedStage.Core<T, T> {
+            Deque<T> queue = null;
+            Iterator<? extends T> iter = null;
+            boolean done = false;
+            Throwable err = null;
+            
+            @Override
+            public Instant init() {
+                queue = new ArrayDeque<>(bufferLimit);
+                return Instant.MAX;
+            }
+            
+            @Override
+            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+                while (queue.size() >= bufferLimit) {
+                    if (!ctl.awaitConsumer()) {
+                        return;
+                    }
+                }
+                queue.offer(input);
+                iter = null;
+                ctl.latchDeadline(Instant.MIN);
+            }
+            
+            @Override
+            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+                if (err != null) {
+                    throw new ExecutionException(err);
+                }
+                T head = queue.poll();
+                if (head != null) {
+                    ctl.latchOutput(head);
+                    if (queue.peek() != null) {
+                        ctl.latchDeadline(Instant.MIN);
+                    } else if (!done) {
+                        iter = Objects.requireNonNull(mapper.apply(head));
+                        ctl.latchDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                    } else {
+                        ctl.latchClose();
+                    }
+                } else if (!done) {
+                    ctl.latchOutput(iter.next());
+                    ctl.latchDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                } else {
+                    ctl.latchClose();
+                }
+            }
+            
+            @Override
+            public void complete(TimedStage.Producer ctl, Throwable error) {
+                err = error;
+                done = true;
+                ctl.latchDeadline(Instant.MIN);
+            }
+        }
+        
+        var core = new Extrapolate();
+        return new TimedStage<>(core);
+    }
     
     private static class Weighted<T> {
         final T element;
