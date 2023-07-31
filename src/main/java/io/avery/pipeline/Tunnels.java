@@ -88,6 +88,137 @@ public class Tunnels {
         }
     }
     
+    // TODO: In forEachUntilCancel(), is exception because of source or sink?
+    //  Matters for deciding what becomes of source + other sinks
+    //  Maybe non-gated Sources shouldn't be allowed at all?
+    //   - Because, if any / all sinks cancel, source can't recover well (snapshot its state) for new sinks
+    //   - Instead, have combinators that take a Gate to build a Source
+    
+    <T> Tunnel.Source<T> merge(List<Tunnel.Source<T>> sources) {
+        class Merge implements Tunnel.Source<T> {
+            @Override
+            public void drainToSink(Tunnel.GatedSink<? super T> sink) throws InterruptedException, ExecutionException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var source : sources) {
+                        scope.fork(() -> {
+                            try (source) { // TODO: Should we not (in case source is read by other sinks)?
+                                source.drainToSink(sink);
+                            } catch (Throwable error) {
+                                sink.complete(error);
+                            }
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                composedClose(0);
+            }
+            
+            private void composedClose(int i) throws Exception {
+                if (i == sources.size()) {
+                    return;
+                }
+                try {
+                    composedClose(i+1);
+                } finally {
+                    sources.get(i).close();
+                }
+            }
+        }
+        
+        return new Merge();
+    }
+    
+    <T> Tunnel.Sink<T> balance(List<Tunnel.GatedSink<T>> sinks) {
+        class Balance implements Tunnel.Sink<T> {
+            @Override
+            public void drainFromSource(Tunnel.GatedSource<? extends T> source) throws InterruptedException, ExecutionException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> {
+                            try {
+                                source.drainToSink(sink);
+                                sink.complete(null); // TODO: Should we not (in case sink wants more from another source)?
+                            } catch (Throwable error) {
+                                sink.complete(error);
+                            }
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws InterruptedException, ExecutionException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> {
+                            sink.complete(error);
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+        }
+        
+        return new Balance();
+    }
+    
+    <T> Tunnel.GatedSink<T> broadcast(List<Tunnel.GatedSink<T>> sinks) {
+        class Broadcast implements Tunnel.GatedSink<T> {
+            @Override
+            public boolean offer(T input) throws InterruptedException, ExecutionException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> {
+                            try {
+                                // TODO: Check return - handle cancel
+                                sink.offer(input);
+                            } catch (Throwable error) {
+                                // TODO: Remove sinks that have already completed
+                                sink.complete(error);
+                            }
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+                return true; // TODO: Unless any/all sinks have cancelled
+            }
+            
+            @Override
+            public void complete(Throwable error) throws InterruptedException, ExecutionException {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> {
+                            sink.complete(error);
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+        }
+        
+        return new Broadcast();
+    }
+    
+    // Is there a problem with 'init-on-first-use'? Vs having/requiring an explicit init?
+    // Uses of 'init' (onSubscribe()) in Rx:
+    //  - Set up Publisher state for the new Subscriber
+    //  - Send initial elements (or even error/completion), eg in a Replay
+    
+    // init() as a way to initialize threads in a chained tunnel / pipeline?
+    // Problem: Can't create the STScope inside init(), cuz scope - execution would need to finish inside init()
+    // Could pass in a scope - init(scope) - that feels opinionated, and unnecessary for single-stage
+    
+    
     private static class WrappingException extends RuntimeException {
         WrappingException(Exception e) {
             super(e);
@@ -99,12 +230,12 @@ public class Tunnels {
         }
     }
     
-    private static class PrependedSink<In, T, A> implements Tunnel.Sink<In> {
-        final ReentrantLock producerLock = new ReentrantLock();
+    private static class PrependedSink<In, T, A> implements Tunnel.GatedSink<In> {
+        final ReentrantLock upstreamLock = new ReentrantLock();
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
-        final Tunnel.Sink<T> tunnel;
+        final Tunnel.GatedSink<T> tunnel;
         final Gatherer.Sink<T> gsink;
         A acc = null;
         int state = NEW;
@@ -113,7 +244,7 @@ public class Tunnels {
         static final int RUNNING = 1;
         static final int CLOSED = 2;
         
-        PrependedSink(Gatherer<In, A, T> gatherer, Tunnel.Sink<T> sink) {
+        PrependedSink(Gatherer<In, A, T> gatherer, Tunnel.GatedSink<T> sink) {
             this.supplier = gatherer.supplier();
             this.integrator = gatherer.integrator();
             this.finisher = gatherer.finisher();
@@ -135,12 +266,12 @@ public class Tunnels {
             };
         }
         
-        Tunnel.Sink<T> tunnel() {
+        Tunnel.GatedSink<T> tunnel() {
             return tunnel;
         }
         
         void initIfNew() {
-            //assert producerLock.isHeldByCurrentThread();
+            //assert upstreamLock.isHeldByCurrentThread();
             if (state == NEW) {
                 acc = supplier.get();
                 state = RUNNING;
@@ -149,7 +280,7 @@ public class Tunnels {
         
         @Override
         public boolean offer(In input) throws Exception {
-            producerLock.lockInterruptibly();
+            upstreamLock.lockInterruptibly();
             try {
                 if (state == CLOSED) {
                     return false;
@@ -170,13 +301,13 @@ public class Tunnels {
                 state = CLOSED;
                 throw e;
             } finally {
-                producerLock.unlock();
+                upstreamLock.unlock();
             }
         }
         
         @Override
         public void complete(Throwable error) throws Exception {
-            producerLock.lockInterruptibly();
+            upstreamLock.lockInterruptibly();
             try {
                 if (state == CLOSED) {
                     return;
@@ -193,19 +324,19 @@ public class Tunnels {
                 throw e.getCause();
             } finally {
                 state = CLOSED;
-                producerLock.unlock();
+                upstreamLock.unlock();
             }
         }
     }
     
-    private static class PrependedStage<In, T, A, Out> extends PrependedSink<In, T, A> implements Tunnel.Stage<In, Out> {
-        PrependedStage(Gatherer<In, A, T> gatherer, Tunnel.Stage<T, Out> stage) {
-            super(gatherer, stage);
+    private static class PrependedGate<In, T, A, Out> extends PrependedSink<In, T, A> implements Tunnel.Gate<In, Out> {
+        PrependedGate(Gatherer<In, A, T> gatherer, Tunnel.Gate<T, Out> gate) {
+            super(gatherer, gate);
         }
         
         @Override
-        Tunnel.Stage<T, Out> tunnel() {
-            return (Tunnel.Stage<T, Out>) tunnel;
+        Tunnel.Gate<T, Out> tunnel() {
+            return (Tunnel.Gate<T, Out>) tunnel;
         }
         
         @Override
@@ -219,16 +350,16 @@ public class Tunnels {
         }
     }
     
-    public static <In, T, A> Tunnel.Sink<In> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.Sink<T> sink) {
+    public static <In, T, A> Tunnel.GatedSink<In> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.GatedSink<T> sink) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
         return new PrependedSink<>(g, sink);
     }
     
-    public static <In, T, A, Out> Tunnel.Stage<In, Out> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.Stage<T, Out> stage) {
+    public static <In, T, A, Out> Tunnel.Gate<In, Out> chain(Gatherer<In, A, ? extends T> gatherer, Tunnel.Gate<T, Out> gate) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
-        return new PrependedStage<>(g, stage);
+        return new PrependedGate<>(g, gate);
     }
     
     private interface Accessor<X, Y> {
@@ -240,23 +371,23 @@ public class Tunnels {
         boolean cancelled = false;
     }
     
-    public static <T1, T2, T> Tunnel.Push<T> zip(Tunnel.Source<T1> source1,
-                                                 Tunnel.Source<T2> source2,
-                                                 BiFunction<? super T1, ? super T2, T> merger) {
+    public static <T1, T2, T> Tunnel.Source<T> zip(Tunnel.GatedSource<T1> source1,
+                                                   Tunnel.GatedSource<T2> source2,
+                                                   BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class Zip implements Tunnel.Push<T> {
+        class Zip implements Tunnel.Source<T> {
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             T1 latest1 = null;
             T2 latest2 = null;
             
-            <X, Y> Void runSource(Tunnel.Source<X> source,
+            <X, Y> Void runSource(Tunnel.GatedSource<X> source,
                                   Accessor<X, Y> access,
                                   Comm comm,
-                                  Tunnel.Sink<? super T> sink) throws Exception {
+                                  Tunnel.GatedSink<? super T> sink) throws Exception {
                 for (X e; (e = source.poll()) != null; ) {
                     lock.lockInterruptibly();
                     try {
@@ -289,7 +420,7 @@ public class Tunnels {
             }
             
             @Override
-            public void forEachUntilCancel(Tunnel.Sink<? super T> sink) throws Exception {
+            public void drainToSink(Tunnel.GatedSink<? super T> sink) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var comm = new Comm();
                     var accessor1 = new Accessor<T1, T2>() {
@@ -315,6 +446,14 @@ public class Tunnels {
         return new Zip();
     }
     
+    // TODO: The problem of reuse for non-gated Sources/Sinks
+    //  eg, in combineLatest: if I attach more sinks, later or concurrently, it should behave naturally
+    //  eg, in balance: if I attach more sources, later or concurrently, it should behave naturally
+    //
+    // Options:
+    //  1. Document that non-gated Sources/Sinks may throw if connected to multiple Sinks/Sources
+    //  2. Model differently, separating connection from execution
+    
     // There is no way to know that a source is empty without polling it.
     // And once we poll it and get something, there is no way to put it back.
     // So if we need to poll 2 sources to produce 1 output, and 1 source is empty,
@@ -326,24 +465,24 @@ public class Tunnels {
     // waking up.
     // TODO: Does separate state even mitigate this? Still contending to poll, etc...
     
-    public static <T1, T2, T> Tunnel.Push<T> combineLatest(Tunnel.Source<T1> source1,
-                                                           Tunnel.Source<T2> source2,
-                                                           BiFunction<? super T1, ? super T2, T> merger) {
+    public static <T1, T2, T> Tunnel.Source<T> combineLatest(Tunnel.GatedSource<T1> source1,
+                                                             Tunnel.GatedSource<T2> source2,
+                                                             BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class CombineLatest implements Tunnel.Push<T> {
+        class CombineLatest implements Tunnel.Source<T> {
             // TODO: Bring-Your-Own-State?
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             T1 latest1 = null;
             T2 latest2 = null;
             
-            <X, Y> Void runSource(Tunnel.Source<X> source,
+            <X, Y> Void runSource(Tunnel.GatedSource<X> source,
                                   Accessor<X, Y> access,
                                   Comm comm,
-                                  Tunnel.Sink<? super T> sink) throws Exception {
+                                  Tunnel.GatedSink<? super T> sink) throws Exception {
                 X e = source.poll();
                 lock.lockInterruptibly();
                 try {
@@ -400,7 +539,7 @@ public class Tunnels {
             }
             
             @Override
-            public void forEachUntilCancel(Tunnel.Sink<? super T> sink) throws InterruptedException, ExecutionException {
+            public void drainToSink(Tunnel.GatedSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var comm = new Comm();
                     var accessor1 = new Accessor<T1, T2>() {
@@ -426,29 +565,29 @@ public class Tunnels {
         return new CombineLatest();
     }
     
-    public static <T, A> Tunnel.Stage<T, A> batch(Supplier<? extends A> batchSupplier,
-                                                  BiConsumer<? super A, ? super T> accumulator,
-                                                  Function<? super A, Optional<Instant>> deadlineMapper) {
+    public static <T, A> Tunnel.Gate<T, A> batch(Supplier<? extends A> batchSupplier,
+                                                 BiConsumer<? super A, ? super T> accumulator,
+                                                 Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
         
-        class Batch implements TimedStage.Core<T, A> {
+        class Batch implements TimedGate.Core<T, A> {
             A batch = null;
             Instant currentDeadline = null;
             boolean done = false;
             Throwable err = null;
             
             @Override
-            public Instant init() {
+            public Instant onInit() {
                 return Instant.MAX;
             }
             
             @Override
-            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+            public void onOffer(TimedGate.Upstream ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
                 while (batch != null && currentDeadline == Instant.MIN) {
-                    if (!ctl.awaitConsumer()) {
+                    if (!ctl.awaitDownstream()) {
                         return;
                     }
                 }
@@ -463,7 +602,7 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedStage.Consumer<A> ctl) throws ExecutionException {
+            public void onPoll(TimedGate.Downstream<A> ctl) throws ExecutionException {
                 if (done) {
                     if (err != null) {
                         throw new ExecutionException(err);
@@ -477,11 +616,11 @@ public class Tunnels {
                 batch = null;
                 currentDeadline = null;
                 ctl.latchDeadline(Instant.MAX);
-                ctl.signalProducer();
+                ctl.signalUpstream();
             }
             
             @Override
-            public void complete(TimedStage.Producer ctl, Throwable error) {
+            public void onComplete(TimedGate.Upstream ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -489,13 +628,13 @@ public class Tunnels {
         }
         
         var core = new Batch();
-        return new TimedStage<>(core);
+        return new TimedGate<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> tokenBucket(Duration tokenInterval,
-                                                     ToLongFunction<T> costMapper,
-                                                     long tokenLimit,
-                                                     long costLimit) { // TODO: Obviate costLimit?
+    public static <T> Tunnel.Gate<T, T> tokenBucket(Duration tokenInterval,
+                                                    ToLongFunction<T> costMapper,
+                                                    long tokenLimit,
+                                                    long costLimit) { // TODO: Obviate costLimit?
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
         if ((tokenLimit | costLimit) < 0) {
@@ -513,7 +652,7 @@ public class Tunnels {
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
-        class Throttle implements TimedStage.Core<T, T> {
+        class Throttle implements TimedGate.Core<T, T> {
             Deque<Weighted<T>> queue = null;
             long tempTokenLimit = 0;
             long tokens = 0;
@@ -523,17 +662,17 @@ public class Tunnels {
             Throwable err = null;
             
             @Override
-            public Instant init() {
+            public Instant onInit() {
                 queue = new ArrayDeque<>();
                 lastObservedAccrual = clock().instant();
                 return Instant.MAX;
             }
             
             @Override
-            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+            public void onOffer(TimedGate.Upstream ctl, T input) throws InterruptedException {
                 // Optional blocking for boundedness, here based on cost rather than queue size
                 while (cost >= costLimit) {
-                    if (!ctl.awaitConsumer()) {
+                    if (!ctl.awaitDownstream()) {
                         return;
                     }
                 }
@@ -545,12 +684,12 @@ public class Tunnels {
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
-                    ctl.latchDeadline(Instant.MIN); // Let consumer do token math
+                    ctl.latchDeadline(Instant.MIN); // Let downstream do token math
                 }
             }
             
             @Override
-            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+            public void onPoll(TimedGate.Downstream<T> ctl) throws ExecutionException {
                 if (err != null) {
                     throw new ExecutionException(err);
                 }
@@ -574,7 +713,7 @@ public class Tunnels {
                     tokens -= head.cost;
                     cost -= head.cost;
                     queue.poll();
-                    ctl.signalProducer();
+                    ctl.signalUpstream();
                     ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head != null) {
@@ -598,7 +737,7 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedStage.Producer ctl, Throwable error) {
+            public void onComplete(TimedGate.Upstream ctl, Throwable error) {
                 err = error;
                 done = true;
                 if (error != null || queue.isEmpty()) {
@@ -608,31 +747,31 @@ public class Tunnels {
         }
         
         var core = new Throttle();
-        return new TimedStage<>(core);
+        return new TimedGate<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> delay(Function<? super T, Instant> deadlineMapper,
-                                               int bufferLimit) {
+    public static <T> Tunnel.Gate<T, T> delay(Function<? super T, Instant> deadlineMapper,
+                                              int bufferLimit) {
         Objects.requireNonNull(deadlineMapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Delay implements TimedStage.Core<T, T> {
+        class Delay implements TimedGate.Core<T, T> {
             PriorityQueue<Expiring<T>> pq = null;
             boolean done = false;
             Throwable err = null;
             
             @Override
-            public Instant init() {
+            public Instant onInit() {
                 pq = new PriorityQueue<>(bufferLimit);
                 return Instant.MAX;
             }
             
             @Override
-            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+            public void onOffer(TimedGate.Upstream ctl, T input) throws InterruptedException {
                 while (pq.size() >= bufferLimit) {
-                    if (!ctl.awaitConsumer()) {
+                    if (!ctl.awaitDownstream()) {
                         return;
                     }
                 }
@@ -645,7 +784,7 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+            public void onPoll(TimedGate.Downstream<T> ctl) throws ExecutionException {
                 if (err != null) {
                     throw new ExecutionException(err);
                 }
@@ -666,7 +805,7 @@ public class Tunnels {
            }
             
             @Override
-            public void complete(TimedStage.Producer ctl, Throwable error) {
+            public void onComplete(TimedGate.Upstream ctl, Throwable error) {
                 err = error;
                 done = true;
                 if (error != null || pq.isEmpty()) {
@@ -676,12 +815,12 @@ public class Tunnels {
         }
        
         var core = new Delay();
-        return new TimedStage<>(core);
+        return new TimedGate<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> keepAlive(Duration timeout,
-                                                   Supplier<? extends T> extraSupplier,
-                                                   int bufferLimit) {
+    public static <T> Tunnel.Gate<T, T> keepAlive(Duration timeout,
+                                                  Supplier<? extends T> extraSupplier,
+                                                  int bufferLimit) {
         Objects.requireNonNull(timeout);
         Objects.requireNonNull(extraSupplier);
         if (bufferLimit < 1) {
@@ -691,21 +830,21 @@ public class Tunnels {
             throw new IllegalArgumentException("timeout must be positive");
         }
         
-        class KeepAlive implements TimedStage.Core<T, T> {
+        class KeepAlive implements TimedGate.Core<T, T> {
             Deque<T> queue = null;
             boolean done = false;
             Throwable err = null;
             
             @Override
-            public Instant init() {
+            public Instant onInit() {
                 queue = new ArrayDeque<>(bufferLimit);
                 return clock().instant().plus(timeout);
             }
             
             @Override
-            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+            public void onOffer(TimedGate.Upstream ctl, T input) throws InterruptedException {
                 while (queue.size() >= bufferLimit) {
-                    if (!ctl.awaitConsumer()) {
+                    if (!ctl.awaitDownstream()) {
                         return;
                     }
                 }
@@ -714,7 +853,7 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+            public void onPoll(TimedGate.Downstream<T> ctl) throws ExecutionException {
                 if (err != null) {
                     throw new ExecutionException(err);
                 }
@@ -731,7 +870,7 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedStage.Producer ctl, Throwable error) {
+            public void onComplete(TimedGate.Upstream ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -739,32 +878,32 @@ public class Tunnels {
         }
         
         var core = new KeepAlive();
-        return new TimedStage<>(core);
+        return new TimedGate<>(core);
     }
 
-    public static <T> Tunnel.Stage<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
-                                                     int bufferLimit) {
+    public static <T> Tunnel.Gate<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
+                                                    int bufferLimit) {
         Objects.requireNonNull(mapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Extrapolate implements TimedStage.Core<T, T> {
+        class Extrapolate implements TimedGate.Core<T, T> {
             Deque<T> queue = null;
             Iterator<? extends T> iter = null;
             boolean done = false;
             Throwable err = null;
             
             @Override
-            public Instant init() {
+            public Instant onInit() {
                 queue = new ArrayDeque<>(bufferLimit);
                 return Instant.MAX;
             }
             
             @Override
-            public void produce(TimedStage.Producer ctl, T input) throws InterruptedException {
+            public void onOffer(TimedGate.Upstream ctl, T input) throws InterruptedException {
                 while (queue.size() >= bufferLimit) {
-                    if (!ctl.awaitConsumer()) {
+                    if (!ctl.awaitDownstream()) {
                         return;
                     }
                 }
@@ -774,7 +913,7 @@ public class Tunnels {
             }
             
             @Override
-            public void consume(TimedStage.Consumer<T> ctl) throws ExecutionException {
+            public void onPoll(TimedGate.Downstream<T> ctl) throws ExecutionException {
                 if (err != null) {
                     throw new ExecutionException(err);
                 }
@@ -798,7 +937,7 @@ public class Tunnels {
             }
             
             @Override
-            public void complete(TimedStage.Producer ctl, Throwable error) {
+            public void onComplete(TimedGate.Upstream ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -806,7 +945,7 @@ public class Tunnels {
         }
         
         var core = new Extrapolate();
-        return new TimedStage<>(core);
+        return new TimedGate<>(core);
     }
     
     private static class Weighted<T> {

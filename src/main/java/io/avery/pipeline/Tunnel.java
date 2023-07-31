@@ -8,12 +8,12 @@ import java.util.stream.Collector;
 public class Tunnel {
     private Tunnel() {}
     
-    public interface Push<T> extends AutoCloseable {
-        void forEachUntilCancel(Sink<? super T> action) throws Exception;
+    public interface Source<T> extends AutoCloseable {
+        void drainToSink(GatedSink<? super T> action) throws Exception;
         default void close() throws Exception {}
         
         default void forEach(Consumer<? super T> action) throws Exception {
-            class ConsumerSink implements Sink<T> {
+            class ConsumerSink implements GatedSink<T> {
                 @Override
                 public boolean offer(T input) {
                     action.accept(input);
@@ -21,7 +21,7 @@ public class Tunnel {
                 }
             }
             
-            forEachUntilCancel(new ConsumerSink());
+            drainToSink(new ConsumerSink());
         }
         
         default <A, R> R collect(Collector<? super T, A, R> collector) throws Exception {
@@ -29,7 +29,7 @@ public class Tunnel {
             Function<A, R> finisher = collector.finisher();
             A acc = collector.supplier().get();
             
-            class CollectorSink implements Sink<T> {
+            class CollectorSink implements GatedSink<T> {
                 @Override
                 public boolean offer(T input) {
                     accumulator.accept(acc, input);
@@ -37,28 +37,36 @@ public class Tunnel {
                 }
             }
             
-            forEachUntilCancel(new CollectorSink());
+            drainToSink(new CollectorSink());
             return finisher.apply(acc);
         }
     }
     
-    public interface Source<T> extends Push<T> {
-        T poll() throws Exception;
-        
-        default void forEachUntilCancel(Sink<? super T> sink) throws Exception {
-            for (T e; (e = poll()) != null; ) {
-                if (!sink.offer(e)) {
-                    return;
-                }
-            }
-        }
-    }
-    
     public interface Sink<T> {
-        boolean offer(T input) throws Exception;
+        void drainFromSource(GatedSource<? extends T> source) throws Exception;
         default void complete(Throwable error) throws Exception {}
     }
     
-    public interface Stage<In, Out> extends Sink<In>, Source<Out> {
+    public interface GatedSource<T> extends Source<T> {
+        T poll() throws Exception;
+        
+        @Override
+        default void drainToSink(GatedSink<? super T> sink) throws Exception {
+            for (T e; (e = poll()) != null && sink.offer(e); ) { }
+        }
+    }
+    
+    public interface GatedSink<T> extends Sink<T> {
+        boolean offer(T input) throws Exception;
+        
+        @Override
+        default void drainFromSource(GatedSource<? extends T> source) throws Exception {
+            for (T e; (e = source.poll()) != null && offer(e); ) { }
+        }
+    }
+    
+    // "Segueway"
+    
+    public interface Gate<In, Out> extends GatedSink<In>, GatedSource<Out> {
     }
 }
