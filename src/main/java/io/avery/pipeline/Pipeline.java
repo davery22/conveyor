@@ -6,27 +6,22 @@ import java.util.function.Consumer;
 public class Pipeline {
     private Pipeline() {}
     
-    public interface Source<Out> {
-        Tunnel.GatedSource<Out> mouth();
-        void run(Consumer<? super Callable<?>> fork);
-        <T> Source<T> connect(Segment<? super Out, T> segment);
-        System connect(Sink<? super Out> sink);
+    public sealed interface System permits Head, Tail, Pipelines.ClosedSystem {
+        void runInternals(Consumer<Callable<?>> fork);
     }
     
-    public interface Segment<In, Out> {
-        Tunnel.GatedSink<In> head();
-        Tunnel.GatedSource<Out> mouth();
-        void run(Consumer<? super Callable<?>> fork);
-        <T> Segment<In, T> connect(Segment<? super Out, T> segment);
-        Sink<In> connect(Sink<? super Out> sink);
+    public sealed interface Head<In> extends System permits Body, Pipelines.ChainedHead {
+        Tunnel.GatedSink<In> sink();
     }
     
-    public interface Sink<In> {
-        Tunnel.GatedSink<In> head();
-        void run(Consumer<? super Callable<?>> fork);
+    public sealed interface Tail<Out> extends System permits Body, Pipelines.ChainedTail {
+        Tunnel.GatedSource<Out> source();
+        <T> Tail<T> connect(Body<? super Out, T> body);
+        System connect(Head<? super Out> head);
     }
     
-    public interface System {
-        void run(Consumer<? super Callable<?>> fork);
+    public sealed interface Body<In, Out> extends Head<In>, Tail<Out> permits Pipelines.ChainedBody {
+        <T> Body<In, T> connect(Body<? super Out, T> body);
+        Head<In> connect(Head<? super Out> head);
     }
 }

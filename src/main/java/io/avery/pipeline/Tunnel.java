@@ -9,7 +9,7 @@ public class Tunnel {
     private Tunnel() {}
     
     public interface Source<T> extends AutoCloseable {
-        void drainToSink(GatedSink<? super T> action) throws Exception;
+        void drainToSink(GatedSink<? super T> sink) throws Exception;
         default void close() throws Exception {}
         
         default void forEach(Consumer<? super T> action) throws Exception {
@@ -65,8 +65,8 @@ public class Tunnel {
         }
     }
     
-    // "Segueway"
+    // "Segue"
     
-    public interface Gate<In, Out> extends GatedSink<In>, GatedSource<Out> {
+    public interface FullGate<In, Out> extends GatedSink<In>, GatedSource<Out> {
     }
 }

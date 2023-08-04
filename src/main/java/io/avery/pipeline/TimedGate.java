@@ -7,33 +7,33 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
+public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant onInit() throws Exception;
-        void onOffer(Upstream ctl, In input) throws Exception;
-        void onPoll(Downstream<Out> ctl) throws Exception;
-        void onComplete(Upstream ctl, Throwable error) throws Exception;
+        void onOffer(SinkController ctl, In input) throws Exception;
+        void onPoll(SourceController<Out> ctl) throws Exception;
+        void onComplete(SinkController ctl, Throwable error) throws Exception;
     }
     
-    public sealed interface Upstream {
+    public sealed interface SinkController {
         void latchDeadline(Instant deadline);
-        boolean awaitDownstream() throws InterruptedException;
+        boolean awaitSource() throws InterruptedException;
     }
     
-    public sealed interface Downstream<T> {
+    public sealed interface SourceController<T> {
         void latchClose();
         void latchOutput(T output);
         void latchDeadline(Instant deadline);
-        void signalUpstream();
+        void signalSink();
     }
     
     final Core<In, Out> core;
-    final ReentrantLock upstreamLock = new ReentrantLock();
-    final ReentrantLock downstreamLock = new ReentrantLock();
-    final Condition offered = downstreamLock.newCondition();
-    final Condition polled = downstreamLock.newCondition();
-    final Control control = new Control();
+    final ReentrantLock sinkLock = new ReentrantLock();
+    final ReentrantLock sourceLock = new ReentrantLock();
+    final Condition offered = sourceLock.newCondition();
+    final Condition polled = sourceLock.newCondition();
+    final Controller controller = new Controller();
     Instant deadline = null;
     Instant latchedDeadline = null;
     Out latchedOutput = null;
@@ -41,17 +41,17 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     
     //int state = NEW;
     //int access = NONE;
-    //boolean isUpstreamWaiting = false;
+    //boolean isSinkWaiting = false;
     //boolean latchedClose = false;
     
     private int state() { return ctl & 0x3; }
     private int access() { return ctl & 0xC; }
-    private boolean isUpstreamWaiting() { return (ctl & 0x10) != 0; }
+    private boolean isSinkWaiting() { return (ctl & 0x10) != 0; }
     private boolean latchedClose() { return (ctl & 0x20) != 0; }
     
     private void setState(int state) { ctl = (ctl & ~0x3) | state; }
     private void setAccess(int access) { ctl = (ctl & ~0xC) | access; }
-    private void setIsUpstreamWaiting(boolean b) { ctl = b ? (ctl | 0x10) : (ctl & ~0x10); }
+    private void setIsSinkWaiting(boolean b) { ctl = b ? (ctl | 0x10) : (ctl & ~0x10); }
     private void setLatchedClose() { ctl = (ctl | 0x20); }
     
     // Possible state transitions:
@@ -64,9 +64,9 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     private static final int CLOSED     = 3;
     
     // Access modes, used to verify that calls to the shared Control instance are legal, regardless of casting.
-    private static final int NONE       = 0 << 2;
-    private static final int DOWNSTREAM = 1 << 2;
-    private static final int UPSTREAM   = 2 << 2;
+    private static final int NONE   = 0 << 2;
+    private static final int SOURCE = 1 << 2;
+    private static final int SINK   = 2 << 2;
     
     TimedGate(Core<In, Out> core) {
         this.core = core;
@@ -76,10 +76,10 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     // Methods protect against some kinds of misuse:
     //  1. Casting to another interface and calling its methods - protected by checking access()
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership
-    private final class Control implements Upstream, Downstream<Out> {
+    private final class Controller implements SinkController, SourceController<Out> {
         @Override
         public void latchDeadline(Instant deadline) {
-            if (access() < DOWNSTREAM || !downstreamLock.isHeldByCurrentThread()) {
+            if (access() < SOURCE || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             latchedDeadline = Objects.requireNonNull(deadline);
@@ -87,7 +87,7 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
         
         @Override
         public void latchOutput(Out output) {
-            if (access() != DOWNSTREAM || !downstreamLock.isHeldByCurrentThread()) {
+            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             latchedOutput = Objects.requireNonNull(output);
@@ -95,24 +95,24 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
         
         @Override
         public void latchClose() {
-            if (access() != DOWNSTREAM || !downstreamLock.isHeldByCurrentThread()) {
+            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             setLatchedClose();
         }
         
         @Override
-        public void signalUpstream() {
-            if (access() != DOWNSTREAM || !downstreamLock.isHeldByCurrentThread()) {
+        public void signalSink() {
+            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
-            setIsUpstreamWaiting(false);
+            setIsSinkWaiting(false);
             polled.signal();
         }
         
         @Override
-        public boolean awaitDownstream() throws InterruptedException {
-            if (access() != UPSTREAM || !downstreamLock.isHeldByCurrentThread()) {
+        public boolean awaitSource() throws InterruptedException {
+            if (access() != SINK || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             if (state() == CLOSED) {
@@ -121,7 +121,7 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
             // This may be overwritten while we wait, so save it to stack and restore after.
             Instant savedDeadline = latchedDeadline;
             
-            setIsUpstreamWaiting(true);
+            setIsSinkWaiting(true);
             try {
                 do {
                     polled.await();
@@ -129,17 +129,17 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
                         return false;
                     }
                 }
-                while (isUpstreamWaiting());
+                while (isSinkWaiting());
                 return true;
             } finally {
                 latchedDeadline = savedDeadline;
-                setAccess(UPSTREAM);
+                setAccess(SINK);
             }
         }
     }
     
     private void initIfNew() throws Exception {
-        //assert downstreamLock.isHeldByCurrentThread();
+        //assert sourceLock.isHeldByCurrentThread();
         if (state() == NEW) {
             deadline = Objects.requireNonNull(core.onInit());
             setState(RUNNING);
@@ -147,7 +147,7 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     }
     
     private void updateDeadline() {
-        //assert downstreamLock.isHeldByCurrentThread();
+        //assert sourceLock.isHeldByCurrentThread();
         Instant nextDeadline = latchedDeadline;
         if (nextDeadline != null) {
             if (nextDeadline.isBefore(deadline)) {
@@ -158,7 +158,7 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     }
     
     private boolean awaitDeadline() throws InterruptedException {
-        //assert downstreamLock.isHeldByCurrentThread();
+        //assert sourceLock.isHeldByCurrentThread();
         Instant savedDeadline = null;
         long nanosRemaining = 0;
         for (;;) {
@@ -193,19 +193,19 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
     @Override
     public boolean offer(In input) throws Exception {
         Objects.requireNonNull(input);
-        upstreamLock.lockInterruptibly();
+        sinkLock.lockInterruptibly();
         try {
-            downstreamLock.lockInterruptibly();
+            sourceLock.lockInterruptibly();
             try {
                 if (state() >= COMPLETING) {
                     return false;
                 }
                 initIfNew();
-                setAccess(UPSTREAM);
+                setAccess(SINK);
                 
-                core.onOffer(control, input);
+                core.onOffer(controller, input);
                 
-                if (state() == CLOSED) { // Possible if onOffer() called awaitDownstream()
+                if (state() == CLOSED) { // Possible if onOffer() called awaitSource()
                     return false;
                 }
                 updateDeadline();
@@ -213,28 +213,28 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
             } finally {
                 latchedDeadline = null;
                 setAccess(NONE);
-                downstreamLock.unlock();
+                sourceLock.unlock();
             }
         } finally {
-            upstreamLock.unlock();
+            sinkLock.unlock();
         }
     }
     
     @Override
     public void complete(Throwable error) throws Exception {
-        upstreamLock.lockInterruptibly();
+        sinkLock.lockInterruptibly();
         try {
-            downstreamLock.lockInterruptibly();
+            sourceLock.lockInterruptibly();
             try {
                 if (state() >= COMPLETING) {
                     return;
                 }
                 initIfNew();
-                setAccess(UPSTREAM);
+                setAccess(SINK);
                 
-                core.onComplete(control, error);
+                core.onComplete(controller, error);
                 
-                if (state() == CLOSED) { // Possible if onComplete() called awaitDownstream()
+                if (state() == CLOSED) { // Possible if onComplete() called awaitSource()
                     return;
                 }
                 updateDeadline();
@@ -242,17 +242,17 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
             } finally {
                 latchedDeadline = null;
                 setAccess(NONE);
-                downstreamLock.unlock();
+                sourceLock.unlock();
             }
         } finally {
-            upstreamLock.unlock();
+            sinkLock.unlock();
         }
     }
     
     @Override
     public Out poll() throws Exception {
         for (;;) {
-            downstreamLock.lockInterruptibly();
+            sourceLock.lockInterruptibly();
             try {
                 if (state() == CLOSED) {
                     return null;
@@ -261,9 +261,9 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
                 if (!awaitDeadline()) {
                     return null;
                 }
-                setAccess(DOWNSTREAM);
+                setAccess(SOURCE);
                 
-                core.onPoll(control);
+                core.onPoll(controller);
                 
                 updateDeadline();
                 if (latchedClose()) {
@@ -276,23 +276,23 @@ public class TimedGate<In, Out> implements Tunnel.Gate<In, Out> {
                 latchedOutput = null;
                 latchedDeadline = null;
                 setAccess(NONE);
-                downstreamLock.unlock();
+                sourceLock.unlock();
             }
         }
     }
     
     @Override
     public void close() {
-        downstreamLock.lock();
+        sourceLock.lock();
         try {
             if (state() == CLOSED) {
                 return;
             }
             setState(CLOSED);
-            polled.signal(); // Wake upstream blocked in awaitDownstream()
-            offered.signalAll(); // Wake downstreams blocked in awaitDeadline()
+            polled.signal(); // Wake sink blocked in awaitSource()
+            offered.signalAll(); // Wake sources blocked in awaitDeadline()
         } finally {
-            downstreamLock.unlock();
+            sourceLock.unlock();
         }
     }
 }

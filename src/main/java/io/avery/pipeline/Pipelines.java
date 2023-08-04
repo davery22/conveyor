@@ -1,49 +1,133 @@
 package io.avery.pipeline;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
+
 public class Pipelines {
     private Pipelines() {} // Utility
     
-    // concat() could work by creating a Tunnel.Source that switches between 2 Tunnel.Sources,
-    // or by creating a Pipeline.Source that consumes one Tunnel.Source and then another.
-    // The latter case reduces to the former case, since Pipeline.Source needs to expose a Tunnel.GatedSource
-    
-    // ----- create
-    
-    public static <T, U> Pipeline.Source<U> source(Tunnel.Source<T> source, Tunnel.Gate<? super T, U> gate) {
-    
+    static sealed class ClosedSystem implements Pipeline.System {
+        final List<Object> stages;
+        
+        private ClosedSystem(List<Object> stages) {
+            this.stages = stages;
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public void runInternals(Consumer<Callable<?>> fork) {
+            var iter = stages.iterator();
+            for (var cursor = iter.next(); iter.hasNext(); ) {
+                var curr = (Tunnel.Source<?>) cursor;
+                var next = (Tunnel.Sink<?>) iter.next();
+                fork.accept(() -> {
+                    try (curr) {
+                        if (next instanceof Tunnel.GatedSink gs) {
+                            curr.drainToSink(gs);
+                        } else {
+                            next.drainFromSource((Tunnel.GatedSource) curr);
+                        }
+                        next.complete(null);
+                    } catch (Throwable error) {
+                        next.complete(error);
+                    }
+                    return null;
+                });
+                cursor = next;
+            }
+        }
     }
     
-    public static <T> Pipeline.Source<T> source(Tunnel.GatedSource<T> source) {
-    
+    static final class ChainedHead<In> extends ClosedSystem implements Pipeline.Head<In> {
+        ChainedHead(List<Object> stages) {
+            super(stages);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.GatedSink<In> sink() {
+            return (Tunnel.GatedSink) stages.get(0);
+        }
     }
     
-    public static <T, U> Pipeline.Sink<T> sink(Tunnel.Gate<T, U> gate, Tunnel.Sink<? super U> sink) {
-    
+    static final class ChainedTail<Out> extends ClosedSystem implements Pipeline.Tail<Out> {
+        ChainedTail(List<Object> stages) {
+            super(stages);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.GatedSource<Out> source() {
+            return (Tunnel.GatedSource) stages.get(stages.size()-1);
+        }
+        
+        @Override
+        public <T> Pipeline.Tail<T> connect(Pipeline.Body<? super Out, T> body) {
+            return new ChainedTail<>(combineStages(this, (ClosedSystem) body));
+        }
+        
+        @Override
+        public Pipeline.System connect(Pipeline.Head<? super Out> head) {
+            return new ClosedSystem(combineStages(this, (ClosedSystem) head));
+        }
     }
     
-    public static <T> Pipeline.Sink<T> sink(Tunnel.GatedSink<T> sink) {
-    
+    static final class ChainedBody<In, Out> extends ClosedSystem implements Pipeline.Body<In, Out> {
+        ChainedBody(List<Object> stages) {
+            super(stages);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.GatedSink<In> sink() {
+            return (Tunnel.GatedSink) stages.get(0);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.GatedSource<Out> source() {
+            return (Tunnel.GatedSource) stages.get(stages.size()-1);
+        }
+        
+        @Override
+        public <T> Pipeline.Body<In, T> connect(Pipeline.Body<? super Out, T> body) {
+            return new ChainedBody<>(combineStages(this, (ClosedSystem) body));
+        }
+        
+        @Override
+        public Pipeline.Head<In> connect(Pipeline.Head<? super Out> head) {
+            return new ChainedHead<>(combineStages(this, (ClosedSystem) head));
+        }
     }
     
-    public static <T, U> Pipeline.Segment<T, U> segment(Tunnel.Gate<T, U> gate) {
-    
+    private static List<Object> combineStages(ClosedSystem a, ClosedSystem b) {
+        // TODO: Avoid N^2 copying, possibly by:
+        // TODO: Track "linked or consumed"
+        List<Object> stages = new ArrayList<>(a.stages.size() + b.stages.size());
+        stages.addAll(a.stages);
+        stages.addAll(b.stages);
+        return stages;
     }
     
-    // ----- connect
-    
-    public static <T, U> Pipeline.Source<U> connect(Pipeline.Source<T> source, Pipeline.Segment<? super T, U> seg) {
-    
+    public static <T, U> Pipeline.Tail<U> tail(Tunnel.Source<T> source, Tunnel.FullGate<? super T, U> gate) {
+        return new ChainedTail<>(List.of(source, gate));
     }
-    
-    public static <T, U> Pipeline.Sink<T> connect(Pipeline.Segment<T, U> seg, Pipeline.Sink<? super U> sink) {
-    
+
+    public static <T> Pipeline.Tail<T> tail(Tunnel.GatedSource<T> source) {
+        return new ChainedTail<>(List.of(source));
     }
-    
-    public static <T, U, V> Pipeline.Segment<T, V> connect(Pipeline.Segment<T, U> seg1, Pipeline.Segment<? super U, V> seg2) {
-    
+
+    public static <T, U> Pipeline.Head<T> head(Tunnel.FullGate<T, U> gate, Tunnel.Sink<? super U> sink) {
+        return new ChainedHead<>(List.of(gate, sink));
     }
-    
-    public static <T> Pipeline.System connect(Pipeline.Source<T> source, Pipeline.Sink<? super T> sink) {
-    
+
+    public static <T> Pipeline.Head<T> head(Tunnel.GatedSink<T> sink) {
+        return new ChainedHead<>(List.of(sink));
+    }
+
+    public static <T, U> Pipeline.Body<T, U> body(Tunnel.FullGate<T, U> gate) {
+        return new ChainedBody<>(List.of(gate));
     }
 }
