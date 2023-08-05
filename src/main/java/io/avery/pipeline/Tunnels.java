@@ -224,6 +224,12 @@ public class Tunnels {
     // Gated from gated         - SOMETIMES possible
     // Gated from non-gated     - NEVER possible
     
+    // Streams tend to be a good approach to parallelism when the source can be split
+    //  - Run the whole pipeline on each split of the source, in its own thread
+    // Queues tend to be a good approach to parallelism when pipeline stages can be detached
+    //  - (and stages progress at similar rates / spend less than 1-1/COUNT of their time blocked on each other)
+    //  - Run each stage of the pipeline on the whole source, in its own thread
+    
     // --- Sinks ---
     
     public static <T> Tunnel.Sink<T> balance(List<? extends Tunnel.Sink<T>> sinks) {

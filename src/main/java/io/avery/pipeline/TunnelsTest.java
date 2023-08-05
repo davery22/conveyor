@@ -32,6 +32,7 @@ class TunnelsTest {
                 })
                 .andThen(TunnelsTest.<String>buffer(4).pipeline())
                 .andThen(Tunnels.balance(
+                    // TODO: What if I want ordering?
                     IntStream.range(0, 4).mapToObj(i -> Tunnels.gatedFuse(
                         TunnelsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
                         buffer
@@ -44,49 +45,62 @@ class TunnelsTest {
                 .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
                 .run(scope::fork);
             
-//            scope.fork(() -> {
-//                try (buffer) {
-//                    buffer.forEach(System.out::println);
-//                }
-//                return null;
-//            });
-            
             scope.join().throwIfFailed();
         }
     }
     
     public static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var stage = Tunnels.gatedFuse(
-                flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-                Tunnels.tokenBucket(
-                    Duration.ofSeconds(1),
-                    String::length,
-                    10,
-                    100
-                )
-            );
+//            var stage = Tunnels.gatedFuse(
+//                TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
+//                Tunnels.tokenBucket(
+//                    Duration.ofSeconds(1),
+//                    String::length,
+//                    10,
+//                    100
+//                )
+//            );
+//
+//            // Producer
+//            scope.fork(() -> {
+//                try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
+//                    for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
+//                        stage.offer(line);
+//                    }
+//                    stage.complete(null);
+//                } catch (Throwable error) {
+//                    stage.complete(error);
+//                }
+//                return null;
+//            });
+//
+//            // Consumer
+//            scope.fork(() -> {
+//                try (stage) {
+//                    stage.forEach(System.out::println);
+//                }
+//                return null;
+//            });
             
-            // Producer
-            scope.fork(() -> {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
-                    for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
-                        stage.offer(line);
+            Pipelines
+                .<String>source(sink -> {
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
+                        for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
+                            sink.offer(line);
+                        }
                     }
-                    stage.complete(null);
-                } catch (Throwable error) {
-                    stage.complete(error);
-                }
-                return null;
-            });
-            
-            // Consumer
-            scope.fork(() -> {
-                try (stage) {
-                    stage.forEach(System.out::println);
-                }
-                return null;
-            });
+                })
+                .andThen(Tunnels.gatedFuse(
+                    TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
+                    Tunnels.tokenBucket(
+                        Duration.ofSeconds(1),
+                        String::length,
+                        10,
+                        100
+                    )
+                ).pipeline())
+                .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
+                .run(scope::fork);
             
             scope.join().throwIfFailed();
         }
