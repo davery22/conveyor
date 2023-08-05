@@ -17,7 +17,7 @@ public class Pipelines {
         
         @SuppressWarnings({"unchecked", "rawtypes"})
         @Override
-        public void runInternals(Consumer<Callable<?>> fork) {
+        public void run(Consumer<Callable<?>> fork) {
             var iter = stages.iterator();
             for (var cursor = iter.next(); iter.hasNext(); ) {
                 var curr = (Tunnel.Source<?>) cursor;
@@ -40,8 +40,30 @@ public class Pipelines {
         }
     }
     
-    static final class ChainedHead<In> extends ClosedSystem implements Pipeline.Head<In> {
-        ChainedHead(List<Object> stages) {
+    static sealed class ChainedSink<In> extends ClosedSystem implements Pipeline.Sink<In> {
+        ChainedSink(List<Object> stages) {
+            super(stages);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.Sink<In> sink() {
+            return (Tunnel.Sink) stages.get(0);
+        }
+        
+        @Override
+        public <T> Pipeline.StepSink<T> compose(Pipeline.Stage<T, ? extends In> stage) {
+            return new ChainedStepSink<>(combineStages((ClosedSystem) stage, this));
+        }
+        
+        @Override
+        public Pipeline.System compose(Pipeline.StepSource<? extends In> stepSource) {
+            return new ClosedSystem(combineStages((ClosedSystem) stepSource, this));
+        }
+    }
+    
+    static final class ChainedStepSink<In> extends ChainedSink<In> implements Pipeline.StepSink<In> {
+        ChainedStepSink(List<Object> stages) {
             super(stages);
         }
         
@@ -50,10 +72,37 @@ public class Pipelines {
         public Tunnel.GatedSink<In> sink() {
             return (Tunnel.GatedSink) stages.get(0);
         }
+        
+        @Override
+        public Pipeline.System compose(Pipeline.Source<? extends In> source) {
+            return new ClosedSystem(combineStages((ClosedSystem) source, this));
+        }
     }
     
-    static final class ChainedTail<Out> extends ClosedSystem implements Pipeline.Tail<Out> {
-        ChainedTail(List<Object> stages) {
+    static sealed class ChainedSource<Out> extends ClosedSystem implements Pipeline.Source<Out> {
+        ChainedSource(List<Object> stages) {
+            super(stages);
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public Tunnel.Source<Out> source() {
+            return (Tunnel.Source) stages.get(stages.size()-1);
+        }
+        
+        @Override
+        public <T> Pipeline.StepSource<T> andThen(Pipeline.Stage<? super Out, T> stage) {
+            return new ChainedStepSource<>(combineStages(this, (ClosedSystem) stage));
+        }
+        
+        @Override
+        public Pipeline.System andThen(Pipeline.StepSink<? super Out> stepSink) {
+            return new ClosedSystem(combineStages(this, (ClosedSystem) stepSink));
+        }
+    }
+    
+    static final class ChainedStepSource<Out> extends ChainedSource<Out> implements Pipeline.StepSource<Out> {
+        ChainedStepSource(List<Object> stages) {
             super(stages);
         }
         
@@ -64,18 +113,13 @@ public class Pipelines {
         }
         
         @Override
-        public <T> Pipeline.Tail<T> connect(Pipeline.Body<? super Out, T> body) {
-            return new ChainedTail<>(combineStages(this, (ClosedSystem) body));
-        }
-        
-        @Override
-        public Pipeline.System connect(Pipeline.Head<? super Out> head) {
-            return new ClosedSystem(combineStages(this, (ClosedSystem) head));
+        public Pipeline.System andThen(Pipeline.Sink<? super Out> sink) {
+            return new ClosedSystem(combineStages(this, (ClosedSystem) sink));
         }
     }
     
-    static final class ChainedBody<In, Out> extends ClosedSystem implements Pipeline.Body<In, Out> {
-        ChainedBody(List<Object> stages) {
+    static final class ChainedStage<In, Out> extends ClosedSystem implements Pipeline.Stage<In, Out> {
+        ChainedStage(List<Object> stages) {
             super(stages);
         }
         
@@ -92,13 +136,33 @@ public class Pipelines {
         }
         
         @Override
-        public <T> Pipeline.Body<In, T> connect(Pipeline.Body<? super Out, T> body) {
-            return new ChainedBody<>(combineStages(this, (ClosedSystem) body));
+        public <T> Pipeline.Stage<In, T> andThen(Pipeline.Stage<? super Out, T> stage) {
+            return new ChainedStage<>(combineStages(this, (ClosedSystem) stage));
         }
         
         @Override
-        public Pipeline.Head<In> connect(Pipeline.Head<? super Out> head) {
-            return new ChainedHead<>(combineStages(this, (ClosedSystem) head));
+        public Pipeline.StepSink<In> andThen(Pipeline.StepSink<? super Out> stepSink) {
+            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) stepSink));
+        }
+        
+        @Override
+        public Pipeline.StepSink<In> andThen(Pipeline.Sink<? super Out> sink) {
+            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) sink));
+        }
+        
+        @Override
+        public <T> Pipeline.Stage<T, Out> compose(Pipeline.Stage<T, ? extends In> stage) {
+            return new ChainedStage<>(combineStages((ClosedSystem) stage, this));
+        }
+        
+        @Override
+        public Pipeline.StepSource<Out> compose(Pipeline.StepSource<? extends In> stepSource) {
+            return new ChainedStepSource<>(combineStages((ClosedSystem) stepSource, this));
+        }
+        
+        @Override
+        public Pipeline.StepSource<Out> compose(Pipeline.Source<? extends In> source) {
+            return new ChainedStepSource<>(combineStages((ClosedSystem) source, this));
         }
     }
     
@@ -111,23 +175,23 @@ public class Pipelines {
         return stages;
     }
     
-    public static <T, U> Pipeline.Tail<U> tail(Tunnel.Source<T> source, Tunnel.FullGate<? super T, U> gate) {
-        return new ChainedTail<>(List.of(source, gate));
+    public static <T> Pipeline.Source<T> source(Tunnel.Source<T> source) {
+        return new ChainedSource<>(List.of(source));
     }
 
-    public static <T> Pipeline.Tail<T> tail(Tunnel.GatedSource<T> source) {
-        return new ChainedTail<>(List.of(source));
+    public static <T> Pipeline.StepSource<T> stepSource(Tunnel.GatedSource<T> source) {
+        return new ChainedStepSource<>(List.of(source));
     }
 
-    public static <T, U> Pipeline.Head<T> head(Tunnel.FullGate<T, U> gate, Tunnel.Sink<? super U> sink) {
-        return new ChainedHead<>(List.of(gate, sink));
+    public static <T> Pipeline.Sink<T> sink(Tunnel.Sink<T> sink) {
+        return new ChainedSink<>(List.of(sink));
     }
 
-    public static <T> Pipeline.Head<T> head(Tunnel.GatedSink<T> sink) {
-        return new ChainedHead<>(List.of(sink));
+    public static <T> Pipeline.StepSink<T> stepSink(Tunnel.GatedSink<T> sink) {
+        return new ChainedStepSink<>(List.of(sink));
     }
 
-    public static <T, U> Pipeline.Body<T, U> body(Tunnel.FullGate<T, U> gate) {
-        return new ChainedBody<>(List.of(gate));
+    public static <T, U> Pipeline.Stage<T, U> stage(Tunnel.FullGate<T, U> gate) {
+        return new ChainedStage<>(List.of(gate));
     }
 }

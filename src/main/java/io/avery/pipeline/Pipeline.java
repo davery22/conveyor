@@ -6,22 +6,43 @@ import java.util.function.Consumer;
 public class Pipeline {
     private Pipeline() {}
     
-    public sealed interface System permits Head, Tail, Pipelines.ClosedSystem {
-        void runInternals(Consumer<Callable<?>> fork);
+    public sealed interface System permits Source, Sink, Pipelines.ClosedSystem {
+        void run(Consumer<Callable<?>> fork);
     }
     
-    public sealed interface Head<In> extends System permits Body, Pipelines.ChainedHead {
-        Tunnel.GatedSink<In> sink();
+    public sealed interface Source<Out> extends System permits StepSource, Pipelines.ChainedSource {
+        Tunnel.Source<Out> source();
+        
+        <T> StepSource<T> andThen(Stage<? super Out, T> stage);
+        System andThen(StepSink<? super Out> stepSink);
     }
     
-    public sealed interface Tail<Out> extends System permits Body, Pipelines.ChainedTail {
-        Tunnel.GatedSource<Out> source();
-        <T> Tail<T> connect(Body<? super Out, T> body);
-        System connect(Head<? super Out> head);
+    public sealed interface Sink<In> extends System permits StepSink, Pipelines.ChainedSink {
+        Tunnel.Sink<In> sink();
+        
+        <T> StepSink<T> compose(Stage<T, ? extends In> stage);
+        System compose(StepSource<? extends In> stepSource);
     }
     
-    public sealed interface Body<In, Out> extends Head<In>, Tail<Out> permits Pipelines.ChainedBody {
-        <T> Body<In, T> connect(Body<? super Out, T> body);
-        Head<In> connect(Head<? super Out> head);
+    public sealed interface StepSource<Out> extends Source<Out> permits Stage, Pipelines.ChainedStepSource {
+        @Override Tunnel.GatedSource<Out> source();
+        
+        System andThen(Sink<? super Out> stepSink);
+    }
+    
+    public sealed interface StepSink<In> extends Sink<In> permits Stage, Pipelines.ChainedStepSink {
+        @Override Tunnel.GatedSink<In> sink();
+        
+        System compose(Source<? extends In> stepSource);
+    }
+    
+    public sealed interface Stage<In, Out> extends StepSink<In>, StepSource<Out> permits Pipelines.ChainedStage {
+        @Override <T> Stage<T, Out> compose(Stage<T, ? extends In> stage);
+        @Override StepSource<Out> compose(StepSource<? extends In> stepSource);
+        @Override StepSource<Out> compose(Source<? extends In> stepSource);
+        
+        @Override <T> Stage<In, T> andThen(Stage<? super Out, T> stage);
+        @Override StepSink<In> andThen(StepSink<? super Out> stepSink);
+        @Override StepSink<In> andThen(Sink<? super Out> stepSink);
     }
 }
