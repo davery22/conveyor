@@ -14,16 +14,16 @@ public class Pipelines {
         return new ChainedSink<>(new Leaf(sink));
     }
     
-    public static <T> Pipeline.StepSource<T> stepSource(Tunnel.GatedSource<T> source) {
+    public static <T> Pipeline.StepSource<T> stepSource(Tunnel.StepSource<T> source) {
         return new ChainedStepSource<>(new Leaf(source));
     }
     
-    public static <T> Pipeline.StepSink<T> stepSink(Tunnel.GatedSink<T> sink) {
+    public static <T> Pipeline.StepSink<T> stepSink(Tunnel.StepSink<T> sink) {
         return new ChainedStepSink<>(new Leaf(sink));
     }
     
-    public static <T, U> Pipeline.Stage<T, U> stage(Tunnel.FullGate<T, U> gate) {
-        return new ChainedStage<>(new Leaf(gate));
+    public static <T, U> Pipeline.Stage<T, U> stage(Tunnel.Stage<T, U> stage) {
+        return new ChainedStage<>(new Leaf(stage));
     }
     
     static sealed class ClosedSystem implements Pipeline.System {
@@ -46,10 +46,10 @@ public class Pipelines {
                 var curr = (Tunnel.Sink<?>) (box.stage = stage);
                 fork.accept(() -> {
                     try (prev) {
-                        if (curr instanceof Tunnel.GatedSink gs) {
-                            prev.drainToSink(gs);
+                        if (curr instanceof Tunnel.StepSink ss) {
+                            prev.drainToSink(ss);
                         } else {
-                            curr.drainFromSource((Tunnel.GatedSource) prev);
+                            curr.drainFromSource((Tunnel.StepSource) prev);
                         }
                         curr.complete(null);
                     } catch (Throwable error) {
@@ -73,13 +73,13 @@ public class Pipelines {
         }
         
         @Override
-        public <T> Pipeline.StepSource<T> andThen(Pipeline.Stage<? super Out, T> stage) {
-            return new ChainedStepSource<>(combineStages(this, (ClosedSystem) stage));
+        public <T> Pipeline.StepSource<T> andThen(Pipeline.Stage<? super Out, T> after) {
+            return new ChainedStepSource<>(combineStages(this, (ClosedSystem) after));
         }
         
         @Override
-        public Pipeline.System andThen(Pipeline.StepSink<? super Out> sink) {
-            return new ClosedSystem(combineStages(this, (ClosedSystem) sink));
+        public Pipeline.System andThen(Pipeline.StepSink<? super Out> after) {
+            return new ClosedSystem(combineStages(this, (ClosedSystem) after));
         }
     }
     
@@ -95,13 +95,13 @@ public class Pipelines {
         }
         
         @Override
-        public <T> Pipeline.StepSink<T> compose(Pipeline.Stage<T, ? extends In> stage) {
-            return new ChainedStepSink<>(combineStages((ClosedSystem) stage, this));
+        public <T> Pipeline.StepSink<T> compose(Pipeline.Stage<T, ? extends In> before) {
+            return new ChainedStepSink<>(combineStages((ClosedSystem) before, this));
         }
         
         @Override
-        public Pipeline.System compose(Pipeline.StepSource<? extends In> source) {
-            return new ClosedSystem(combineStages((ClosedSystem) source, this));
+        public Pipeline.System compose(Pipeline.StepSource<? extends In> before) {
+            return new ClosedSystem(combineStages((ClosedSystem) before, this));
         }
     }
     
@@ -112,13 +112,13 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.GatedSource<Out> source() {
-            return (Tunnel.GatedSource<Out>) stages.last();
+        public Tunnel.StepSource<Out> source() {
+            return (Tunnel.StepSource<Out>) stages.last();
         }
         
         @Override
-        public Pipeline.System andThen(Pipeline.Sink<? super Out> sink) {
-            return new ClosedSystem(combineStages(this, (ClosedSystem) sink));
+        public Pipeline.System andThen(Pipeline.Sink<? super Out> after) {
+            return new ClosedSystem(combineStages(this, (ClosedSystem) after));
         }
     }
     
@@ -129,13 +129,13 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.GatedSink<In> sink() {
-            return (Tunnel.GatedSink<In>) stages.first();
+        public Tunnel.StepSink<In> sink() {
+            return (Tunnel.StepSink<In>) stages.first();
         }
         
         @Override
-        public Pipeline.System compose(Pipeline.Source<? extends In> source) {
-            return new ClosedSystem(combineStages((ClosedSystem) source, this));
+        public Pipeline.System compose(Pipeline.Source<? extends In> before) {
+            return new ClosedSystem(combineStages((ClosedSystem) before, this));
         }
     }
     
@@ -146,44 +146,44 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.GatedSink<In> sink() {
-            return (Tunnel.GatedSink<In>) stages.first();
+        public Tunnel.StepSink<In> sink() {
+            return (Tunnel.StepSink<In>) stages.first();
         }
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.GatedSource<Out> source() {
-            return (Tunnel.GatedSource<Out>) stages.last();
+        public Tunnel.StepSource<Out> source() {
+            return (Tunnel.StepSource<Out>) stages.last();
         }
         
         @Override
-        public <T> Pipeline.Stage<In, T> andThen(Pipeline.Stage<? super Out, T> stage) {
-            return new ChainedStage<>(combineStages(this, (ClosedSystem) stage));
+        public <T> Pipeline.Stage<In, T> andThen(Pipeline.Stage<? super Out, T> after) {
+            return new ChainedStage<>(combineStages(this, (ClosedSystem) after));
         }
         
         @Override
-        public Pipeline.StepSink<In> andThen(Pipeline.StepSink<? super Out> sink) {
-            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) sink));
+        public Pipeline.StepSink<In> andThen(Pipeline.StepSink<? super Out> after) {
+            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) after));
         }
         
         @Override
-        public Pipeline.StepSink<In> andThen(Pipeline.Sink<? super Out> sink) {
-            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) sink));
+        public Pipeline.StepSink<In> andThen(Pipeline.Sink<? super Out> after) {
+            return new ChainedStepSink<>(combineStages(this, (ClosedSystem) after));
         }
         
         @Override
-        public <T> Pipeline.Stage<T, Out> compose(Pipeline.Stage<T, ? extends In> stage) {
-            return new ChainedStage<>(combineStages((ClosedSystem) stage, this));
+        public <T> Pipeline.Stage<T, Out> compose(Pipeline.Stage<T, ? extends In> before) {
+            return new ChainedStage<>(combineStages((ClosedSystem) before, this));
         }
         
         @Override
-        public Pipeline.StepSource<Out> compose(Pipeline.StepSource<? extends In> source) {
-            return new ChainedStepSource<>(combineStages((ClosedSystem) source, this));
+        public Pipeline.StepSource<Out> compose(Pipeline.StepSource<? extends In> before) {
+            return new ChainedStepSource<>(combineStages((ClosedSystem) before, this));
         }
         
         @Override
-        public Pipeline.StepSource<Out> compose(Pipeline.Source<? extends In> source) {
-            return new ChainedStepSource<>(combineStages((ClosedSystem) source, this));
+        public Pipeline.StepSource<Out> compose(Pipeline.Source<? extends In> before) {
+            return new ChainedStepSource<>(combineStages((ClosedSystem) before, this));
         }
     }
     

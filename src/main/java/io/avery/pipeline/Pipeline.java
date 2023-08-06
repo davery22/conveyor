@@ -13,36 +13,38 @@ public class Pipeline {
     public sealed interface Source<Out> extends System permits StepSource, Pipelines.ChainedSource {
         Tunnel.Source<Out> source();
         
-        <T> StepSource<T> andThen(Stage<? super Out, T> stage);
-        System andThen(StepSink<? super Out> sink);
+        <T> StepSource<T> andThen(Stage<? super Out, T> after);
+        System andThen(StepSink<? super Out> after);
     }
     
     public sealed interface Sink<In> extends System permits StepSink, Pipelines.ChainedSink {
         Tunnel.Sink<In> sink();
         
-        <T> StepSink<T> compose(Stage<T, ? extends In> stage);
-        System compose(StepSource<? extends In> source);
+        <T> StepSink<T> compose(Stage<T, ? extends In> before);
+        System compose(StepSource<? extends In> before);
     }
     
     public sealed interface StepSource<Out> extends Source<Out> permits Stage, Pipelines.ChainedStepSource {
-        @Override Tunnel.GatedSource<Out> source();
+        @Override
+        Tunnel.StepSource<Out> source();
         
-        System andThen(Sink<? super Out> sink);
+        System andThen(Sink<? super Out> after);
     }
     
     public sealed interface StepSink<In> extends Sink<In> permits Stage, Pipelines.ChainedStepSink {
-        @Override Tunnel.GatedSink<In> sink();
+        @Override
+        Tunnel.StepSink<In> sink();
         
-        System compose(Source<? extends In> source);
+        System compose(Source<? extends In> before);
     }
     
     public sealed interface Stage<In, Out> extends StepSink<In>, StepSource<Out> permits Pipelines.ChainedStage {
-        @Override <T> Stage<T, Out> compose(Stage<T, ? extends In> stage);
-        @Override StepSource<Out> compose(StepSource<? extends In> source);
-        @Override StepSource<Out> compose(Source<? extends In> source);
+        @Override <T> Stage<T, Out> compose(Stage<T, ? extends In> before);
+        @Override StepSource<Out> compose(StepSource<? extends In> before);
+        @Override StepSource<Out> compose(Source<? extends In> before);
         
-        @Override <T> Stage<In, T> andThen(Stage<? super Out, T> stage);
-        @Override StepSink<In> andThen(StepSink<? super Out> sink);
-        @Override StepSink<In> andThen(Sink<? super Out> sink);
+        @Override <T> Stage<In, T> andThen(Stage<? super Out, T> after);
+        @Override StepSink<In> andThen(StepSink<? super Out> after);
+        @Override StepSink<In> andThen(Sink<? super Out> after);
     }
 }

@@ -33,7 +33,7 @@ class TunnelsTest {
                 .andThen(TunnelsTest.<String>buffer(4).pipeline())
                 .andThen(Tunnels.balance(
                     // TODO: What if I want ordering?
-                    IntStream.range(0, 4).mapToObj(i -> Tunnels.gatedFuse(
+                    IntStream.range(0, 4).mapToObj(i -> Tunnels.stepFuse(
                         TunnelsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
                         buffer
                     )).toList()
@@ -51,7 +51,7 @@ class TunnelsTest {
     
     public static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var stage = Tunnels.gatedFuse(
+//            var stage = Tunnels.stepFuse(
 //                TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
 //                Tunnels.tokenBucket(
 //                    Duration.ofSeconds(1),
@@ -90,7 +90,7 @@ class TunnelsTest {
                         }
                     }
                 })
-                .andThen(Tunnels.gatedFuse(
+                .andThen(Tunnels.stepFuse(
                     TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
                     Tunnels.tokenBucket(
                         Duration.ofSeconds(1),
@@ -106,7 +106,7 @@ class TunnelsTest {
         }
     }
     
-    private static <T> Tunnel.FullGate<T, T> buffer(int bufferLimit) {
+    private static <T> Tunnel.Stage<T, T> buffer(int bufferLimit) {
         return Tunnels.extrapolate(e -> Collections.emptyIterator(), bufferLimit);
     }
     

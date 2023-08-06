@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
+public class TimedStage<In, Out> implements Tunnel.Stage<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant onInit() throws Exception;
@@ -18,14 +18,14 @@ public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
     
     public sealed interface SinkController {
         void latchDeadline(Instant deadline);
-        boolean awaitSource() throws InterruptedException;
+        boolean awaitAdvance() throws InterruptedException;
     }
     
     public sealed interface SourceController<T> {
         void latchClose();
         void latchOutput(T output);
         void latchDeadline(Instant deadline);
-        void signalSink();
+        void signalAdvance();
     }
     
     final Core<In, Out> core;
@@ -68,7 +68,7 @@ public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
     
-    TimedGate(Core<In, Out> core) {
+    TimedStage(Core<In, Out> core) {
         this.core = core;
     }
     
@@ -102,7 +102,7 @@ public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
         }
         
         @Override
-        public void signalSink() {
+        public void signalAdvance() {
             if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
@@ -111,7 +111,7 @@ public class TimedGate<In, Out> implements Tunnel.FullGate<In, Out> {
         }
         
         @Override
-        public boolean awaitSource() throws InterruptedException {
+        public boolean awaitAdvance() throws InterruptedException {
             if (access() != SINK || !sourceLock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
