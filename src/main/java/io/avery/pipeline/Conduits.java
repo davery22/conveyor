@@ -850,10 +850,10 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<A> ctl) throws ExecutionException {
+            public void onPoll(TimedStage.SourceController<A> ctl) throws UpstreamException {
                 if (done) {
                     if (err != null) {
-                        throw new ExecutionException(err);
+                        throw new UpstreamException(err);
                     }
                     ctl.latchClose();
                     if (batch == null) {
@@ -937,9 +937,9 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws ExecutionException {
+            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
-                    throw new ExecutionException(err);
+                    throw new UpstreamException(err);
                 }
                 Weighted<T> head = queue.peek();
                 if (head == null) {
@@ -1032,9 +1032,9 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws ExecutionException {
+            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
-                    throw new ExecutionException(err);
+                    throw new UpstreamException(err);
                 }
                 Expiring<T> head = pq.poll();
                 if (head == null) {
@@ -1102,9 +1102,9 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws ExecutionException {
+            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
-                    throw new ExecutionException(err);
+                    throw new UpstreamException(err);
                 }
                 T head = queue.poll();
                 if (head != null) {
@@ -1163,9 +1163,9 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws ExecutionException {
+            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
-                    throw new ExecutionException(err);
+                    throw new UpstreamException(err);
                 }
                 T head = queue.poll();
                 if (head != null) {
@@ -1199,6 +1199,7 @@ public class Conduits {
         return new TimedStage<>(core);
     }
     
+    // TODO: Expose
     private static class AggregateFailure extends StructuredTaskScope<Object> {
         volatile Throwable error;
         

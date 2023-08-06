@@ -1,9 +1,9 @@
 package io.avery.pipeline;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.time.Duration;
-import java.util.*;
+import java.util.Collections;
+import java.util.Scanner;
+import java.util.Set;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
@@ -15,7 +15,7 @@ import java.util.stream.Stream;
 class ConduitsTest {
     // TODO: Remove
     public static void main(String[] args) throws Exception {
-        test2();
+        test1();
     }
     
     public static void test2() throws Exception {
@@ -24,10 +24,8 @@ class ConduitsTest {
             
             Pipelines
                 .<String>source(sink -> {
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
-                        for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
-                            sink.offer(line);
-                        }
+                    try (var in = new Scanner(System.in)) {
+                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && sink.offer(line); ) { }
                     }
                 })
                 .andThen(ConduitsTest.<String>buffer(4).pipeline())
@@ -63,10 +61,8 @@ class ConduitsTest {
 //
 //            // Producer
 //            scope.fork(() -> {
-//                try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
-//                    for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
-//                        stage.offer(line);
-//                    }
+//                try (var in = new Scanner(System.in)) {
+//                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && stage.offer(line); ) { }
 //                    stage.complete(null);
 //                } catch (Throwable error) {
 //                    stage.complete(error);
@@ -84,10 +80,8 @@ class ConduitsTest {
             
             Pipelines
                 .<String>source(sink -> {
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
-                        for (String line; !"stop".equalsIgnoreCase(line = reader.readLine()); ) {
-                            sink.offer(line);
-                        }
+                    try (var in = new Scanner(System.in)) {
+                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && sink.offer(line); ) { }
                     }
                 })
                 .andThen(Conduits.stepFuse(

@@ -50,7 +50,16 @@ public class Conduit {
     public interface Sink<T> {
         void drainFromSource(StepSource<? extends T> source) throws Exception;
         
-        default void complete(Throwable error) throws Exception {}
+        default void complete(Throwable error) throws Exception {
+            // Default impl handles the case where the Sink has no async downstream.
+            // Implementations that have an async downstream should override this method to propagate error downstream.
+            // TODO: What about eg balance(), where one of several Sinks might be synchronous, causing a throw...
+            //  In general, when/how can it be safe for close()/complete(err) to actually throw?
+            //  Maybe ShutdownOnFailure is not the right scope for pipelines?
+            if (error != null) {
+                throw new UpstreamException(error);
+            }
+        }
         
         default Pipeline.Sink<T> pipeline() {
             return Pipelines.sink(this);
