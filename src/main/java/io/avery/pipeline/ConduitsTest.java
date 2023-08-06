@@ -12,7 +12,7 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-class TunnelsTest {
+class ConduitsTest {
     // TODO: Remove
     public static void main(String[] args) throws Exception {
         test2();
@@ -20,7 +20,7 @@ class TunnelsTest {
     
     public static void test2() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var buffer = TunnelsTest.buffer(10);
+            var buffer = ConduitsTest.buffer(10);
             
             Pipelines
                 .<String>source(sink -> {
@@ -30,11 +30,11 @@ class TunnelsTest {
                         }
                     }
                 })
-                .andThen(TunnelsTest.<String>buffer(4).pipeline())
-                .andThen(Tunnels.balance(
+                .andThen(ConduitsTest.<String>buffer(4).pipeline())
+                .andThen(Conduits.balance(
                     // TODO: What if I want ordering?
-                    IntStream.range(0, 4).mapToObj(i -> Tunnels.stepFuse(
-                        TunnelsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
+                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
+                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
                         buffer
                     )).toList()
                 ).pipeline())
@@ -51,9 +51,9 @@ class TunnelsTest {
     
     public static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var stage = Tunnels.stepFuse(
-//                TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-//                Tunnels.tokenBucket(
+//            var stage = Conduits.stepFuse(
+//                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
+//                Conduits.tokenBucket(
 //                    Duration.ofSeconds(1),
 //                    String::length,
 //                    10,
@@ -90,9 +90,9 @@ class TunnelsTest {
                         }
                     }
                 })
-                .andThen(Tunnels.stepFuse(
-                    TunnelsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-                    Tunnels.tokenBucket(
+                .andThen(Conduits.stepFuse(
+                    ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
+                    Conduits.tokenBucket(
                         Duration.ofSeconds(1),
                         String::length,
                         10,
@@ -106,8 +106,8 @@ class TunnelsTest {
         }
     }
     
-    private static <T> Tunnel.Stage<T, T> buffer(int bufferLimit) {
-        return Tunnels.extrapolate(e -> Collections.emptyIterator(), bufferLimit);
+    private static <T> Conduit.Stage<T, T> buffer(int bufferLimit) {
+        return Conduits.extrapolate(e -> Collections.emptyIterator(), bufferLimit);
     }
     
     private static <T, R> Gatherer<T, ?, R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {

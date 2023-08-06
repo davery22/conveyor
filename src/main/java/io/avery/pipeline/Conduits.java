@@ -11,8 +11,8 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 
-public class Tunnels {
-    private Tunnels() {} // Utility
+public class Conduits {
+    private Conduits() {} // Utility
     
     private static class WrappingException extends RuntimeException {
         WrappingException(Exception e) {
@@ -25,12 +25,12 @@ public class Tunnels {
         }
     }
     
-    private static class FusedStepSink<In, T, A> implements Tunnel.StepSink<In> {
+    private static class FusedStepSink<In, T, A> implements Conduit.StepSink<In> {
         final ReentrantLock sinkLock = new ReentrantLock();
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
-        final Tunnel.StepSink<T> tunnel;
+        final Conduit.StepSink<T> conduit;
         final Gatherer.Sink<T> gsink;
         A acc = null;
         int state = NEW;
@@ -39,14 +39,14 @@ public class Tunnels {
         static final int RUNNING   = 1;
         static final int COMPLETED = 2;
         
-        FusedStepSink(Gatherer<In, A, T> gatherer, Tunnel.StepSink<T> sink) {
+        FusedStepSink(Gatherer<In, A, T> gatherer, Conduit.StepSink<T> sink) {
             this.supplier = gatherer.supplier();
             this.integrator = gatherer.integrator();
             this.finisher = gatherer.finisher();
-            this.tunnel = Objects.requireNonNull(sink);
+            this.conduit = Objects.requireNonNull(sink);
             this.gsink = el -> {
                 try {
-                    return tunnel().offer(el);
+                    return conduit().offer(el);
                 } catch (Error | RuntimeException e) {
                     throw e;
                 } catch (Exception e) {
@@ -61,8 +61,8 @@ public class Tunnels {
             };
         }
         
-        Tunnel.StepSink<T> tunnel() {
-            return tunnel;
+        Conduit.StepSink<T> conduit() {
+            return conduit;
         }
         
         void initIfNew() {
@@ -107,7 +107,7 @@ public class Tunnels {
                 if (error == null) {
                     finisher.accept(acc, gsink);
                 }
-                tunnel().complete(error);
+                conduit().complete(error);
                 state = COMPLETED;
             } catch (WrappingException e) {
                 if (e.getCause() instanceof InterruptedException) {
@@ -120,42 +120,42 @@ public class Tunnels {
         }
     }
     
-    private static class FusedStepStage<In, T, A, Out> extends FusedStepSink<In, T, A> implements Tunnel.Stage<In, Out> {
-        FusedStepStage(Gatherer<In, A, T> gatherer, Tunnel.Stage<T, Out> stage) {
+    private static class FusedStepStage<In, T, A, Out> extends FusedStepSink<In, T, A> implements Conduit.Stage<In, Out> {
+        FusedStepStage(Gatherer<In, A, T> gatherer, Conduit.Stage<T, Out> stage) {
             super(gatherer, stage);
         }
         
         @Override
-        Tunnel.Stage<T, Out> tunnel() {
-            return (Tunnel.Stage<T, Out>) tunnel;
+        Conduit.Stage<T, Out> conduit() {
+            return (Conduit.Stage<T, Out>) conduit;
         }
         
         @Override
         public Out poll() throws Exception {
-            return tunnel().poll();
+            return conduit().poll();
         }
         
         @Override
         public void close() throws Exception {
-            tunnel().close();
+            conduit().close();
         }
     }
     
-    public static <In, T, A> Tunnel.StepSink<In> stepFuse(Gatherer<In, A, ? extends T> gatherer, Tunnel.StepSink<T> sink) {
+    public static <In, T, A> Conduit.StepSink<In> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.StepSink<T> sink) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
         return new FusedStepSink<>(g, sink);
     }
     
-    public static <In, T, A, Out> Tunnel.Stage<In, Out> stepFuse(Gatherer<In, A, ? extends T> gatherer, Tunnel.Stage<T, Out> stage) {
+    public static <In, T, A, Out> Conduit.Stage<In, Out> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.Stage<T, Out> stage) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
         return new FusedStepStage<>(g, stage);
     }
     
-    // concat() could work by creating a Tunnel.Source that switches between 2 Tunnel.Sources,
-    // or by creating a Pipeline.Source that consumes one Tunnel.Source and then another.
-    // The latter case reduces to the former case, since Pipeline.Source needs to expose a Tunnel.StepSource
+    // concat() could work by creating a Conduit.Source that switches between 2 Conduit.Sources,
+    // or by creating a Pipeline.Source that consumes one Conduit.Source and then another.
+    // The latter case reduces to the former case, since Pipeline.Source needs to expose a Conduit.StepSource
     
     // TODO: Likely going to have alternates of several methods to account for (non-)step-ness.
     
@@ -171,7 +171,7 @@ public class Tunnels {
     //  - ~Send~ Kick off request for initial elements (or even error/completion), eg in a Replay
     //    - Has to happen by calling Subscription.request(n)
     
-    // init() as a way to initialize threads in a chained tunnel / pipeline?
+    // init() as a way to initialize threads in a chained conduit / pipeline?
     // Problem: Can't create the STScope inside init(), cuz scope - execution would need to finish inside init()
     // Could pass in a scope - init(scope) - that feels opinionated, and unnecessary for single-stage
     
@@ -232,10 +232,10 @@ public class Tunnels {
     
     // --- Sinks ---
     
-    public static <T> Tunnel.Sink<T> balance(List<? extends Tunnel.Sink<T>> sinks) {
-        class Balance implements Tunnel.Sink<T> {
+    public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
+        class Balance implements Conduit.Sink<T> {
             @Override
-            public void drainFromSource(Tunnel.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     for (var sink : sinks) {
                         scope.fork(() -> {
@@ -256,8 +256,8 @@ public class Tunnels {
         return new Balance();
     }
     
-    public static <T> Tunnel.StepSink<T> stepBroadcast(List<? extends Tunnel.StepSink<T>> sinks) {
-        class StepBroadcast implements Tunnel.StepSink<T> {
+    public static <T> Conduit.StepSink<T> stepBroadcast(List<? extends Conduit.StepSink<T>> sinks) {
+        class StepBroadcast implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
@@ -282,8 +282,8 @@ public class Tunnels {
         return new StepBroadcast();
     }
     
-    public static <T> Tunnel.Sink<T> broadcast(List<? extends Tunnel.Sink<T>> sinks) {
-        class Broadcast implements Tunnel.Sink<T> {
+    public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
+        class Broadcast implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             final BitSet bitSet = new BitSet(sinks.size());
@@ -294,13 +294,13 @@ public class Tunnels {
             static final ScopedValue<Integer> POS = ScopedValue.newInstance();
             
             @Override
-            public void drainFromSource(Tunnel.StepSource<? extends T> source) throws Exception {
+            public void drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 // Every sink has to call drainFromSource(source), probably in its own thread
                 // The poll() on that source needs to respond differently based on which sink is calling
                 //  - If the sink has already consumed the current element, wait for other consumers
                 //  - Once all sinks have consumed the current element, poll() for the next element, then wake consumers
                 
-                var stepSource = new Tunnel.StepSource<T>() {
+                var stepSource = new Conduit.StepSource<T>() {
                     @Override
                     public T poll() throws Exception {
                         lock.lockInterruptibly();
@@ -371,9 +371,9 @@ public class Tunnels {
         return new Broadcast();
     }
     
-    public static <T> Tunnel.StepSink<T> stepPartition(List<? extends Tunnel.StepSink<T>> sinks,
-                                                       BiConsumer<T, IntConsumer> selector) {
-        class StepPartition implements Tunnel.StepSink<T> {
+    public static <T> Conduit.StepSink<T> stepPartition(List<? extends Conduit.StepSink<T>> sinks,
+                                                        BiConsumer<T, IntConsumer> selector) {
+        class StepPartition implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
@@ -404,8 +404,8 @@ public class Tunnels {
     
     // --- Sources ---
     
-    public static <T> Tunnel.StepSource<T> stepConcat(List<? extends Tunnel.StepSource<T>> sources) {
-        class StepConcat implements Tunnel.StepSource<T> {
+    public static <T> Conduit.StepSource<T> stepConcat(List<? extends Conduit.StepSource<T>> sources) {
+        class StepConcat implements Conduit.StepSource<T> {
             int i = 0;
             
             @Override
@@ -428,10 +428,10 @@ public class Tunnels {
         return new StepConcat();
     }
     
-    public static <T> Tunnel.Source<T> concat(List<? extends Tunnel.Source<T>> sources) {
-        class Concat implements Tunnel.Source<T> {
+    public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
+        class Concat implements Conduit.Source<T> {
             @Override
-            public void drainToSink(Tunnel.StepSink<? super T> sink) throws Exception {
+            public void drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 for (var source : sources) {
                     source.drainToSink(sink);
                 }
@@ -446,10 +446,10 @@ public class Tunnels {
         return new Concat();
     }
     
-    public static <T> Tunnel.Source<T> merge(List<? extends Tunnel.Source<T>> sources) {
-        class Merge implements Tunnel.Source<T> {
+    public static <T> Conduit.Source<T> merge(List<? extends Conduit.Source<T>> sources) {
+        class Merge implements Conduit.Source<T> {
             @Override
-            public void drainToSink(Tunnel.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public void drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     for (var source : sources) {
                         scope.fork(() -> {
@@ -470,9 +470,9 @@ public class Tunnels {
         return new Merge();
     }
     
-    public static <T> Tunnel.StepSource<T> stepMergeSorted(List<? extends Tunnel.StepSource<T>> sources,
-                                                           Comparator<? super T> comparator) {
-        class MergeSorted implements Tunnel.StepSource<T> {
+    public static <T> Conduit.StepSource<T> stepMergeSorted(List<? extends Conduit.StepSource<T>> sources,
+                                                            Comparator<? super T> comparator) {
+        class MergeSorted implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = -1;
             
@@ -528,14 +528,14 @@ public class Tunnels {
         Y latest2();
     }
     
-    public static <T1, T2, T> Tunnel.StepSource<T> stepZip(Tunnel.StepSource<T1> source1,
-                                                           Tunnel.StepSource<T2> source2,
-                                                           BiFunction<? super T1, ? super T2, T> merger) {
+    public static <T1, T2, T> Conduit.StepSource<T> stepZip(Conduit.StepSource<T1> source1,
+                                                            Conduit.StepSource<T2> source2,
+                                                            BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class StepZip implements Tunnel.StepSource<T> {
+        class StepZip implements Conduit.StepSource<T> {
             final ReentrantLock lock = new ReentrantLock();
             int state = RUNNING;
             
@@ -585,14 +585,14 @@ public class Tunnels {
         return new StepZip();
     }
     
-    public static <T1, T2, T> Tunnel.Source<T> zip(Tunnel.Source<T1> source1,
-                                                   Tunnel.Source<T2> source2,
-                                                   BiFunction<? super T1, ? super T2, T> merger) {
+    public static <T1, T2, T> Conduit.Source<T> zip(Conduit.Source<T1> source1,
+                                                    Conduit.Source<T2> source2,
+                                                    BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class Zip implements Tunnel.Source<T> {
+        class Zip implements Conduit.Source<T> {
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             T1 latest1 = null;
@@ -613,9 +613,9 @@ public class Tunnels {
                 }
             }
             
-            <X, Y> Void runSource(Tunnel.Source<X> source,
+            <X, Y> Void runSource(Conduit.Source<X> source,
                                   Accessor<X, Y> access,
-                                  Tunnel.StepSink<? super T> sink) throws Exception {
+                                  Conduit.StepSink<? super T> sink) throws Exception {
                 source.drainToSink(e -> {
                     lock.lockInterruptibly();
                     try {
@@ -649,7 +649,7 @@ public class Tunnels {
             }
 
             @Override
-            public void drainToSink(Tunnel.StepSink<? super T> sink) throws Exception {
+            public void drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -691,14 +691,14 @@ public class Tunnels {
         return new Zip();
     }
     
-    public static <T1, T2, T> Tunnel.Source<T> zipLatest(Tunnel.Source<T1> source1,
-                                                         Tunnel.Source<T2> source2,
-                                                         BiFunction<? super T1, ? super T2, T> merger) {
+    public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
+                                                          Conduit.Source<T2> source2,
+                                                          BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class ZipLatest implements Tunnel.Source<T> {
+        class ZipLatest implements Conduit.Source<T> {
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             T1 latest1 = null;
@@ -719,10 +719,10 @@ public class Tunnels {
                 }
             }
             
-            <X, Y> Void runSource(Tunnel.Source<X> source,
+            <X, Y> Void runSource(Conduit.Source<X> source,
                                   Accessor<X, Y> access,
-                                  Tunnel.StepSink<? super T> sink) throws Exception {
-                source.drainToSink(new Tunnel.StepSink<>() {
+                                  Conduit.StepSink<? super T> sink) throws Exception {
+                source.drainToSink(new Conduit.StepSink<>() {
                     boolean first = true;
                     
                     @Override
@@ -769,7 +769,7 @@ public class Tunnels {
             }
             
             @Override
-            public void drainToSink(Tunnel.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public void drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -813,9 +813,9 @@ public class Tunnels {
     
     // --- Stages ---
     
-    public static <T, A> Tunnel.Stage<T, A> batch(Supplier<? extends A> batchSupplier,
-                                                  BiConsumer<? super A, ? super T> accumulator,
-                                                  Function<? super A, Optional<Instant>> deadlineMapper) {
+    public static <T, A> Conduit.Stage<T, A> batch(Supplier<? extends A> batchSupplier,
+                                                   BiConsumer<? super A, ? super T> accumulator,
+                                                   Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
@@ -879,10 +879,10 @@ public class Tunnels {
         return new TimedStage<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> tokenBucket(Duration tokenInterval,
-                                                     ToLongFunction<T> costMapper,
-                                                     long tokenLimit,
-                                                     long costLimit) { // TODO: Obviate costLimit?
+    public static <T> Conduit.Stage<T, T> tokenBucket(Duration tokenInterval,
+                                                      ToLongFunction<T> costMapper,
+                                                      long tokenLimit,
+                                                      long costLimit) { // TODO: Obviate costLimit?
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
         if ((tokenLimit | costLimit) < 0) {
@@ -998,8 +998,8 @@ public class Tunnels {
         return new TimedStage<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> delay(Function<? super T, Instant> deadlineMapper,
-                                               int bufferLimit) {
+    public static <T> Conduit.Stage<T, T> delay(Function<? super T, Instant> deadlineMapper,
+                                                int bufferLimit) {
         Objects.requireNonNull(deadlineMapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
@@ -1067,9 +1067,9 @@ public class Tunnels {
         return new TimedStage<>(core);
     }
     
-    public static <T> Tunnel.Stage<T, T> keepAlive(Duration timeout,
-                                                   Supplier<? extends T> extraSupplier,
-                                                   int bufferLimit) {
+    public static <T> Conduit.Stage<T, T> keepAlive(Duration timeout,
+                                                    Supplier<? extends T> extraSupplier,
+                                                    int bufferLimit) {
         Objects.requireNonNull(timeout);
         Objects.requireNonNull(extraSupplier);
         if (bufferLimit < 1) {
@@ -1131,8 +1131,8 @@ public class Tunnels {
         return new TimedStage<>(core);
     }
 
-    public static <T> Tunnel.Stage<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
-                                                     int bufferLimit) {
+    public static <T> Conduit.Stage<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
+                                                      int bufferLimit) {
         Objects.requireNonNull(mapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
@@ -1237,7 +1237,7 @@ public class Tunnels {
         }
     }
     
-    public static void parallelClose(Collection<? extends Tunnel.Source<?>> sources) throws InterruptedException, ExecutionException {
+    public static void parallelClose(Collection<? extends Conduit.Source<?>> sources) throws InterruptedException, ExecutionException {
         try (var scope = new AggregateFailure()) {
             for (var source : sources) {
                 scope.fork(() -> {
@@ -1249,7 +1249,7 @@ public class Tunnels {
         }
     }
     
-    public static void parallelComplete(Collection<? extends Tunnel.Sink<?>> sinks, Throwable error) throws InterruptedException, ExecutionException {
+    public static void parallelComplete(Collection<? extends Conduit.Sink<?>> sinks, Throwable error) throws InterruptedException, ExecutionException {
         try (var scope = new AggregateFailure()) {
             for (var sink : sinks) {
                 scope.fork(() -> {

@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedStage<In, Out> implements Tunnel.Stage<In, Out> {
+public class TimedStage<In, Out> implements Conduit.Stage<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant onInit() throws Exception;
@@ -63,7 +63,7 @@ public class TimedStage<In, Out> implements Tunnel.Stage<In, Out> {
     private static final int COMPLETING = 2;
     private static final int CLOSED     = 3;
     
-    // Access modes, used to verify that calls to the shared Control instance are legal, regardless of casting.
+    // Access modes, used to verify that calls to the shared Controller instance are legal, regardless of casting.
     private static final int NONE   = 0 << 2;
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;

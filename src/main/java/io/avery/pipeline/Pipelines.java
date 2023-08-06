@@ -6,23 +6,23 @@ import java.util.function.Consumer;
 public class Pipelines {
     private Pipelines() {} // Utility
     
-    public static <T> Pipeline.Source<T> source(Tunnel.Source<T> source) {
+    public static <T> Pipeline.Source<T> source(Conduit.Source<T> source) {
         return new ChainedSource<>(new Leaf(source));
     }
     
-    public static <T> Pipeline.Sink<T> sink(Tunnel.Sink<T> sink) {
+    public static <T> Pipeline.Sink<T> sink(Conduit.Sink<T> sink) {
         return new ChainedSink<>(new Leaf(sink));
     }
     
-    public static <T> Pipeline.StepSource<T> stepSource(Tunnel.StepSource<T> source) {
+    public static <T> Pipeline.StepSource<T> stepSource(Conduit.StepSource<T> source) {
         return new ChainedStepSource<>(new Leaf(source));
     }
     
-    public static <T> Pipeline.StepSink<T> stepSink(Tunnel.StepSink<T> sink) {
+    public static <T> Pipeline.StepSink<T> stepSink(Conduit.StepSink<T> sink) {
         return new ChainedStepSink<>(new Leaf(sink));
     }
     
-    public static <T, U> Pipeline.Stage<T, U> stage(Tunnel.Stage<T, U> stage) {
+    public static <T, U> Pipeline.Stage<T, U> stage(Conduit.Stage<T, U> stage) {
         return new ChainedStage<>(new Leaf(stage));
     }
     
@@ -42,14 +42,14 @@ public class Pipelines {
                     box.stage = stage;
                     return;
                 }
-                var prev = (Tunnel.Source<?>) box.stage;
-                var curr = (Tunnel.Sink<?>) (box.stage = stage);
+                var prev = (Conduit.Source<?>) box.stage;
+                var curr = (Conduit.Sink<?>) (box.stage = stage);
                 fork.accept(() -> {
                     try (prev) {
-                        if (curr instanceof Tunnel.StepSink ss) {
+                        if (curr instanceof Conduit.StepSink ss) {
                             prev.drainToSink(ss);
                         } else {
-                            curr.drainFromSource((Tunnel.StepSource) prev);
+                            curr.drainFromSource((Conduit.StepSource) prev);
                         }
                         curr.complete(null);
                     } catch (Throwable error) {
@@ -68,8 +68,8 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.Source<Out> source() {
-            return (Tunnel.Source<Out>) stages.last();
+        public Conduit.Source<Out> source() {
+            return (Conduit.Source<Out>) stages.last();
         }
         
         @Override
@@ -90,8 +90,8 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.Sink<In> sink() {
-            return (Tunnel.Sink<In>) stages.first();
+        public Conduit.Sink<In> sink() {
+            return (Conduit.Sink<In>) stages.first();
         }
         
         @Override
@@ -112,8 +112,8 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.StepSource<Out> source() {
-            return (Tunnel.StepSource<Out>) stages.last();
+        public Conduit.StepSource<Out> source() {
+            return (Conduit.StepSource<Out>) stages.last();
         }
         
         @Override
@@ -129,8 +129,8 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.StepSink<In> sink() {
-            return (Tunnel.StepSink<In>) stages.first();
+        public Conduit.StepSink<In> sink() {
+            return (Conduit.StepSink<In>) stages.first();
         }
         
         @Override
@@ -146,14 +146,14 @@ public class Pipelines {
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.StepSink<In> sink() {
-            return (Tunnel.StepSink<In>) stages.first();
+        public Conduit.StepSink<In> sink() {
+            return (Conduit.StepSink<In>) stages.first();
         }
         
         @SuppressWarnings("unchecked")
         @Override
-        public Tunnel.StepSource<Out> source() {
-            return (Tunnel.StepSource<Out>) stages.last();
+        public Conduit.StepSource<Out> source() {
+            return (Conduit.StepSource<Out>) stages.last();
         }
         
         @Override

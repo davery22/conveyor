@@ -5,8 +5,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collector;
 
-public class Tunnel {
-    private Tunnel() {}
+public class Conduit {
+    private Conduit() {}
     
     public interface Source<T> extends AutoCloseable {
         void drainToSink(StepSink<? super T> sink) throws Exception;

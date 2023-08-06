@@ -11,14 +11,14 @@ public class Pipeline {
     }
     
     public sealed interface Source<Out> extends System permits StepSource, Pipelines.ChainedSource {
-        Tunnel.Source<Out> source();
+        Conduit.Source<Out> source();
         
         <T> StepSource<T> andThen(Stage<? super Out, T> after);
         System andThen(StepSink<? super Out> after);
     }
     
     public sealed interface Sink<In> extends System permits StepSink, Pipelines.ChainedSink {
-        Tunnel.Sink<In> sink();
+        Conduit.Sink<In> sink();
         
         <T> StepSink<T> compose(Stage<T, ? extends In> before);
         System compose(StepSource<? extends In> before);
@@ -26,14 +26,14 @@ public class Pipeline {
     
     public sealed interface StepSource<Out> extends Source<Out> permits Stage, Pipelines.ChainedStepSource {
         @Override
-        Tunnel.StepSource<Out> source();
+        Conduit.StepSource<Out> source();
         
         System andThen(Sink<? super Out> after);
     }
     
     public sealed interface StepSink<In> extends Sink<In> permits Stage, Pipelines.ChainedStepSink {
         @Override
-        Tunnel.StepSink<In> sink();
+        Conduit.StepSink<In> sink();
         
         System compose(Source<? extends In> before);
     }
