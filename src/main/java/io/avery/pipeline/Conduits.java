@@ -153,6 +153,76 @@ public class Conduits {
         return new FusedStepStage<>(g, stage);
     }
     
+    public static <In, T, A> Conduit.Sink<In> fuse(Gatherer<In, A, ? extends T> gatherer,
+                                                   int bufferLimit,
+                                                   Conduit.Sink<T> sink) {
+        // We take advantage of the fact that Sink.drainFromSource(StepSource)
+        // encloses the Sink's usage of the StepSource. We define a delegating
+        // StepSource that can launch asynchronous tasks - bounded by the
+        // enclosing scope - to transform input polled from the original StepSource.
+        
+        // Create a gatherer that flushes a special value between inputs,
+        // to indicate when all outputs for an input have been flushed.
+        var newRound = new Object();
+        
+        class DelimitedGatherer implements Gatherer<In, A, Object> {
+            @Override public Supplier<A> supplier() { return gatherer.supplier(); }
+            @Override public Integrator<A, In, Object> integrator() {
+                var integrator = gatherer.integrator();
+                return (s, e, d) -> integrator.integrate(s, e, d) && d.flush(newRound);
+            }
+            @Override public BinaryOperator<A> combiner() { return gatherer.combiner(); }
+            @Override public BiConsumer<A, Sink<? super Object>> finisher() { return gatherer.finisher()::accept; }
+            @Override public Set<Characteristics> characteristics() { return gatherer.characteristics(); }
+        }
+        var stage = stepFuse(
+            new DelimitedGatherer(),
+            Conduits.extrapolate(newRound, e -> Collections.emptyIterator(), bufferLimit)
+        );
+        
+        class FusedSink implements Conduit.Sink<In> {
+            @Override
+            public void drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var stepSource = new Conduit.StepSource<T>() {
+                        @Override
+                        public T poll() throws Exception {
+                            for (;;) {
+                                Object out = stage.poll();
+                                if (out != newRound) {
+                                    return (T) out;
+                                }
+                                In in = source.poll();
+                                scope.fork(() -> {
+                                    if (in == null || !stage.offer(in)) {
+                                        stage.complete(null);
+                                    }
+                                    return null;
+                                });
+                            }
+                        }
+                    };
+                    
+                    scope.fork(() -> {
+                        // Done in a fork so that an error from other forks will interrupt this
+                        sink.drainFromSource(stepSource);
+                        scope.shutdown();
+                        return null;
+                    });
+                    
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                sink.complete(error);
+            }
+        }
+        
+        return new FusedSink();
+    }
+    
     // concat() could work by creating a Conduit.Source that switches between 2 Conduit.Sources,
     // or by creating a Pipeline.Source that consumes one Conduit.Source and then another.
     // The latter case reduces to the former case, since Pipeline.Source needs to expose a Conduit.StepSource
@@ -230,7 +300,100 @@ public class Conduits {
     //  - (and stages progress at similar rates / spend less than 1-1/COUNT of their time blocked on each other)
     //  - Run each stage of the pipeline on the whole source, in its own thread
     
+    // balance() needs a step-source that can handle concurrent polls from multiple threads
+    // merge() needs a step-sink that can handle concurrent offers from multiple threads
+    //  - this is about ensuring correct behavior
+    // non-step sources/sinks only need a CAS up-front (and internal thread-safety as needed)
+    //  - this is about catching incorrect usage
+    // (step-)sources do not need any extra protection if only one thread is calling them
+    // (step-)sinks do not need any extra protection if only one thread is calling them
+    // stages need protection just to prevent conflict between their own sink/source
+    
+    // synchronizeSink
+    // synchronizeSource
+    // synchronizeStage
+    // catchError
+    // fastFailSink - fail if Sink is accessed by multiple threads
+    // fastFailSource - fail if Source is accessed by multiple threads
+    
+    // What of sources returning elements outside the synchronized block?
+    //  - In the case of one thread consuming, this is fine
+    //  - In the case of multiple threads consuming, they need to determine what synchronization works for them
+    //    - eg, are they trying to protect the entire downstream? Just part of it?
+    //    - at some point, consumer needs to await preceding consumer, eg before an offer downstream
+    //    - at some point, consumer needs to signal next consumer, eg after an offer downstream
+    //    - consumer controls when the offer downstream happens
+    // Sink works by polling a StepSource - element sequence is the order that poll is called (need sync'd poll)
+    // StepSink works by a Source offering to it - element sequence is the order that offer is called (need sync'd offer)
+    //
+    
+    // TODO: Note limitations of relying on ScopedValues, if user code invokes callbacks in an unmanaged thread
+    
     // --- Sinks ---
+    
+    public static <T, U> Conduit.Sink<T> balanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
+                                                        List<? extends Conduit.Sink<U>> sinks) {
+        class LatchHolder {
+            CountDownLatch latch = new CountDownLatch(1);
+        }
+        
+        class BalanceOrdered implements Conduit.Sink<T> {
+            final ScopedValue<LatchHolder> scopedLatch = ScopedValue.newInstance();
+            final ReentrantLock lock = new ReentrantLock();
+            CountDownLatch currLatch = new CountDownLatch(0);
+            
+            @Override
+            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+                var stepSource = new Conduit.StepSource<U>() {
+                    @Override
+                    public U poll() throws Exception {
+                        LatchHolder holder = scopedLatch.get();
+                        holder.latch.countDown();
+                        for (;;) {
+                            T in;
+                            Callable<U> callable;
+                            CountDownLatch curr, next = holder.latch = new CountDownLatch(1);
+                            lock.lockInterruptibly();
+                            try {
+                                curr = currLatch;
+                                currLatch = next;
+                                if ((in = source.poll()) == null) {
+                                    return null;
+                                }
+                                callable = mapper.apply(in);
+                            } finally {
+                                lock.unlock();
+                            }
+                            U out = callable.call();
+                            if (out != null) {
+                                curr.await();
+                                return out;
+                            }
+                            next.countDown();
+                        }
+                    }
+                };
+                
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, new LatchHolder(), () -> {
+                            sink.drainFromSource(stepSource);
+                            scopedLatch.get().latch.countDown();
+                            return null;
+                        }));
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws InterruptedException, ExecutionException {
+                parallelComplete(sinks, error);
+            }
+        }
+        
+        return new BalanceOrdered();
+    }
     
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
         class Balance implements Conduit.Sink<T> {
@@ -284,6 +447,7 @@ public class Conduits {
     
     public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
         class Broadcast implements Conduit.Sink<T> {
+            final ScopedValue<Integer> scopedPos = ScopedValue.newInstance();
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             final BitSet bitSet = new BitSet(sinks.size());
@@ -291,15 +455,13 @@ public class Conduits {
             boolean done = false;
             T current = null;
             
-            static final ScopedValue<Integer> POS = ScopedValue.newInstance();
-            
             @Override
             public void drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                // Every sink has to call drainFromSource(source), probably in its own thread
+                // Every sink has to call drainFromSource(source) in its own thread
                 // The poll() on that source needs to respond differently based on which sink is calling
-                //  - If the sink has already consumed the current element, wait for other consumers
-                //  - Once all sinks have consumed the current element, poll() for the next element, then wake consumers
-                
+                //  - If the sink has already consumed this round's element, wait for next round
+                //  - First sink in each round polls for the next element
+                //  - Last sink in each round wakes the others for the next round
                 var stepSource = new Conduit.StepSource<T>() {
                     @Override
                     public T poll() throws Exception {
@@ -308,7 +470,7 @@ public class Conduits {
                             if (done) {
                                 return null;
                             }
-                            int myPos = POS.get();
+                            int myPos = scopedPos.get();
                             if (bitSet.get(myPos)) {
                                 // Already seen - Wait for next round
                                 do {
@@ -340,7 +502,7 @@ public class Conduits {
                     for (int i = 0; i < sinks.size(); i++) {
                         var ii = i;
                         var sink = sinks.get(i);
-                        scope.fork(() -> ScopedValue.callWhere(POS, ii, () -> {
+                        scope.fork(() -> ScopedValue.callWhere(scopedPos, ii, () -> {
                             try {
                                 sink.drainFromSource(stepSource);
                             } finally {
@@ -1131,7 +1293,8 @@ public class Conduits {
         return new TimedStage<>(core);
     }
 
-    public static <T> Conduit.Stage<T, T> extrapolate(Function<? super T, ? extends Iterator<? extends T>> mapper,
+    public static <T> Conduit.Stage<T, T> extrapolate(T initial,
+                                                      Function<? super T, ? extends Iterator<? extends T>> mapper,
                                                       int bufferLimit) {
         Objects.requireNonNull(mapper);
         if (bufferLimit < 1) {
@@ -1147,6 +1310,10 @@ public class Conduits {
             @Override
             public Instant onInit() {
                 queue = new ArrayDeque<>(bufferLimit);
+                if (initial != null) {
+                    queue.offer(initial);
+                    return Instant.MIN;
+                }
                 return Instant.MAX;
             }
             

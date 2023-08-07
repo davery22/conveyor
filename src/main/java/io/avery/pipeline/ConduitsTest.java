@@ -93,7 +93,12 @@ class ConduitsTest {
                         100
                     )
                 ).pipeline())
-                .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
+//                .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
+                .andThen(Conduits.fuse(
+                    ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
+                    16,
+                    source -> source.forEach(System.out::println)
+                ).pipeline())
                 .run(scope::fork);
             
             scope.join().throwIfFailed();
@@ -101,7 +106,7 @@ class ConduitsTest {
     }
     
     private static <T> Conduit.Stage<T, T> buffer(int bufferLimit) {
-        return Conduits.extrapolate(e -> Collections.emptyIterator(), bufferLimit);
+        return Conduits.extrapolate(null, e -> Collections.emptyIterator(), bufferLimit);
     }
     
     private static <T, R> Gatherer<T, ?, R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {
