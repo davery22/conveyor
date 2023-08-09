@@ -10,6 +10,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
+import java.util.stream.IntStream;
 
 public class Conduits {
     private Conduits() {} // Utility
@@ -153,6 +154,85 @@ public class Conduits {
         return new FusedStepStage<>(g, stage);
     }
     
+    // TODO: Probably remove this
+    public static <T, A, Out> Conduit.StepSource<Out> stepFuse(Conduit.StepSource<T> source,
+                                                               Gatherer<? super T, A, Out> gatherer,
+                                                               int bufferLimit) {
+        var supplier = gatherer.supplier();
+        var integrator = gatherer.integrator();
+        var finisher = gatherer.finisher();
+        
+        class FusedStepSource implements Conduit.StepSource<Out> {
+            final Deque<Out> buffer = new ArrayDeque<>();
+            final Gatherer.Sink<? super Out> gsink = out -> {
+                if (buffer.size() >= bufferLimit) {
+                    throw new IllegalStateException();
+                }
+                return buffer.offer(out);
+            };
+            A acc = null;
+            int state = NEW;
+            
+            static final int NEW       = 0;
+            static final int RUNNING   = 1;
+            static final int CANCELLED = 2;
+            static final int CLOSED    = 3;
+            
+            @Override
+            public Out poll() throws Exception {
+                for (;;) {
+                    if (state == CLOSED) {
+                        return null;
+                    }
+                    Out out = buffer.poll();
+                    if (out != null || state == CANCELLED) {
+                        return out;
+                    }
+                    if (state == NEW) {
+                        acc = supplier.get();
+                        state = RUNNING;
+                    }
+                    T t = source.poll();
+                    if (t == null) {
+                        state = CANCELLED;
+                        finisher.accept(acc, gsink);
+                    } else if (!integrator.integrate(acc, t, gsink)) {
+                        state = CANCELLED;
+                    }
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                if (state == CLOSED) {
+                    return;
+                }
+                source.close();
+                state = CLOSED;
+            }
+        }
+        
+        return new FusedStepSource();
+    }
+    
+    // TODO: This works, but is it better than putting stepFuse(gatherer, stage) before the sink?
+    //
+    // 1. A=loop{process+offer} | B=loop{poll+process}
+    // 2. B=loop{(poll+fork(a))?+poll+process} | a=loop*{process+offer}
+    //
+    // 2 is likely less efficient due to forking overhead. Does it buy anything?
+    //  - Can fuse directly to a Sink, instead of fusing to a Stage before the Sink
+    //    - Possible because the asynchrony is implicit in the Sink itself, rather than explicit between Stage and Sink
+    //  - Propagation of completion/error?
+    //    - In 1, an error from the fused Stage is propagated down by Sink.complete(error); Sink will propagate or throw wrapped in UpstreamException
+    //    - In 2, an error from the fused Stage is propagated out by Sink.drainFromSource(..); Sink will propagate or throw unwrapped
+    //
+    // Theoretically we could put any Pipeline in 2 if we had a reliable way to insert delimiters at the output side, to
+    // know when to poll source again. But since conduits have async boundaries, there is no boundary-state-agnostic way
+    // to signal that all offers are fully plumbed through (or conversely, that further polls will block indefinitely -
+    // which they may even if offers are not fully plumbed through, eg due to min size for flush...). So this signal is
+    // really only possible when the pipeline is fully synchronous - ie a Gatherer.
+    
     public static <In, T, A> Conduit.Sink<In> fuse(Gatherer<In, A, ? extends T> gatherer,
                                                    int bufferLimit,
                                                    Conduit.Sink<T> sink) {
@@ -163,13 +243,13 @@ public class Conduits {
         
         // Create a gatherer that flushes a special value between inputs,
         // to indicate when all outputs for an input have been flushed.
-        var newRound = new Object();
+        var delimiter = new Object();
         
         class DelimitedGatherer implements Gatherer<In, A, Object> {
             @Override public Supplier<A> supplier() { return gatherer.supplier(); }
             @Override public Integrator<A, In, Object> integrator() {
                 var integrator = gatherer.integrator();
-                return (s, e, d) -> integrator.integrate(s, e, d) && d.flush(newRound);
+                return (s, e, d) -> integrator.integrate(s, e, d) && d.flush(delimiter);
             }
             @Override public BinaryOperator<A> combiner() { return gatherer.combiner(); }
             @Override public BiConsumer<A, Sink<? super Object>> finisher() { return gatherer.finisher()::accept; }
@@ -177,7 +257,7 @@ public class Conduits {
         }
         var stage = stepFuse(
             new DelimitedGatherer(),
-            Conduits.extrapolate(newRound, e -> Collections.emptyIterator(), bufferLimit)
+            Conduits.extrapolate(delimiter, e -> Collections.emptyIterator(), bufferLimit)
         );
         
         class FusedSink implements Conduit.Sink<In> {
@@ -189,7 +269,7 @@ public class Conduits {
                         public T poll() throws Exception {
                             for (;;) {
                                 Object out = stage.poll();
-                                if (out != newRound) {
+                                if (out != delimiter) {
                                     return (T) out;
                                 }
                                 In in = source.poll();
@@ -309,12 +389,12 @@ public class Conduits {
     // (step-)sinks do not need any extra protection if only one thread is calling them
     // stages need protection just to prevent conflict between their own sink/source
     
-    // synchronizeSink
-    // synchronizeSource
-    // synchronizeStage
-    // catchError
-    // fastFailSink - fail if Sink is accessed by multiple threads
     // fastFailSource - fail if Source is accessed by multiple threads
+    // fastFailSink - fail if Sink is accessed by multiple threads
+    // synchronizeStepSource
+    // synchronizeStepSink
+    // synchronizeStage
+    // catchError - log / recover / re-throw
     
     // What of sources returning elements outside the synchronized block?
     //  - In the case of one thread consuming, this is fine
@@ -329,15 +409,138 @@ public class Conduits {
     
     // TODO: Note limitations of relying on ScopedValues, if user code invokes callbacks in an unmanaged thread
     
+    // balance() is not quite mapAsyncUnordered()
+    //  - The latter has one downstream, but this can be resolved outside of balance() by having all sinks offer to the
+    //    same sink.
+    //  - The latter has a function that is called on elements in-order before balancing. This can be resolved by fusing
+    //    before the balance(), but since balance is a Sink (not StepSink), fusing would require introducing a
+    //    Stage/boundary. Instead, we can wrap the StepSource to synchronize polls, and apply the function in the same
+    //    synchronized block to get application ordering.
+    
     // --- Sinks ---
     
-    public static <T, U> Conduit.Sink<T> balanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
-                                                        List<? extends Conduit.Sink<U>> sinks) {
+    // TODO: Remove
+    public static <T, P, U> Conduit.Sink<T> mapAsyncPartitioned(int parallelism,
+                                                                int perPartition,
+                                                                Function<? super T, P> partitioner,
+                                                                BiFunction<? super T, ? super P, ? extends Callable<U>> mapper,
+                                                                Conduit.StepSink<U> sink) {
+        return mapBalancePartitioned(partitioner, mapper, IntStream.range(0, parallelism).mapToObj(i -> sink).toList(), perPartition);
+    }
+    
+    // TODO: Remove
+    public static <T, U> Conduit.Sink<T> mapAsyncOrdered(int parallelism,
+                                                         Function<? super T, ? extends Callable<U>> mapper,
+                                                         Conduit.StepSink<U> sink) {
+        return mapBalanceOrdered(mapper, IntStream.range(0, parallelism).mapToObj(i -> sink).toList());
+    }
+    
+    public static <T, P, U> Conduit.Sink<T> mapBalancePartitioned(Function<? super T, P> partitioner,
+                                                                  BiFunction<? super T, ? super P, ? extends Callable<U>> mapper,
+                                                                  List<? extends Conduit.Sink<U>> sinks,
+                                                                  int permitsPerPartition) {
+        if (permitsPerPartition < 1) {
+            throw new IllegalArgumentException();
+        }
+        
         class LatchHolder {
             CountDownLatch latch = new CountDownLatch(1);
         }
         
-        class BalanceOrdered implements Conduit.Sink<T> {
+        class MapBalancedPartitioned implements Conduit.Sink<T> {
+            final ScopedValue<LatchHolder> scopedLatch = ScopedValue.newInstance();
+            final ReentrantLock lock = new ReentrantLock();
+            final ConcurrentHashMap<P, CountDownLatch> latchByKey = new ConcurrentHashMap<>();
+            final ConcurrentHashMap<P, Semaphore> lockByKey = new ConcurrentHashMap<>();
+            CountDownLatch currLatch = new CountDownLatch(0);
+            
+            @Override
+            public void drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                var stepSource = new Conduit.StepSource<U>() {
+                    @Override
+                    public U poll() throws Exception {
+                        var holder = scopedLatch.get();
+                        holder.latch.countDown();
+                        for (;;) {
+                            T in;
+                            U out;
+                            P key;
+                            Callable<U> callable;
+                            Semaphore pLock;
+                            CountDownLatch gCurr, gNext = holder.latch = new CountDownLatch(1),
+                                           pCurr, pNext = new CountDownLatch(1);
+                            // At most one thread (globally) can run partitioner at a time - sequenced globally
+                            lock.lockInterruptibly();
+                            try {
+                                gCurr = currLatch;
+                                currLatch = gNext;
+                                in = source.poll();
+                                if (in == null) {
+                                    return null;
+                                }
+                                key = partitioner.apply(in);
+                                pLock = lockByKey.computeIfAbsent(key, k -> new Semaphore(permitsPerPartition));
+                                if ((pCurr = latchByKey.put(key, pNext)) == null) {
+                                    pCurr = new CountDownLatch(0);
+                                }
+                            } finally {
+                                lock.unlock();
+                            }
+                            // At most one thread (per partition) can run mapper at a time - sequenced per partition
+                            pCurr.await();
+                            try {
+                                pLock.acquire();
+                                callable = mapper.apply(in, key);
+                            } finally {
+                                pNext.countDown();
+                                latchByKey.remove(key, pNext); // Free pNext if no one has grabbed it yet
+                            }
+                            // At most N callables (per partition) can be pending at a time - bounded by partition
+                            try {
+                                out = callable.call();
+                            } finally {
+                                pLock.release();
+                                // TODO: Free lock if no one is using
+                                //  No one else is using if
+                            }
+                            if (out != null) {
+                                gCurr.await();
+                                return out;
+                            }
+                            gNext.countDown();
+                        }
+                    }
+                };
+                
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        var holder = new LatchHolder();
+                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
+                            sink.drainFromSource(stepSource);
+                            holder.latch.countDown();
+                            return null;
+                        }));
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws InterruptedException, ExecutionException {
+                parallelComplete(sinks, error);
+            }
+        }
+        
+        return new MapBalancedPartitioned();
+    }
+    
+    public static <T, U> Conduit.Sink<T> mapBalanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
+                                                           List<? extends Conduit.Sink<U>> sinks) {
+        class LatchHolder {
+            CountDownLatch latch = new CountDownLatch(1);
+        }
+        
+        class MapBalanceOrdered implements Conduit.Sink<T> {
             final ScopedValue<LatchHolder> scopedLatch = ScopedValue.newInstance();
             final ReentrantLock lock = new ReentrantLock();
             CountDownLatch currLatch = new CountDownLatch(0);
@@ -347,17 +550,17 @@ public class Conduits {
                 var stepSource = new Conduit.StepSource<U>() {
                     @Override
                     public U poll() throws Exception {
-                        LatchHolder holder = scopedLatch.get();
+                        var holder = scopedLatch.get();
                         holder.latch.countDown();
                         for (;;) {
-                            T in;
                             Callable<U> callable;
                             CountDownLatch curr, next = holder.latch = new CountDownLatch(1);
                             lock.lockInterruptibly();
                             try {
                                 curr = currLatch;
                                 currLatch = next;
-                                if ((in = source.poll()) == null) {
+                                T in = source.poll();
+                                if (in == null) {
                                     return null;
                                 }
                                 callable = mapper.apply(in);
@@ -376,9 +579,10 @@ public class Conduits {
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     for (var sink : sinks) {
-                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, new LatchHolder(), () -> {
+                        var holder = new LatchHolder();
+                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
                             sink.drainFromSource(stepSource);
-                            scopedLatch.get().latch.countDown();
+                            holder.latch.countDown();
                             return null;
                         }));
                     }
@@ -392,7 +596,59 @@ public class Conduits {
             }
         }
         
-        return new BalanceOrdered();
+        return new MapBalanceOrdered();
+    }
+    
+    // This could be separated into a 'map(stepSource, toCallable)' | balance(sinks.map(sink -> fuse(callCallable, sink))
+    
+    public static <T, U> Conduit.Sink<T> mapBalance(Function<? super T, ? extends Callable<U>> mapper,
+                                                    List<? extends Conduit.Sink<U>> sinks) {
+        class MapBalance implements Conduit.Sink<T> {
+            final ReentrantLock lock = new ReentrantLock();
+            
+            @Override
+            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+                var stepSource = new Conduit.StepSource<U>() {
+                    @Override
+                    public U poll() throws Exception {
+                        for (;;) {
+                            T in;
+                            Callable<U> callable;
+                            lock.lockInterruptibly();
+                            try {
+                                if ((in = source.poll()) == null) {
+                                    return null;
+                                }
+                                callable = mapper.apply(in);
+                            } finally {
+                                lock.unlock();
+                            }
+                            U out = callable.call();
+                            if (out != null) {
+                                return out;
+                            }
+                        }
+                    }
+                };
+                
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    for (var sink : sinks) {
+                        scope.fork(() -> {
+                            sink.drainFromSource(stepSource);
+                            return null;
+                        });
+                    }
+                    scope.join().throwIfFailed();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws InterruptedException, ExecutionException {
+                parallelComplete(sinks, error);
+            }
+        }
+        
+        return new MapBalance();
     }
     
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
