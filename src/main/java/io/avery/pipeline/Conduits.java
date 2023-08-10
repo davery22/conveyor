@@ -262,7 +262,7 @@ public class Conduits {
         
         class FusedSink implements Conduit.Sink<In> {
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var stepSource = new Conduit.StepSource<T>() {
                         @Override
@@ -283,14 +283,15 @@ public class Conduits {
                         }
                     };
                     
-                    scope.fork(() -> {
+                    var task = scope.fork(() -> {
                         // Done in a fork so that an error from other forks will interrupt this
-                        sink.drainFromSource(stepSource);
+                        boolean drained = sink.drainFromSource(stepSource);
                         scope.shutdown();
-                        return null;
+                        return drained;
                     });
                     
                     scope.join().throwIfFailed();
+                    return task.get();
                 }
             }
             
@@ -468,7 +469,7 @@ public class Conduits {
             CountDownLatch currLatch = new CountDownLatch(0);
             
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 var stepSource = new Conduit.StepSource<U>() {
                     @Override
                     public U poll() throws Exception {
@@ -558,15 +559,18 @@ public class Conduits {
                 };
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var sink : sinks) {
-                        var holder = new LatchHolder();
-                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
-                            sink.drainFromSource(stepSource);
-                            holder.latch.countDown();
-                            return null;
-                        }));
-                    }
+                    var tasks = sinks.stream()
+                        .map(sink -> {
+                            var holder = new LatchHolder();
+                            return scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
+                                boolean drained = sink.drainFromSource(stepSource);
+                                holder.latch.countDown();
+                                return drained;
+                            }));
+                        })
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -591,7 +595,7 @@ public class Conduits {
             CountDownLatch currLatch = new CountDownLatch(0);
             
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 var stepSource = new Conduit.StepSource<U>() {
                     @Override
                     public U poll() throws Exception {
@@ -628,15 +632,18 @@ public class Conduits {
                 };
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var sink : sinks) {
-                        var holder = new LatchHolder();
-                        scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
-                            sink.drainFromSource(stepSource);
-                            holder.latch.countDown();
-                            return null;
-                        }));
-                    }
+                    var tasks = sinks.stream()
+                        .map(sink -> {
+                            var holder = new LatchHolder();
+                            return scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
+                                boolean drained = sink.drainFromSource(stepSource);
+                                holder.latch.countDown();
+                                return drained;
+                            }));
+                        })
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -657,7 +664,7 @@ public class Conduits {
             final ReentrantLock lock = new ReentrantLock();
             
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 var stepSource = new Conduit.StepSource<U>() {
                     @Override
                     public U poll() throws Exception {
@@ -682,13 +689,11 @@ public class Conduits {
                 };
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var sink : sinks) {
-                        scope.fork(() -> {
-                            sink.drainFromSource(stepSource);
-                            return null;
-                        });
-                    }
+                    var tasks = sinks.stream()
+                        .map(sink -> scope.fork(() -> sink.drainFromSource(stepSource)))
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -704,15 +709,13 @@ public class Conduits {
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
         class Balance implements Conduit.Sink<T> {
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var sink : sinks) {
-                        scope.fork(() -> {
-                            sink.drainFromSource(source);
-                            return null;
-                        });
-                    }
+                    var tasks = sinks.stream()
+                        .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -762,7 +765,7 @@ public class Conduits {
             T current = null;
             
             @Override
-            public void drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 // Every sink has to call drainFromSource(source) in its own thread
                 // The poll() on that source needs to respond differently based on which sink is calling
                 //  - If the sink has already consumed this round's element, wait for next round
@@ -805,28 +808,29 @@ public class Conduits {
                 };
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (int i = 0; i < sinks.size(); i++) {
-                        var ii = i;
-                        var sink = sinks.get(i);
-                        scope.fork(() -> ScopedValue.callWhere(scopedPos, ii, () -> {
-                            try {
-                                sink.drainFromSource(stepSource);
-                            } finally {
-                                lock.lock();
+                    var tasks = IntStream.range(0, sinks.size())
+                        .mapToObj(i -> {
+                            var sink = sinks.get(i);
+                            return scope.fork(() -> ScopedValue.callWhere(scopedPos, i, () -> {
                                 try {
-                                    bitSet.clear(ii);
-                                    if (bitSet.cardinality() == --count) {
-                                        bitSet.clear();
-                                        ready.signalAll();
-                                    }
+                                    return sink.drainFromSource(stepSource);
                                 } finally {
-                                    lock.unlock();
+                                    lock.lock();
+                                    try {
+                                        bitSet.clear(i);
+                                        if (bitSet.cardinality() == --count) {
+                                            bitSet.clear();
+                                            ready.signalAll();
+                                        }
+                                    } finally {
+                                        lock.unlock();
+                                    }
                                 }
-                            }
-                            return null;
-                        }));
-                    }
+                            }));
+                        })
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -899,10 +903,13 @@ public class Conduits {
     public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
         class Concat implements Conduit.Source<T> {
             @Override
-            public void drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 for (var source : sources) {
-                    source.drainToSink(sink);
+                    if (!source.drainToSink(sink)) {
+                        return false;
+                    }
                 }
+                return true;
             }
             
             @Override
@@ -917,15 +924,13 @@ public class Conduits {
     public static <T> Conduit.Source<T> merge(List<? extends Conduit.Source<T>> sources) {
         class Merge implements Conduit.Source<T> {
             @Override
-            public void drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var source : sources) {
-                        scope.fork(() -> {
-                            source.drainToSink(sink);
-                            return null;
-                        });
-                    }
+                    var tasks = sources.stream()
+                        .map(source -> scope.fork(() -> source.drainToSink(sink)))
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -1081,10 +1086,10 @@ public class Conduits {
                 }
             }
             
-            <X, Y> Void runSource(Conduit.Source<X> source,
+            <X, Y> boolean runSource(Conduit.Source<X> source,
                                   Accessor<X, Y> access,
                                   Conduit.StepSink<? super T> sink) throws Exception {
-                source.drainToSink(e -> {
+                return source.drainToSink(e -> {
                     lock.lockInterruptibly();
                     try {
                         if (state >= COMPLETING) {
@@ -1113,11 +1118,10 @@ public class Conduits {
                         lock.unlock();
                     }
                 });
-                return null;
             }
 
             @Override
-            public void drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -1134,9 +1138,10 @@ public class Conduits {
                         public T2 latest1() { return latest2; }
                         public T1 latest2() { return latest1; }
                     };
-                    scope.fork(() -> runSource(source1, accessor1, sink));
-                    scope.fork(() -> runSource(source2, accessor2, sink));
+                    var task1 = scope.fork(() -> runSource(source1, accessor1, sink));
+                    var task2 = scope.fork(() -> runSource(source2, accessor2, sink));
                     scope.join().throwIfFailed();
+                    return task1.get() && task2.get();
                 }
             }
             
@@ -1187,10 +1192,10 @@ public class Conduits {
                 }
             }
             
-            <X, Y> Void runSource(Conduit.Source<X> source,
+            <X, Y> boolean runSource(Conduit.Source<X> source,
                                   Accessor<X, Y> access,
                                   Conduit.StepSink<? super T> sink) throws Exception {
-                source.drainToSink(new Conduit.StepSink<>() {
+                return source.drainToSink(new Conduit.StepSink<>() {
                     boolean first = true;
                     
                     @Override
@@ -1233,11 +1238,10 @@ public class Conduits {
                         }
                     }
                 });
-                return null;
             }
             
             @Override
-            public void drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -1254,9 +1258,10 @@ public class Conduits {
                         public T2 latest1() { return latest2; }
                         public T1 latest2() { return latest1; }
                     };
-                    scope.fork(() -> runSource(source1, accessor1, sink));
-                    scope.fork(() -> runSource(source2, accessor2, sink));
+                    var task1 = scope.fork(() -> runSource(source1, accessor1, sink));
+                    var task2 = scope.fork(() -> runSource(source2, accessor2, sink));
                     scope.join().throwIfFailed();
+                    return task1.get() && task2.get();
                 }
             }
             

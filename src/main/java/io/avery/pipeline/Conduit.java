@@ -8,8 +8,9 @@ import java.util.stream.Collector;
 public class Conduit {
     private Conduit() {}
     
+    @FunctionalInterface
     public interface Source<T> extends AutoCloseable {
-        void drainToSink(StepSink<? super T> sink) throws Exception;
+        boolean drainToSink(StepSink<? super T> sink) throws Exception;
         
         default void close() throws Exception {}
         
@@ -47,8 +48,9 @@ public class Conduit {
         }
     }
     
+    @FunctionalInterface
     public interface Sink<T> {
-        void drainFromSource(StepSource<? extends T> source) throws Exception;
+        boolean drainFromSource(StepSource<? extends T> source) throws Exception;
         
         default void complete(Throwable error) throws Exception {
             // Default impl handles the case where the Sink has no async downstream.
@@ -66,12 +68,18 @@ public class Conduit {
         }
     }
     
+    @FunctionalInterface
     public interface StepSource<T> extends Source<T> {
         T poll() throws Exception;
         
         @Override
-        default void drainToSink(StepSink<? super T> sink) throws Exception {
-            for (T e; (e = poll()) != null && sink.offer(e); ) { }
+        default boolean drainToSink(StepSink<? super T> sink) throws Exception {
+            for (T e; (e = poll()) != null; ) {
+                if (!sink.offer(e)) {
+                    return false;
+                }
+            }
+            return true;
         }
         
         @Override
@@ -80,12 +88,18 @@ public class Conduit {
         }
     }
     
+    @FunctionalInterface
     public interface StepSink<T> extends Sink<T> {
         boolean offer(T input) throws Exception;
         
         @Override
-        default void drainFromSource(StepSource<? extends T> source) throws Exception {
-            for (T e; (e = source.poll()) != null && offer(e); ) { }
+        default boolean drainFromSource(StepSource<? extends T> source) throws Exception {
+            for (T e; (e = source.poll()) != null; ) {
+                if (!offer(e)) {
+                    return false;
+                }
+            }
+            return true;
         }
         
         @Override

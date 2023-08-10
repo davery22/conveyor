@@ -25,13 +25,18 @@ class ConduitsTest {
             Pipelines
                 .<String>source(sink -> {
                     try (var in = new Scanner(System.in)) {
-                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && sink.offer(line); ) { }
+                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
+                            if (!sink.offer(line)) {
+                                return false;
+                            }
+                        }
+                        return true;
                     }
                 })
                 .andThen(ConduitsTest.<String>buffer(4).pipeline())
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3,
-                    (String s) -> s.charAt(0),
+                    (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s,
                     buffer
                 ).pipeline())
@@ -45,7 +50,7 @@ class ConduitsTest {
             
             Pipelines
                 .stepSource(buffer)
-                .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
+                .andThen(Pipelines.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(scope::fork);
             
             scope.join().throwIfFailed();
@@ -86,7 +91,12 @@ class ConduitsTest {
             Pipelines
                 .<String>source(sink -> {
                     try (var in = new Scanner(System.in)) {
-                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && sink.offer(line); ) { }
+                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
+                            if (!sink.offer(line)) {
+                                return false;
+                            }
+                        }
+                        return true;
                     }
                 })
                 .andThen(Conduits.stepFuse(
@@ -102,7 +112,7 @@ class ConduitsTest {
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
                     16,
-                    source -> source.forEach(System.out::println)
+                    source -> { source.forEach(System.out::println); return true; }
                 ).pipeline())
                 .run(scope::fork);
             
