@@ -15,7 +15,7 @@ import java.util.stream.Stream;
 class ConduitsTest {
     // TODO: Remove
     public static void main(String[] args) throws Exception {
-        test1();
+        test2();
     }
     
     public static void test2() throws Exception {
@@ -29,13 +29,18 @@ class ConduitsTest {
                     }
                 })
                 .andThen(ConduitsTest.<String>buffer(4).pipeline())
-                .andThen(Conduits.balance(
-                    // TODO: What if I want ordering?
-                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
-                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
-                        buffer
-                    )).toList()
+                .andThen(Conduits.mapAsyncPartitioned(
+                    10, 3,
+                    (String s) -> s.charAt(0),
+                    (s, c) -> () -> c + ":" + s,
+                    buffer
                 ).pipeline())
+//                .andThen(Conduits.balance(
+//                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
+//                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
+//                        buffer
+//                    )).toList()
+//                ).pipeline())
                 .run(scope::fork);
             
             Pipelines
