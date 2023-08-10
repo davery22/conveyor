@@ -443,10 +443,9 @@ public class Conduits {
                                                                   List<? extends Conduit.Sink<U>> sinks,
                                                                   int permitsPerPartition) {
         if (permitsPerPartition >= sinks.size()) {
-            // TODO: This does not allow the mapper to run concurrently for separate partitions
-            //  Is that even intended behavior?
             return mapBalanceOrdered(t -> mapper.apply(t, classifier.apply(t)), sinks);
         }
+        
         if (permitsPerPartition < 1) {
             throw new IllegalArgumentException();
         }
@@ -484,6 +483,7 @@ public class Conduits {
                                              gNext = holder.latch = new CountDownLatch(1),
                                              pNext = new CountDownLatch(1);
                             CountDownLatch[] pCurr = { null };
+                            
                             // At most one thread (globally) can run classifier at a time - sequenced globally
                             lock.lockInterruptibly();
                             try {
@@ -506,21 +506,34 @@ public class Conduits {
                             } finally {
                                 lock.unlock();
                             }
-                            // At most one thread (per partition) can run mapper at a time - sequenced per partition, in poll-order
+                            
+                            // Avoid applying the mapper before the partition input that arrived before us
+                            // This wait needs to happen before acquiring the semaphore, otherwise we could deadlock
                             pCurr[0].await();
                             try {
+                                // Avoid creating more than N pending callables for this partition
                                 pMutex.semaphore.acquire();
-                                callable = mapper.apply(in, key);
+                                try {
+                                    // Avoid applying the mapper concurrently with other threads
+                                    lock.lockInterruptibly();
+                                    try {
+                                        // Countdown early to allow next partition input to contend for semaphore
+                                        // Otherwise the semaphore would be useless, and we would be enforcing no
+                                        // more than 1 pending callable per partition, rather than N
+                                        pNext.countDown();
+                                        callable = mapper.apply(in, key);
+                                    } finally {
+                                        lock.unlock();
+                                    }
+                                    out = callable.call();
+                                } finally {
+                                    pMutex.semaphore.release();
+                                }
                             } finally {
                                 pNext.countDown();
-                            }
-                            // At most N callables (per partition) can be pending at a time - bounded per partition
-                            try {
-                                out = callable.call();
-                            } finally {
-                                pMutex.semaphore.release();
                                 mutexByKey.compute(key, (k, v) -> --v.refCount == 0 ? null : v);
                             }
+                            
                             // At most one thread (globally) can offer downstream at a time - sequenced globally, in poll-order
                             if (out != null) {
                                 gCurr.await();
