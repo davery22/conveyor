@@ -417,6 +417,10 @@ public class Conduits {
     //    Stage/boundary. Instead, we can wrap the StepSource to synchronize polls, and apply the function in the same
     //    synchronized block to get application ordering.
     
+    // TODO: How do things behave under adversarial exception-catching?
+    // TODO: Upon re-entry after throwing, operators should either recover or fail-fast.
+    
+    
     // --- Sinks ---
     
     // TODO: Remove
@@ -434,9 +438,6 @@ public class Conduits {
                                                          Conduit.StepSink<U> sink) {
         return mapBalanceOrdered(mapper, IntStream.range(0, parallelism).mapToObj(i -> sink).toList());
     }
-    
-    // TODO: How does this behave under adversarial exception-catching?
-    // TODO: Upon re-entry after throwing, operators should either recover or fail-fast.
     
     public static <T, P, U> Conduit.Sink<T> mapBalancePartitioned(Function<? super T, P> classifier,
                                                                   BiFunction<? super T, ? super P, ? extends Callable<U>> mapper,
@@ -474,72 +475,84 @@ public class Conduits {
                         var holder = scopedLatch.get();
                         holder.latch.countDown();
                         for (;;) {
+                            PartitionMutex pMutex = null;
+                            P key = null;
                             T in;
                             U out;
-                            P key;
                             Callable<U> callable;
-                            PartitionMutex pMutex;
                             CountDownLatch   gCurr,
                                              gNext = holder.latch = new CountDownLatch(1),
                                              pNext = new CountDownLatch(1);
                             CountDownLatch[] pCurr = { null };
                             
-                            // At most one thread (globally) can run classifier at a time - sequenced globally
-                            lock.lockInterruptibly();
                             try {
-                                gCurr = currLatch;
-                                currLatch = gNext;
-                                in = source.poll();
-                                if (in == null) {
-                                    return null;
-                                }
-                                key = classifier.apply(in);
-                                pMutex = mutexByKey.compute(key, (k, v) -> {
-                                    if (v == null) {
-                                        v = new PartitionMutex();
-                                    }
-                                    ++v.refCount;
-                                    pCurr[0] = v.latch;
-                                    v.latch = pNext;
-                                    return v;
-                                });
-                            } finally {
-                                lock.unlock();
-                            }
-                            
-                            // Avoid applying the mapper before the partition input that arrived before us
-                            // This wait needs to happen before acquiring the semaphore, otherwise we could deadlock
-                            pCurr[0].await();
-                            try {
-                                // Avoid creating more than N pending callables for this partition
-                                pMutex.semaphore.acquire();
+                                // At most one thread (globally) can run classifier at a time - sequenced globally
+                                lock.lockInterruptibly();
                                 try {
-                                    // Avoid applying the mapper concurrently with other threads
-                                    lock.lockInterruptibly();
-                                    try {
-                                        // Countdown early to allow next partition input to contend for semaphore
-                                        // Otherwise the semaphore would be useless, and we would be enforcing no
-                                        // more than 1 pending callable per partition, rather than N
-                                        pNext.countDown();
-                                        callable = mapper.apply(in, key);
-                                    } finally {
-                                        lock.unlock();
+                                    gCurr = currLatch;
+                                    currLatch = gNext;
+                                    in = source.poll();
+                                    if (in == null) {
+                                        return null;
                                     }
-                                    out = callable.call();
+                                    key = classifier.apply(in);
+                                    pMutex = mutexByKey.compute(key, (k, v) -> {
+                                        if (v == null) {
+                                            v = new PartitionMutex();
+                                        }
+                                        ++v.refCount;
+                                        pCurr[0] = v.latch;
+                                        v.latch = pNext;
+                                        return v;
+                                    });
                                 } finally {
-                                    pMutex.semaphore.release();
+                                    lock.unlock();
                                 }
-                            } finally {
+                                
+                                // Avoid applying the mapper before the partition input that arrived before us
+                                // This wait needs to happen before acquiring the semaphore, otherwise we could deadlock
+                                pCurr[0].await();
+                                try {
+                                    // Avoid creating more than N pending callables for this partition
+                                    pMutex.semaphore.acquire();
+                                    try {
+                                        // Avoid applying the mapper concurrently with other threads
+                                        lock.lockInterruptibly();
+                                        try {
+                                            // Countdown early to allow next partition input to contend for semaphore
+                                            // Otherwise the semaphore would be useless, and we would be enforcing no
+                                            // more than 1 pending callable per partition, rather than N
+                                            pNext.countDown();
+                                            callable = mapper.apply(in, key);
+                                        } finally {
+                                            lock.unlock();
+                                        }
+                                        out = callable.call();
+                                    } finally {
+                                        pMutex.semaphore.release();
+                                    }
+                                } finally {
+                                    pNext.countDown();
+                                    pMutex = null;
+                                    mutexByKey.compute(key, (k, v) -> --v.refCount == 0 ? null : v);
+                                }
+                                
+                                // At most one thread (globally) can offer downstream at a time - sequenced globally, in poll-order
+                                if (out != null) {
+                                    gCurr.await();
+                                    return out;
+                                }
+                                gNext.countDown();
+                            } catch (Error | Exception e) {
+                                // If something bad happened, try to get back to a good state, so that user code that
+                                // catches the exception can resume without deadlocking or triggering more bad things
                                 pNext.countDown();
-                                mutexByKey.compute(key, (k, v) -> --v.refCount == 0 ? null : v);
+                                gNext.countDown();
+                                if (pMutex != null) {
+                                    mutexByKey.compute(key, (k, v) -> --v.refCount == 0 ? null : v);
+                                }
+                                throw e;
                             }
-                            
-                            // At most one thread (globally) can offer downstream at a time - sequenced globally, in poll-order
-                            if (out != null) {
-                                gCurr.await();
-                                return out;
-                            }
-                            gNext.countDown();
                         }
                     }
                 };
@@ -587,24 +600,29 @@ public class Conduits {
                         for (;;) {
                             Callable<U> callable;
                             CountDownLatch curr, next = holder.latch = new CountDownLatch(1);
-                            lock.lockInterruptibly();
                             try {
-                                curr = currLatch;
-                                currLatch = next;
-                                T in = source.poll();
-                                if (in == null) {
-                                    return null;
+                                lock.lockInterruptibly();
+                                try {
+                                    curr = currLatch;
+                                    currLatch = next;
+                                    T in = source.poll();
+                                    if (in == null) {
+                                        return null;
+                                    }
+                                    callable = mapper.apply(in);
+                                } finally {
+                                    lock.unlock();
                                 }
-                                callable = mapper.apply(in);
-                            } finally {
-                                lock.unlock();
+                                U out = callable.call();
+                                if (out != null) {
+                                    curr.await();
+                                    return out;
+                                }
+                                next.countDown();
+                            } catch (Error | Exception e) {
+                                next.countDown();
+                                throw e;
                             }
-                            U out = callable.call();
-                            if (out != null) {
-                                curr.await();
-                                return out;
-                            }
-                            next.countDown();
                         }
                     }
                 };
