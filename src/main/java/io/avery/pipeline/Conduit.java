@@ -9,12 +9,12 @@ import java.util.stream.Collector;
 public class Conduit {
     private Conduit() {}
     
-    public interface Operator {
+    public interface Stage {
         default void drainWithin(Consumer<Callable<?>> fork) {}
     }
     
     @FunctionalInterface
-    public interface Source<Out> extends Operator, AutoCloseable {
+    public interface Source<Out> extends Stage, AutoCloseable {
         boolean drainToSink(StepSink<? super Out> sink) throws Exception;
         
         default void close() throws Exception {}
@@ -48,17 +48,17 @@ public class Conduit {
             return finisher.apply(acc);
         }
         
-        default <T> StepSource<T> andThen(Stage<? super Out, T> after) {
+        default <T> StepSource<T> andThen(Segue<? super Out, T> after) {
             return new Conduits.ChainedStepSource<>(this, after);
         }
         
-        default Operator andThen(StepSink<? super Out> after) {
-            return new Conduits.ChainedOperator(this, after);
+        default Stage andThen(StepSink<? super Out> after) {
+            return new Conduits.ChainedStage(this, after);
         }
     }
     
     @FunctionalInterface
-    public interface Sink<In> extends Operator {
+    public interface Sink<In> extends Stage {
         boolean drainFromSource(StepSource<? extends In> source) throws Exception;
         
         default void complete(Throwable error) throws Exception {
@@ -69,12 +69,12 @@ public class Conduit {
             }
         }
         
-        default <T> StepSink<T> compose(Stage<T, ? extends In> before) {
+        default <T> StepSink<T> compose(Segue<T, ? extends In> before) {
             return new Conduits.ChainedStepSink<>(before, this);
         }
         
-        default Operator compose(StepSource<? extends In> before) {
-            return new Conduits.ChainedOperator(before, this);
+        default Stage compose(StepSource<? extends In> before) {
+            return new Conduits.ChainedStage(before, this);
         }
     }
     
@@ -92,8 +92,8 @@ public class Conduit {
             return true;
         }
         
-        default Operator andThen(Sink<? super Out> after) {
-            return new Conduits.ChainedOperator(this, after);
+        default Stage andThen(Sink<? super Out> after) {
+            return new Conduits.ChainedStage(this, after);
         }
     }
     
@@ -111,17 +111,17 @@ public class Conduit {
             return true;
         }
         
-        default Operator compose(Source<? extends In> before) {
-            return new Conduits.ChainedOperator(before, this);
+        default Stage compose(Source<? extends In> before) {
+            return new Conduits.ChainedStage(before, this);
         }
     }
     
-    public interface Stage<In, Out> extends StepSink<In>, StepSource<Out> {
-        @Override default <T> Stage<T, Out> compose(Stage<T, ? extends In> before) { return new Conduits.ChainedStage<>(before, this); }
+    public interface Segue<In, Out> extends StepSink<In>, StepSource<Out> {
+        @Override default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainedSegue<>(before, this); }
         @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainedStepSource<>(before, this); }
         @Override default StepSource<Out> compose(Source<? extends In> before) { return new Conduits.ChainedStepSource<>(before, this); }
         
-        @Override default <T> Stage<In, T> andThen(Stage<? super Out, T> after) { return new Conduits.ChainedStage<>(this, after); }
+        @Override default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainedSegue<>(this, after); }
         @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Conduits.ChainedStepSink<>(this, after); }
         @Override default StepSink<In> andThen(Sink<? super Out> after) { return new Conduits.ChainedStepSink<>(this, after); }
     }

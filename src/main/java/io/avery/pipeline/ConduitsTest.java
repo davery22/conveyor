@@ -57,7 +57,7 @@ class ConduitsTest {
     
     public static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//            var stage = Conduits.stepFuse(
+//            var segue = Conduits.stepFuse(
 //                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
 //                Conduits.tokenBucket(
 //                    Duration.ofSeconds(1),
@@ -70,18 +70,18 @@ class ConduitsTest {
 //            // Producer
 //            scope.fork(() -> {
 //                try (var in = new Scanner(System.in)) {
-//                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && stage.offer(line); ) { }
-//                    stage.complete(null);
+//                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && segue.offer(line); ) { }
+//                    segue.complete(null);
 //                } catch (Throwable error) {
-//                    stage.complete(error);
+//                    segue.complete(error);
 //                }
 //                return null;
 //            });
 //
 //            // Consumer
 //            scope.fork(() -> {
-//                try (stage) {
-//                    stage.forEach(System.out::println);
+//                try (segue) {
+//                    segue.forEach(System.out::println);
 //                }
 //                return null;
 //            });
@@ -118,7 +118,7 @@ class ConduitsTest {
         }
     }
     
-    private static <T> Conduit.Stage<T, T> buffer(int bufferLimit) {
+    private static <T> Conduit.Segue<T, T> buffer(int bufferLimit) {
         return Conduits.extrapolate(null, e -> Collections.emptyIterator(), bufferLimit);
     }
     

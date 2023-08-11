@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedStage<In, Out> implements Conduit.Stage<In, Out> {
+public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         Instant onInit() throws Exception;
@@ -68,11 +68,11 @@ public class TimedStage<In, Out> implements Conduit.Stage<In, Out> {
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
     
-    TimedStage(Core<In, Out> core) {
+    TimedSegue(Core<In, Out> core) {
         this.core = core;
     }
     
-    // One instance per TimedStage.
+    // One instance per TimedSegue.
     // Methods protect against some kinds of misuse:
     //  1. Casting to another interface and calling its methods - protected by checking access()
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership

@@ -121,14 +121,14 @@ public class Conduits {
         }
     }
     
-    private static class FusedStepStage<In, T, A, Out> extends FusedStepSink<In, T, A> implements Conduit.Stage<In, Out> {
-        FusedStepStage(Gatherer<In, A, T> gatherer, Conduit.Stage<T, Out> stage) {
-            super(gatherer, stage);
+    private static class FusedSegue<In, T, A, Out> extends FusedStepSink<In, T, A> implements Conduit.Segue<In, Out> {
+        FusedSegue(Gatherer<In, A, T> gatherer, Conduit.Segue<T, Out> segue) {
+            super(gatherer, segue);
         }
         
         @Override
-        Conduit.Stage<T, Out> conduit() {
-            return (Conduit.Stage<T, Out>) conduit;
+        Conduit.Segue<T, Out> conduit() {
+            return (Conduit.Segue<T, Out>) conduit;
         }
         
         @Override
@@ -148,10 +148,10 @@ public class Conduits {
         return new FusedStepSink<>(g, sink);
     }
     
-    public static <In, T, A, Out> Conduit.Stage<In, Out> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.Stage<T, Out> stage) {
+    public static <In, T, A, Out> Conduit.Segue<In, Out> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.Segue<T, Out> segue) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
-        return new FusedStepStage<>(g, stage);
+        return new FusedSegue<>(g, segue);
     }
     
     // TODO: Probably remove this
@@ -215,17 +215,17 @@ public class Conduits {
         return new FusedStepSource();
     }
     
-    // TODO: This works, but is it better than putting stepFuse(gatherer, stage) before the sink?
+    // TODO: This works, but is it better than putting stepFuse(gatherer, segue) before the sink?
     //
     // 1. A=loop{process+offer} | B=loop{poll+process}
     // 2. B=loop{(poll+fork(a))?+poll+process} | a=loop*{process+offer}
     //
     // 2 is likely less efficient due to forking overhead. Does it buy anything?
-    //  - Can fuse directly to a Sink, instead of fusing to a Stage before the Sink
-    //    - Possible because the asynchrony is implicit in the Sink itself, rather than explicit between Stage and Sink
+    //  - Can fuse directly to a Sink, instead of fusing to a Segue before the Sink
+    //    - Possible because the asynchrony is implicit in the Sink itself, rather than explicit between Segue and Sink
     //  - Propagation of completion/error?
-    //    - In 1, an error from the fused Stage is propagated down by Sink.complete(error); Sink will propagate or throw wrapped in UpstreamException
-    //    - In 2, an error from the fused Stage is propagated out by Sink.drainFromSource(..); Sink will propagate or throw unwrapped
+    //    - In 1, an error from the fused Segue is propagated down by Sink.complete(error); Sink will propagate or throw wrapped in UpstreamException
+    //    - In 2, an error from the fused Segue is propagated out by Sink.drainFromSource(..); Sink will propagate or throw unwrapped
     //
     // Theoretically we could put any Pipeline in 2 if we had a reliable way to insert delimiters at the output side, to
     // know when to poll source again. But since conduits have async boundaries, there is no boundary-state-agnostic way
@@ -255,7 +255,7 @@ public class Conduits {
             @Override public BiConsumer<A, Sink<? super Object>> finisher() { return gatherer.finisher()::accept; }
             @Override public Set<Characteristics> characteristics() { return gatherer.characteristics(); }
         }
-        var stage = stepFuse(
+        var segue = stepFuse(
             new DelimitedGatherer(),
             Conduits.extrapolate(delimiter, e -> Collections.emptyIterator(), bufferLimit)
         );
@@ -268,14 +268,14 @@ public class Conduits {
                         @Override
                         public T poll() throws Exception {
                             for (;;) {
-                                Object out = stage.poll();
+                                Object out = segue.poll();
                                 if (out != delimiter) {
                                     return (T) out;
                                 }
                                 In in = source.poll();
                                 scope.fork(() -> {
-                                    if (in == null || !stage.offer(in)) {
-                                        stage.complete(null);
+                                    if (in == null || !segue.offer(in)) {
+                                        segue.complete(null);
                                     }
                                     return null;
                                 });
@@ -314,7 +314,7 @@ public class Conduits {
     //  Matters for deciding what becomes of source + other sinks
     //  Maybe non-step Sources shouldn't be allowed at all?
     //   - Because, if any / all sinks cancel, source can't recover well (snapshot its state) for new sinks
-    //   - Instead, have combinators that take a Stage to build a Source
+    //   - Instead, have combinators that take a Segue to build a Source
     
     // Is there a problem with 'init-on-first-use'? Vs having/requiring an explicit init?
     // Uses of 'init' (onSubscribe()) in Rx:
@@ -354,14 +354,14 @@ public class Conduits {
     // For the same reason, cannot write a stepMerge - we cannot know which sources may be blocked in poll() by another
     // thread.
     
-    // Why can't we write a step operator from non-step operators?
-    // Non-step operators can only "run-all". To wrap in step, we would either need to:
+    // Why can't we write a step stage from non-step stages?
+    // Non-step stages can only "run-all". To wrap in step, we would either need to:
     // StepSource: When we poll(), internal StepSink (eventually) returns an element buffered from original Source.
-    //  - In other words we've made a Stage!
+    //  - In other words we've made a Segue!
     //  - If we run-all the original Source on first poll(), we need unbounded buffering to complete within poll()
     //  - Otherwise, the original Source would already need to be running in an unscoped thread, outside our poll()
     // StepSink: When we offer(), internal StepSource buffers so original Sink can see result on poll()
-    //  - In other words we've made a Stage!
+    //  - In other words we've made a Segue!
     //  - If we run-all the original Sink on first offer(), we deadlock because offer() is now waiting for more offers
     //  - Otherwise, the original Sink would already need to be running in an unscoped thread, outside our offer()
     
@@ -388,13 +388,13 @@ public class Conduits {
     //  - this is about catching incorrect usage
     // (step-)sources do not need any extra protection if only one thread is calling them
     // (step-)sinks do not need any extra protection if only one thread is calling them
-    // stages need protection just to prevent conflict between their own sink/source
+    // segues need protection just to prevent conflict between their own sink/source
     
     // fastFailSource - fail if Source is accessed by multiple threads
     // fastFailSink - fail if Sink is accessed by multiple threads
     // synchronizeStepSource
     // synchronizeStepSink
-    // synchronizeStage
+    // synchronizeSegue
     // catchError - log / recover / re-throw
     
     // What of sources returning elements outside the synchronized block?
@@ -415,11 +415,11 @@ public class Conduits {
     //    same sink.
     //  - The latter has a function that is called on elements in-order before balancing. This can be resolved by fusing
     //    before the balance(), but since balance is a Sink (not StepSink), fusing would require introducing a
-    //    Stage/boundary. Instead, we can wrap the StepSource to synchronize polls, and apply the function in the same
+    //    Segue/boundary. Instead, we can wrap the StepSource to synchronize polls, and apply the function in the same
     //    synchronized block to get application ordering.
     
     // TODO: How do things behave under adversarial exception-catching?
-    // TODO: Upon re-entry after throwing, operators should either recover or fail-fast.
+    // TODO: Upon re-entry after throwing, stages should either recover or fail-fast.
     
     // TODO: What about eg balance(), where one of several Sinks might be synchronous, causing a throw...
     //  In general, when/how can it be safe for close()/complete(err) to actually throw?
@@ -1286,16 +1286,16 @@ public class Conduits {
         return new ZipLatest();
     }
     
-    // --- Stages ---
+    // --- Segues ---
     
-    public static <T, A> Conduit.Stage<T, A> batch(Supplier<? extends A> batchSupplier,
+    public static <T, A> Conduit.Segue<T, A> batch(Supplier<? extends A> batchSupplier,
                                                    BiConsumer<? super A, ? super T> accumulator,
                                                    Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
         
-        class Batch implements TimedStage.Core<T, A> {
+        class Batch implements TimedSegue.Core<T, A> {
             A batch = null;
             Instant currentDeadline = null;
             boolean done = false;
@@ -1307,7 +1307,7 @@ public class Conduits {
             }
             
             @Override
-            public void onOffer(TimedStage.SinkController ctl, T input) throws InterruptedException {
+            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
                 // Alternative implementations might adjust or reset the buffer instead of blocking
                 while (batch != null && currentDeadline == Instant.MIN) {
                     if (!ctl.awaitAdvance()) {
@@ -1325,7 +1325,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<A> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<A> ctl) throws UpstreamException {
                 if (done) {
                     if (err != null) {
                         throw new UpstreamException(err);
@@ -1343,7 +1343,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedStage.SinkController ctl, Throwable error) {
+            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -1351,10 +1351,10 @@ public class Conduits {
         }
         
         var core = new Batch();
-        return new TimedStage<>(core);
+        return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Stage<T, T> tokenBucket(Duration tokenInterval,
+    public static <T> Conduit.Segue<T, T> tokenBucket(Duration tokenInterval,
                                                       ToLongFunction<T> costMapper,
                                                       long tokenLimit,
                                                       long costLimit) { // TODO: Obviate costLimit?
@@ -1375,7 +1375,7 @@ public class Conduits {
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
-        class Throttle implements TimedStage.Core<T, T> {
+        class Throttle implements TimedSegue.Core<T, T> {
             Deque<Weighted<T>> queue = null;
             long tempTokenLimit = 0;
             long tokens = 0;
@@ -1392,7 +1392,7 @@ public class Conduits {
             }
             
             @Override
-            public void onOffer(TimedStage.SinkController ctl, T input) throws InterruptedException {
+            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
                 // Optional blocking for boundedness, here based on cost rather than queue size
                 while (cost >= costLimit) {
                     if (!ctl.awaitAdvance()) {
@@ -1412,7 +1412,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
                     throw new UpstreamException(err);
                 }
@@ -1460,7 +1460,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedStage.SinkController ctl, Throwable error) {
+            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
                 if (error != null || queue.isEmpty()) {
@@ -1470,17 +1470,17 @@ public class Conduits {
         }
         
         var core = new Throttle();
-        return new TimedStage<>(core);
+        return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Stage<T, T> delay(Function<? super T, Instant> deadlineMapper,
+    public static <T> Conduit.Segue<T, T> delay(Function<? super T, Instant> deadlineMapper,
                                                 int bufferLimit) {
         Objects.requireNonNull(deadlineMapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Delay implements TimedStage.Core<T, T> {
+        class Delay implements TimedSegue.Core<T, T> {
             PriorityQueue<Expiring<T>> pq = null;
             boolean done = false;
             Throwable err = null;
@@ -1492,7 +1492,7 @@ public class Conduits {
             }
             
             @Override
-            public void onOffer(TimedStage.SinkController ctl, T input) throws InterruptedException {
+            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
                 while (pq.size() >= bufferLimit) {
                     if (!ctl.awaitAdvance()) {
                         return;
@@ -1507,7 +1507,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
                     throw new UpstreamException(err);
                 }
@@ -1529,7 +1529,7 @@ public class Conduits {
            }
             
             @Override
-            public void onComplete(TimedStage.SinkController ctl, Throwable error) {
+            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
                 if (error != null || pq.isEmpty()) {
@@ -1539,10 +1539,10 @@ public class Conduits {
         }
        
         var core = new Delay();
-        return new TimedStage<>(core);
+        return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Stage<T, T> keepAlive(Duration timeout,
+    public static <T> Conduit.Segue<T, T> keepAlive(Duration timeout,
                                                     Supplier<? extends T> extraSupplier,
                                                     int bufferLimit) {
         Objects.requireNonNull(timeout);
@@ -1554,7 +1554,7 @@ public class Conduits {
             throw new IllegalArgumentException("timeout must be positive");
         }
         
-        class KeepAlive implements TimedStage.Core<T, T> {
+        class KeepAlive implements TimedSegue.Core<T, T> {
             Deque<T> queue = null;
             boolean done = false;
             Throwable err = null;
@@ -1566,7 +1566,7 @@ public class Conduits {
             }
             
             @Override
-            public void onOffer(TimedStage.SinkController ctl, T input) throws InterruptedException {
+            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
                 while (queue.size() >= bufferLimit) {
                     if (!ctl.awaitAdvance()) {
                         return;
@@ -1577,7 +1577,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
                     throw new UpstreamException(err);
                 }
@@ -1595,7 +1595,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedStage.SinkController ctl, Throwable error) {
+            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -1603,10 +1603,10 @@ public class Conduits {
         }
         
         var core = new KeepAlive();
-        return new TimedStage<>(core);
+        return new TimedSegue<>(core);
     }
 
-    public static <T> Conduit.Stage<T, T> extrapolate(T initial,
+    public static <T> Conduit.Segue<T, T> extrapolate(T initial,
                                                       Function<? super T, ? extends Iterator<? extends T>> mapper,
                                                       int bufferLimit) {
         Objects.requireNonNull(mapper);
@@ -1614,7 +1614,7 @@ public class Conduits {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Extrapolate implements TimedStage.Core<T, T> {
+        class Extrapolate implements TimedSegue.Core<T, T> {
             Deque<T> queue = null;
             Iterator<? extends T> iter = null;
             boolean done = false;
@@ -1631,7 +1631,7 @@ public class Conduits {
             }
             
             @Override
-            public void onOffer(TimedStage.SinkController ctl, T input) throws InterruptedException {
+            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
                 while (queue.size() >= bufferLimit) {
                     if (!ctl.awaitAdvance()) {
                         return;
@@ -1643,7 +1643,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedStage.SourceController<T> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
                 if (err != null) {
                     throw new UpstreamException(err);
                 }
@@ -1668,7 +1668,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedStage.SinkController ctl, Throwable error) {
+            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
                 ctl.latchDeadline(Instant.MIN);
@@ -1676,7 +1676,7 @@ public class Conduits {
         }
         
         var core = new Extrapolate();
-        return new TimedStage<>(core);
+        return new TimedSegue<>(core);
     }
     
     // TODO: Expose
@@ -1784,113 +1784,113 @@ public class Conduits {
         }
     }
     
-    static sealed class ChainedOperator implements Conduit.Operator {
-        final Conduit.Source<?> left;
-        final Conduit.Sink<?> right;
+    static sealed class ChainedStage implements Conduit.Stage {
+        final Conduit.Source<?> source;
+        final Conduit.Sink<?> sink;
         
-        ChainedOperator(Conduit.Source<?> left, Conduit.Sink<?> right) {
-            this.left = left;
-            this.right = right;
+        ChainedStage(Conduit.Source<?> source, Conduit.Sink<?> sink) {
+            this.source = source;
+            this.sink = sink;
         }
         
         @SuppressWarnings({"unchecked", "rawtypes"})
         @Override
         public void drainWithin(Consumer<Callable<?>> fork) {
-            left.drainWithin(fork);
+            source.drainWithin(fork);
             fork.accept(() -> {
-                try (left) {
-                    if (right instanceof Conduit.StepSink ss) {
-                        left.drainToSink(ss);
+                try (source) {
+                    if (sink instanceof Conduit.StepSink ss) {
+                        source.drainToSink(ss);
                     } else {
-                        right.drainFromSource((Conduit.StepSource) left);
+                        sink.drainFromSource((Conduit.StepSource) source);
                     }
-                    right.complete(null);
+                    sink.complete(null);
                 } catch (Throwable error) {
-                    right.complete(error);
+                    sink.complete(error);
                 }
                 return null;
             });
-            right.drainWithin(fork);
+            sink.drainWithin(fork);
         }
 
         Conduit.Source<?> first() {
-            return left instanceof ChainedOperator cs ? cs.first() : left;
+            return source instanceof ChainedStage cs ? cs.first() : source;
         }
         
         Conduit.Sink<?> last() {
-            return right instanceof ChainedOperator cs ? cs.last() : right;
+            return sink instanceof ChainedStage cs ? cs.last() : sink;
         }
     }
     
-    static final class ChainedStepSource<Out> extends ChainedOperator implements Conduit.StepSource<Out> {
-        final Conduit.StepSource<Out> source;
+    static final class ChainedStepSource<Out> extends ChainedStage implements Conduit.StepSource<Out> {
+        final Conduit.StepSource<Out> stepSource;
         
         @SuppressWarnings("unchecked")
-        ChainedStepSource(Conduit.Source<?> left, Conduit.Sink<?> right) {
-            super(left, right);
-            source = (Conduit.StepSource<Out>) last();
+        ChainedStepSource(Conduit.Source<?> source, Conduit.Sink<?> sink) {
+            super(source, sink);
+            stepSource = (Conduit.StepSource<Out>) last();
         }
         
         @Override
         public Out poll() throws Exception {
-            return source.poll();
+            return stepSource.poll();
         }
         
         @Override
         public void close() throws Exception {
-            source.close();
+            stepSource.close();
         }
     }
     
-    static final class ChainedStepSink<In> extends ChainedOperator implements Conduit.StepSink<In> {
-        final Conduit.StepSink<In> sink;
+    static final class ChainedStepSink<In> extends ChainedStage implements Conduit.StepSink<In> {
+        final Conduit.StepSink<In> stepSink;
         
         @SuppressWarnings("unchecked")
-        ChainedStepSink(Conduit.Source<?> left, Conduit.Sink<?> right) {
-            super(left, right);
-            sink = (Conduit.StepSink<In>) first();
+        ChainedStepSink(Conduit.Source<?> source, Conduit.Sink<?> sink) {
+            super(source, sink);
+            stepSink = (Conduit.StepSink<In>) first();
         }
         
         @Override
         public boolean offer(In input) throws Exception {
-            return sink.offer(input);
+            return stepSink.offer(input);
         }
         
         @Override
         public void complete(Throwable error) throws Exception {
-            sink.complete(error);
+            stepSink.complete(error);
         }
     }
     
-    static final class ChainedStage<In, Out> extends ChainedOperator implements Conduit.Stage<In, Out> {
-        final Conduit.StepSink<In> sink;
-        final Conduit.StepSource<Out> source;
+    static final class ChainedSegue<In, Out> extends ChainedStage implements Conduit.Segue<In, Out> {
+        final Conduit.StepSink<In> stepSink;
+        final Conduit.StepSource<Out> stepSource;
         
         @SuppressWarnings("unchecked")
-        ChainedStage(Conduit.Source<?> left, Conduit.Sink<?> right) {
-            super(left, right);
-            sink = (Conduit.StepSink<In>) first();
-            source = (Conduit.StepSource<Out>) last();
+        ChainedSegue(Conduit.Source<?> source, Conduit.Sink<?> sink) {
+            super(source, sink);
+            stepSink = (Conduit.StepSink<In>) first();
+            stepSource = (Conduit.StepSource<Out>) last();
         }
         
         @Override
         public boolean offer(In input) throws Exception {
-            return sink.offer(input);
+            return stepSink.offer(input);
         }
         
         @Override
         public void complete(Throwable error) throws Exception {
-            sink.complete(error);
+            stepSink.complete(error);
         }
         
         @Override
         public Out poll() throws Exception {
-            return source.poll();
+            return stepSource.poll();
         }
         
         @Override
         public void close() throws Exception {
-            source.close();
+            stepSource.close();
         }
     }
 }
