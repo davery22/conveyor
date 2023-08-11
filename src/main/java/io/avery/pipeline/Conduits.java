@@ -421,6 +421,10 @@ public class Conduits {
     // TODO: How do things behave under adversarial exception-catching?
     // TODO: Upon re-entry after throwing, operators should either recover or fail-fast.
     
+    // TODO: What about eg balance(), where one of several Sinks might be synchronous, causing a throw...
+    //  In general, when/how can it be safe for close()/complete(err) to actually throw?
+    //  Maybe ShutdownOnFailure is not the right scope for pipelines?
+    
     
     // --- Sinks ---
     
@@ -991,8 +995,6 @@ public class Conduits {
     }
     
     // TODO: mergeSorted
-    
-    // TODO: interleave (, mergePreferred, mergePrioritized)
     
     private interface Accessor<X, Y> {
         void setLatest1(X x);
@@ -1740,6 +1742,14 @@ public class Conduits {
         }
     }
     
+    public static <T> Conduit.Source<T> source(Conduit.Source<T> source) {
+        return source;
+    }
+    
+    public static <T> Conduit.Sink<T> sink(Conduit.Sink<T> sink) {
+        return sink;
+    }
+    
     private static class Indexed<T> {
         final T element;
         final int index;
@@ -1771,6 +1781,116 @@ public class Conduits {
         
         public int compareTo(Expiring other) {
             return deadline.compareTo(other.deadline);
+        }
+    }
+    
+    static sealed class ChainedOperator implements Conduit.Operator {
+        final Conduit.Source<?> left;
+        final Conduit.Sink<?> right;
+        
+        ChainedOperator(Conduit.Source<?> left, Conduit.Sink<?> right) {
+            this.left = left;
+            this.right = right;
+        }
+        
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override
+        public void drainWithin(Consumer<Callable<?>> fork) {
+            left.drainWithin(fork);
+            fork.accept(() -> {
+                try (left) {
+                    if (right instanceof Conduit.StepSink ss) {
+                        left.drainToSink(ss);
+                    } else {
+                        right.drainFromSource((Conduit.StepSource) left);
+                    }
+                    right.complete(null);
+                } catch (Throwable error) {
+                    right.complete(error);
+                }
+                return null;
+            });
+            right.drainWithin(fork);
+        }
+
+        Conduit.Source<?> first() {
+            return left instanceof ChainedOperator cs ? cs.first() : left;
+        }
+        
+        Conduit.Sink<?> last() {
+            return right instanceof ChainedOperator cs ? cs.last() : right;
+        }
+    }
+    
+    static final class ChainedStepSource<Out> extends ChainedOperator implements Conduit.StepSource<Out> {
+        final Conduit.StepSource<Out> source;
+        
+        @SuppressWarnings("unchecked")
+        ChainedStepSource(Conduit.Source<?> left, Conduit.Sink<?> right) {
+            super(left, right);
+            source = (Conduit.StepSource<Out>) last();
+        }
+        
+        @Override
+        public Out poll() throws Exception {
+            return source.poll();
+        }
+        
+        @Override
+        public void close() throws Exception {
+            source.close();
+        }
+    }
+    
+    static final class ChainedStepSink<In> extends ChainedOperator implements Conduit.StepSink<In> {
+        final Conduit.StepSink<In> sink;
+        
+        @SuppressWarnings("unchecked")
+        ChainedStepSink(Conduit.Source<?> left, Conduit.Sink<?> right) {
+            super(left, right);
+            sink = (Conduit.StepSink<In>) first();
+        }
+        
+        @Override
+        public boolean offer(In input) throws Exception {
+            return sink.offer(input);
+        }
+        
+        @Override
+        public void complete(Throwable error) throws Exception {
+            sink.complete(error);
+        }
+    }
+    
+    static final class ChainedStage<In, Out> extends ChainedOperator implements Conduit.Stage<In, Out> {
+        final Conduit.StepSink<In> sink;
+        final Conduit.StepSource<Out> source;
+        
+        @SuppressWarnings("unchecked")
+        ChainedStage(Conduit.Source<?> left, Conduit.Sink<?> right) {
+            super(left, right);
+            sink = (Conduit.StepSink<In>) first();
+            source = (Conduit.StepSource<Out>) last();
+        }
+        
+        @Override
+        public boolean offer(In input) throws Exception {
+            return sink.offer(input);
+        }
+        
+        @Override
+        public void complete(Throwable error) throws Exception {
+            sink.complete(error);
+        }
+        
+        @Override
+        public Out poll() throws Exception {
+            return source.poll();
+        }
+        
+        @Override
+        public void close() throws Exception {
+            source.close();
         }
     }
 }

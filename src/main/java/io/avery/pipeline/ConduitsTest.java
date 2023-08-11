@@ -22,7 +22,7 @@ class ConduitsTest {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
             var buffer = ConduitsTest.buffer(10);
             
-            Pipelines
+            Conduits
                 .<String>source(sink -> {
                     try (var in = new Scanner(System.in)) {
                         for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
@@ -33,25 +33,23 @@ class ConduitsTest {
                         return true;
                     }
                 })
-                .andThen(ConduitsTest.<String>buffer(4).pipeline())
+                .andThen(ConduitsTest.buffer(4))
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s,
                     buffer
-                ).pipeline())
+                ))
 //                .andThen(Conduits.balance(
 //                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
 //                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
 //                        buffer
 //                    )).toList()
-//                ).pipeline())
-                .run(scope::fork);
-            
-            Pipelines
-                .stepSource(buffer)
-                .andThen(Pipelines.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(scope::fork);
+//                ))
+                .drainWithin(scope::fork);
+            buffer
+                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
+                .drainWithin(scope::fork);
             
             scope.join().throwIfFailed();
         }
@@ -88,7 +86,7 @@ class ConduitsTest {
 //                return null;
 //            });
             
-            Pipelines
+            Conduits
                 .<String>source(sink -> {
                     try (var in = new Scanner(System.in)) {
                         for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
@@ -107,14 +105,14 @@ class ConduitsTest {
                         10,
                         100
                     )
-                ).pipeline())
-//                .andThen(Pipelines.sink(source -> source.forEach(System.out::println)))
+                ))
+//                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
                     16,
                     source -> { source.forEach(System.out::println); return true; }
-                ).pipeline())
-                .run(scope::fork);
+                ))
+                .drainWithin(scope::fork);
             
             scope.join().throwIfFailed();
         }
