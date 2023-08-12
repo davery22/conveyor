@@ -264,7 +264,7 @@ public class Conduits {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    var stepSource = new Conduit.StepSource<T>() {
+                    class HelperSource implements Conduit.StepSource<T> {
                         @Override
                         public T poll() throws Exception {
                             for (;;) {
@@ -281,13 +281,18 @@ public class Conduits {
                                 });
                             }
                         }
-                    };
+                        
+                        @Override
+                        public void close() {
+                            scope.shutdown();
+                        }
+                    }
                     
                     var task = scope.fork(() -> {
                         // Done in a fork so that an error from other forks will interrupt this
-                        boolean drained = sink.drainFromSource(stepSource);
-                        scope.shutdown();
-                        return drained;
+                        try (var stepSource = new HelperSource()) {
+                            return sink.drainFromSource(stepSource);
+                        }
                     });
                     
                     scope.join().throwIfFailed();
@@ -408,8 +413,6 @@ public class Conduits {
     // StepSink works by a Source offering to it - element sequence is the order that offer is called (need sync'd offer)
     //
     
-    // TODO: Note limitations of relying on ScopedValues, if user code invokes callbacks in an unmanaged thread
-    
     // balance() is not quite mapAsyncUnordered()
     //  - The latter has one downstream, but this can be resolved outside of balance() by having all sinks offer to the
     //    same sink.
@@ -456,10 +459,6 @@ public class Conduits {
             throw new IllegalArgumentException();
         }
         
-        class LatchHolder {
-            CountDownLatch latch = new CountDownLatch(1);
-        }
-        
         class PartitionMutex {
             final Semaphore semaphore = new Semaphore(permitsPerPartition);
             CountDownLatch latch = new CountDownLatch(0);
@@ -467,18 +466,18 @@ public class Conduits {
         }
         
         class MapBalancedPartitioned implements Conduit.Sink<T> {
-            final ScopedValue<LatchHolder> scopedLatch = ScopedValue.newInstance();
             final ReentrantLock lock = new ReentrantLock();
             final ConcurrentHashMap<P, PartitionMutex> mutexByKey = new ConcurrentHashMap<>();
             CountDownLatch currLatch = new CountDownLatch(0);
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                var stepSource = new Conduit.StepSource<U>() {
+                class HelperSource implements Conduit.StepSource<U> {
+                    CountDownLatch latch = new CountDownLatch(1);
+                    
                     @Override
                     public U poll() throws Exception {
-                        var holder = scopedLatch.get();
-                        holder.latch.countDown();
+                        latch.countDown();
                         for (;;) {
                             PartitionMutex pMutex = null;
                             P key = null;
@@ -486,7 +485,7 @@ public class Conduits {
                             U out;
                             Callable<U> callable;
                             CountDownLatch   gCurr,
-                                             gNext = holder.latch = new CountDownLatch(1),
+                                             gNext = latch = new CountDownLatch(1),
                                              pNext = new CountDownLatch(1);
                             CountDownLatch[] pCurr = { null };
                             
@@ -560,18 +559,20 @@ public class Conduits {
                             }
                         }
                     }
-                };
+                    
+                    @Override
+                    public void close() {
+                        latch.countDown();
+                    }
+                }
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = sinks.stream()
-                        .map(sink -> {
-                            var holder = new LatchHolder();
-                            return scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
-                                boolean drained = sink.drainFromSource(stepSource);
-                                holder.latch.countDown();
-                                return drained;
-                            }));
-                        })
+                        .map(sink -> scope.fork(() -> {
+                            try (var stepSource = new HelperSource()) {
+                                return sink.drainFromSource(stepSource);
+                            }
+                        }))
                         .toList();
                     scope.join().throwIfFailed();
                     return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
@@ -589,25 +590,21 @@ public class Conduits {
     
     public static <T, U> Conduit.Sink<T> mapBalanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
                                                            List<? extends Conduit.Sink<U>> sinks) {
-        class LatchHolder {
-            CountDownLatch latch = new CountDownLatch(1);
-        }
-        
         class MapBalanceOrdered implements Conduit.Sink<T> {
-            final ScopedValue<LatchHolder> scopedLatch = ScopedValue.newInstance();
             final ReentrantLock lock = new ReentrantLock();
             CountDownLatch currLatch = new CountDownLatch(0);
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
-                var stepSource = new Conduit.StepSource<U>() {
+                class HelperSource implements Conduit.StepSource<U> {
+                    CountDownLatch latch = new CountDownLatch(1);
+                    
                     @Override
                     public U poll() throws Exception {
-                        var holder = scopedLatch.get();
-                        holder.latch.countDown();
+                        latch.countDown();
                         for (;;) {
                             Callable<U> callable;
-                            CountDownLatch curr, next = holder.latch = new CountDownLatch(1);
+                            CountDownLatch curr, next = latch = new CountDownLatch(1);
                             try {
                                 lock.lockInterruptibly();
                                 try {
@@ -633,18 +630,20 @@ public class Conduits {
                             }
                         }
                     }
-                };
+                    
+                    @Override
+                    public void close() {
+                        latch.countDown();
+                    }
+                }
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = sinks.stream()
-                        .map(sink -> {
-                            var holder = new LatchHolder();
-                            return scope.fork(() -> ScopedValue.callWhere(scopedLatch, holder, () -> {
-                                boolean drained = sink.drainFromSource(stepSource);
-                                holder.latch.countDown();
-                                return drained;
-                            }));
-                        })
+                        .map(sink -> scope.fork(() -> {
+                            try (var stepSource = new HelperSource()) {
+                                return sink.drainFromSource(stepSource);
+                            }
+                        }))
                         .toList();
                     scope.join().throwIfFailed();
                     return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
@@ -737,16 +736,12 @@ public class Conduits {
             @Override
             public boolean offer(T input) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    for (var sink : sinks) {
-                        scope.fork(() -> {
-                            // TODO: Check return - handle cancel
-                            sink.offer(input);
-                            return null;
-                        });
-                    }
+                    var tasks = sinks.stream()
+                        .map(sink -> scope.fork(() -> sink.offer(input)))
+                        .toList();
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
                 }
-                return true; // TODO: Unless any/all sinks have cancelled
             }
             
             @Override
@@ -760,7 +755,6 @@ public class Conduits {
     
     public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
         class Broadcast implements Conduit.Sink<T> {
-            final ScopedValue<Integer> scopedPos = ScopedValue.newInstance();
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
             final BitSet bitSet = new BitSet(sinks.size());
@@ -775,7 +769,14 @@ public class Conduits {
                 //  - If the sink has already consumed this round's element, wait for next round
                 //  - First sink in each round polls for the next element
                 //  - Last sink in each round wakes the others for the next round
-                var stepSource = new Conduit.StepSource<T>() {
+                
+                class HelperSource implements Conduit.StepSource<T> {
+                    final int pos;
+                    
+                    HelperSource(int pos) {
+                        this.pos = pos;
+                    }
+                    
                     @Override
                     public T poll() throws Exception {
                         lock.lockInterruptibly();
@@ -783,17 +784,16 @@ public class Conduits {
                             if (done) {
                                 return null;
                             }
-                            int myPos = scopedPos.get();
-                            if (bitSet.get(myPos)) {
+                            if (bitSet.get(pos)) {
                                 // Already seen - Wait for next round
                                 do {
                                     ready.await();
                                     if (done) {
                                         return null;
                                     }
-                                } while (bitSet.get(myPos));
+                                } while (bitSet.get(pos));
                             }
-                            bitSet.set(myPos);
+                            bitSet.set(pos);
                             int seen = bitSet.cardinality();
                             if (seen == 1) {
                                 // First-one-in - Poll
@@ -809,29 +809,29 @@ public class Conduits {
                             lock.unlock();
                         }
                     }
-                };
+                    
+                    @Override
+                    public void close() {
+                        lock.lock();
+                        try {
+                            bitSet.clear(pos);
+                            if (bitSet.cardinality() == --count) {
+                                bitSet.clear();
+                                ready.signalAll();
+                            }
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                }
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = IntStream.range(0, sinks.size())
-                        .mapToObj(i -> {
-                            var sink = sinks.get(i);
-                            return scope.fork(() -> ScopedValue.callWhere(scopedPos, i, () -> {
-                                try {
-                                    return sink.drainFromSource(stepSource);
-                                } finally {
-                                    lock.lock();
-                                    try {
-                                        bitSet.clear(i);
-                                        if (bitSet.cardinality() == --count) {
-                                            bitSet.clear();
-                                            ready.signalAll();
-                                        }
-                                    } finally {
-                                        lock.unlock();
-                                    }
-                                }
-                            }));
-                        })
+                        .mapToObj(i -> scope.fork(() -> {
+                            try (var stepSource = new HelperSource(i)) {
+                                return sinks.get(i).drainFromSource(stepSource);
+                            }
+                        }))
                         .toList();
                     scope.join().throwIfFailed();
                     return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
@@ -949,7 +949,7 @@ public class Conduits {
     
     public static <T> Conduit.StepSource<T> stepMergeSorted(List<? extends Conduit.StepSource<T>> sources,
                                                             Comparator<? super T> comparator) {
-        class MergeSorted implements Conduit.StepSource<T> {
+        class StepMergeSorted implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = -1;
             
@@ -991,17 +991,38 @@ public class Conduits {
             }
         }
         
-        return new MergeSorted();
+        return new StepMergeSorted();
     }
     
-    // TODO: mergeSorted
-    
-    private interface Accessor<X, Y> {
-        void setLatest1(X x);
-        void setLatest2(Y y);
-        X latest1();
-        Y latest2();
-    }
+//    public static <T> Conduit.Source<T> mergeSorted(List<? extends Conduit.Source<T>> sources,
+//                                                    Comparator<? super T> comparator) {
+//        class MergeSorted implements Conduit.Source<T> {
+//            @Override
+//            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+//                var stepSink = new Conduit.StepSink<T>() {
+//                    @Override
+//                    public boolean offer(T input) throws Exception {
+//
+//                    }
+//                };
+//
+//                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+//                    var tasks = sources.stream()
+//                        .map(source -> scope.fork(() -> source.drainToSink(stepSink)))
+//                        .toList();
+//                    scope.join().throwIfFailed();
+//                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
+//                }
+//            }
+//
+//            @Override
+//            public void close() throws Exception {
+//                parallelClose(sources);
+//            }
+//        }
+//
+//        return new MergeSorted();
+//    }
     
     public static <T1, T2, T> Conduit.StepSource<T> stepZip(Conduit.StepSource<T1> source1,
                                                             Conduit.StepSource<T2> source2,
@@ -1088,60 +1109,60 @@ public class Conduits {
                 }
             }
             
-            <X, Y> boolean runSource(Conduit.Source<X> source,
-                                  Accessor<X, Y> access,
-                                  Conduit.StepSink<? super T> sink) throws Exception {
-                return source.drainToSink(e -> {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return false;
-                        }
-                        access.setLatest1(e);
-                        if (access.latest2() == null) {
-                            do {
-                                ready.await();
-                                if (state >= COMPLETING) {
-                                    return false;
-                                }
-                            } while (access.latest1() != null);
-                            return true;
-                        }
-                        ready.signal();
-                        T t = Objects.requireNonNull(merger.apply(latest1, latest2));
-                        latest1 = null;
-                        latest2 = null;
-                        if (!sink.offer(t)) {
-                            state = COMPLETING;
-                            return false;
-                        }
-                        return true;
-                    } finally {
-                        lock.unlock();
-                    }
-                });
-            }
-
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
+                
+                abstract class HelperSink<X, Y> implements Conduit.StepSink<X> {
+                    @Override
+                    public boolean offer(X e) throws Exception {
+                        lock.lockInterruptibly();
+                        try {
+                            if (state >= COMPLETING) {
+                                return false;
+                            }
+                            setLatest1(e);
+                            if (latest2() == null) {
+                                do {
+                                    ready.await();
+                                    if (state >= COMPLETING) {
+                                        return false;
+                                    }
+                                } while (latest1() != null);
+                                return true;
+                            }
+                            ready.signal();
+                            T t = Objects.requireNonNull(merger.apply(latest1, latest2));
+                            latest1 = null;
+                            latest2 = null;
+                            if (!sink.offer(t)) {
+                                state = COMPLETING;
+                                return false;
+                            }
+                            return true;
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                    
+                    abstract void setLatest1(X x);
+                    abstract X latest1();
+                    abstract Y latest2();
+                }
+                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    var accessor1 = new Accessor<T1, T2>() {
-                        public void setLatest1(T1 t1) { latest1 = t1; }
-                        public void setLatest2(T2 t2) { latest2 = t2; }
-                        public T1 latest1() { return latest1; }
-                        public T2 latest2() { return latest2; }
-                    };
-                    var accessor2 = new Accessor<T2, T1>() {
-                        public void setLatest1(T2 t2) { latest2 = t2; }
-                        public void setLatest2(T1 t1) { latest1 = t1; }
-                        public T2 latest1() { return latest2; }
-                        public T1 latest2() { return latest1; }
-                    };
-                    var task1 = scope.fork(() -> runSource(source1, accessor1, sink));
-                    var task2 = scope.fork(() -> runSource(source2, accessor2, sink));
+                    var task1 = scope.fork(() -> source1.drainToSink(new HelperSink<>() {
+                        @Override void setLatest1(T1 t) { latest1 = t; }
+                        @Override T1 latest1() { return latest1; }
+                        @Override T2 latest2() { return latest2; }
+                    }));
+                    var task2 = scope.fork(() -> source2.drainToSink(new HelperSink<>() {
+                        @Override void setLatest1(T2 t) { latest2 = t; }
+                        @Override T2 latest1() { return latest2; }
+                        @Override T1 latest2() { return latest1; }
+                    }));
                     scope.join().throwIfFailed();
                     return task1.get() && task2.get();
                 }
@@ -1194,10 +1215,13 @@ public class Conduits {
                 }
             }
             
-            <X, Y> boolean runSource(Conduit.Source<X> source,
-                                  Accessor<X, Y> access,
-                                  Conduit.StepSink<? super T> sink) throws Exception {
-                return source.drainToSink(new Conduit.StepSink<>() {
+            @Override
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+                if (!STATE.compareAndSet(this, NEW, RUNNING)) {
+                    throw new IllegalStateException("source already consumed or closed");
+                }
+                
+                abstract class HelperSink<X, Y> implements Conduit.StepSink<X> {
                     boolean first = true;
                     
                     @Override
@@ -1216,19 +1240,19 @@ public class Conduits {
                                     return false;
                                 }
                                 // Wait until we have the first element from both sources
-                                access.setLatest1(e);
-                                if (access.latest2() == null) {
+                                setLatest1(e);
+                                if (latest2() == null) {
                                     do {
                                         ready.await();
                                         if (state >= COMPLETING) {
                                             return false;
                                         }
-                                    } while (access.latest2() == null);
+                                    } while (latest2() == null);
                                     return true; // First emission handled by other thread
                                 }
                                 ready.signal();
                             }
-                            access.setLatest1(e);
+                            setLatest1(e);
                             T t = Objects.requireNonNull(merger.apply(latest1, latest2));
                             if (!sink.offer(t)) {
                                 state = COMPLETING;
@@ -1239,29 +1263,20 @@ public class Conduits {
                             lock.unlock();
                         }
                     }
-                });
-            }
-            
-            @Override
-            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
-                if (!STATE.compareAndSet(this, NEW, RUNNING)) {
-                    throw new IllegalStateException("source already consumed or closed");
+                    
+                    abstract void setLatest1(X x);
+                    abstract Y latest2();
                 }
+                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    var accessor1 = new Accessor<T1, T2>() {
-                        public void setLatest1(T1 t1) { latest1 = t1; }
-                        public void setLatest2(T2 t2) { latest2 = t2; }
-                        public T1 latest1() { return latest1; }
-                        public T2 latest2() { return latest2; }
-                    };
-                    var accessor2 = new Accessor<T2, T1>() {
-                        public void setLatest1(T2 t2) { latest2 = t2; }
-                        public void setLatest2(T1 t1) { latest1 = t1; }
-                        public T2 latest1() { return latest2; }
-                        public T1 latest2() { return latest1; }
-                    };
-                    var task1 = scope.fork(() -> runSource(source1, accessor1, sink));
-                    var task2 = scope.fork(() -> runSource(source2, accessor2, sink));
+                    var task1 = scope.fork(() -> source1.drainToSink(new HelperSink<>() {
+                        @Override void setLatest1(T1 t) { latest1 = t; }
+                        @Override T2 latest2() { return latest2; }
+                    }));
+                    var task2 = scope.fork(() -> source2.drainToSink(new HelperSink<>() {
+                        @Override void setLatest1(T2 t) { latest2 = t; }
+                        @Override T1 latest2() { return latest1; }
+                    }));
                     scope.join().throwIfFailed();
                     return task1.get() && task2.get();
                 }
