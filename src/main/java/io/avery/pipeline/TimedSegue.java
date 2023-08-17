@@ -10,49 +10,47 @@ import java.util.concurrent.locks.ReentrantLock;
 public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
-        Instant onInit() throws Exception;
+        void onInit(SinkController ctl) throws Exception;
         void onOffer(SinkController ctl, In input) throws Exception;
         void onPoll(SourceController<Out> ctl) throws Exception;
         void onComplete(SinkController ctl, Throwable error) throws Exception;
     }
     
     public sealed interface SinkController {
-        void latchDeadline(Instant deadline);
-        boolean awaitAdvance() throws InterruptedException;
+        void latchSinkDeadline(Instant deadline);
+        void latchSourceDeadline(Instant deadline);
     }
     
     public sealed interface SourceController<T> {
-        void latchClose();
+        void latchSinkDeadline(Instant deadline);
+        void latchSourceDeadline(Instant deadline);
         void latchOutput(T output);
-        void latchDeadline(Instant deadline);
-        void signalAdvance();
+        void latchClose();
     }
     
     final Core<In, Out> core;
-    final ReentrantLock sinkLock = new ReentrantLock();
-    final ReentrantLock sourceLock = new ReentrantLock();
-    final Condition offered = sourceLock.newCondition();
-    final Condition polled = sourceLock.newCondition();
+    final ReentrantLock lock = new ReentrantLock();
+    final Condition readyForSource = lock.newCondition();
+    final Condition readyForSink = lock.newCondition();
     final Controller controller = new Controller();
-    Instant deadline = null;
-    Instant latchedDeadline = null;
+    Instant sinkDeadline = Instant.MIN;
+    Instant sourceDeadline = Instant.MAX;
+    Instant latchedSinkDeadline = null;
+    Instant latchedSourceDeadline = null;
     Out latchedOutput = null;
-    int ctl = 0; // We encode the remaining properties in 6 bits
+    int ctl = 0; // We encode the remaining properties in 5 bits
     
     //int state = NEW;
     //int access = NONE;
-    //boolean isSinkWaiting = false;
     //boolean latchedClose = false;
     
     private int state() { return ctl & 0x3; }
     private int access() { return ctl & 0xC; }
-    private boolean isSinkWaiting() { return (ctl & 0x10) != 0; }
-    private boolean latchedClose() { return (ctl & 0x20) != 0; }
+    private boolean latchedClose() { return (ctl & 0x10) != 0; }
     
     private void setState(int state) { ctl = (ctl & ~0x3) | state; }
     private void setAccess(int access) { ctl = (ctl & ~0xC) | access; }
-    private void setIsSinkWaiting(boolean b) { ctl = b ? (ctl | 0x10) : (ctl & ~0x10); }
-    private void setLatchedClose() { ctl = (ctl | 0x20); }
+    private void setLatchedClose(boolean val) { ctl = val ? (ctl | 0x10) : (ctl & ~0x10); }
     
     // Possible state transitions:
     // NEW -> RUNNING -> COMPLETING -> CLOSED
@@ -78,16 +76,24 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership
     private final class Controller implements SinkController, SourceController<Out> {
         @Override
-        public void latchDeadline(Instant deadline) {
-            if (access() < SOURCE || !sourceLock.isHeldByCurrentThread()) {
+        public void latchSinkDeadline(Instant deadline) {
+            if (access() < SOURCE || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
-            latchedDeadline = Objects.requireNonNull(deadline);
+            latchedSinkDeadline = Objects.requireNonNull(deadline);
+        }
+        
+        @Override
+        public void latchSourceDeadline(Instant deadline) {
+            if (access() < SOURCE || !lock.isHeldByCurrentThread()) {
+                throw new IllegalStateException();
+            }
+            latchedSourceDeadline = Objects.requireNonNull(deadline);
         }
         
         @Override
         public void latchOutput(Out output) {
-            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
+            if (access() != SOURCE || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
             latchedOutput = Objects.requireNonNull(output);
@@ -95,74 +101,52 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
         
         @Override
         public void latchClose() {
-            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
+            if (access() != SOURCE || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
-            setLatchedClose();
-        }
-        
-        @Override
-        public void signalAdvance() {
-            if (access() != SOURCE || !sourceLock.isHeldByCurrentThread()) {
-                throw new IllegalStateException();
-            }
-            setIsSinkWaiting(false);
-            polled.signal();
-        }
-        
-        @Override
-        public boolean awaitAdvance() throws InterruptedException {
-            if (access() != SINK || !sourceLock.isHeldByCurrentThread()) {
-                throw new IllegalStateException();
-            }
-            if (state() == CLOSED) {
-                return false;
-            }
-            // This may be overwritten while we wait, so save it to stack and restore after.
-            Instant savedDeadline = latchedDeadline;
-            
-            setIsSinkWaiting(true);
-            try {
-                do {
-                    polled.await();
-                    if (state() == CLOSED) {
-                        return false;
-                    }
-                }
-                while (isSinkWaiting());
-                return true;
-            } finally {
-                latchedDeadline = savedDeadline;
-                setAccess(SINK);
-            }
+            setLatchedClose(true);
         }
     }
     
     private void initIfNew() throws Exception {
-        //assert sourceLock.isHeldByCurrentThread();
+        //assert lock.isHeldByCurrentThread();
         if (state() == NEW) {
-            deadline = Objects.requireNonNull(core.onInit());
+            setAccess(SINK);
+            core.onInit(controller);
+            updateSinkDeadline();
+            updateSourceDeadline();
             setState(RUNNING);
         }
     }
     
-    private void updateDeadline() {
-        //assert sourceLock.isHeldByCurrentThread();
-        Instant nextDeadline = latchedDeadline;
+    private void updateSinkDeadline() {
+        //assert lock.isHeldByCurrentThread();
+        Instant nextDeadline = latchedSinkDeadline;
         if (nextDeadline != null) {
-            if (nextDeadline.isBefore(deadline)) {
-                offered.signalAll();
+            if (nextDeadline.isBefore(sinkDeadline)) {
+                readyForSink.signalAll();
             }
-            deadline = nextDeadline;
+            sinkDeadline = nextDeadline;
         }
     }
     
-    private boolean awaitDeadline() throws InterruptedException {
-        //assert sourceLock.isHeldByCurrentThread();
+    private void updateSourceDeadline() {
+        //assert lock.isHeldByCurrentThread();
+        Instant nextDeadline = latchedSourceDeadline;
+        if (nextDeadline != null) {
+            if (nextDeadline.isBefore(sourceDeadline)) {
+                readyForSource.signalAll();
+            }
+            sourceDeadline = nextDeadline;
+        }
+    }
+    
+    private boolean awaitSinkDeadline() throws InterruptedException {
+        //assert lock.isHeldByCurrentThread();
         Instant savedDeadline = null;
         long nanosRemaining = 0;
         for (;;) {
-            if (savedDeadline != (savedDeadline = deadline)) {
+            if (savedDeadline != (savedDeadline = sinkDeadline)) {
                 // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
                 if (savedDeadline == Instant.MIN) {
                     return true;
@@ -180,9 +164,42 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
             if (nanosRemaining <= 0) {
                 return true;
             } else if (nanosRemaining == Long.MAX_VALUE) {
-                offered.await();
+                readyForSink.await();
             } else {
-                nanosRemaining = offered.awaitNanos(nanosRemaining);
+                nanosRemaining = readyForSink.awaitNanos(nanosRemaining);
+            }
+            if (state() >= COMPLETING) {
+                return false;
+            }
+        }
+    }
+    
+    private boolean awaitSourceDeadline() throws InterruptedException {
+        //assert lock.isHeldByCurrentThread();
+        Instant savedDeadline = null;
+        long nanosRemaining = 0;
+        for (;;) {
+            if (savedDeadline != (savedDeadline = sourceDeadline)) {
+                // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
+                if (savedDeadline == Instant.MIN) {
+                    return true;
+                } else if (savedDeadline == Instant.MAX) {
+                    nanosRemaining = Long.MAX_VALUE;
+                } else {
+                    Instant now = core.clock().instant();
+                    try {
+                        nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
+                    } catch (ArithmeticException e) {
+                        nanosRemaining = now.isBefore(savedDeadline) ? Long.MAX_VALUE : 0;
+                    }
+                }
+            }
+            if (nanosRemaining <= 0) {
+                return true;
+            } else if (nanosRemaining == Long.MAX_VALUE) {
+                readyForSource.await();
+            } else {
+                nanosRemaining = readyForSource.awaitNanos(nanosRemaining);
             }
             if (state() == CLOSED) {
                 return false;
@@ -193,79 +210,71 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
     @Override
     public boolean offer(In input) throws Exception {
         Objects.requireNonNull(input);
-        sinkLock.lockInterruptibly();
+        lock.lockInterruptibly();
         try {
-            sourceLock.lockInterruptibly();
-            try {
-                if (state() >= COMPLETING) {
-                    return false;
-                }
-                initIfNew();
-                setAccess(SINK);
-                
-                core.onOffer(controller, input);
-                
-                if (state() == CLOSED) { // Possible if onOffer() called awaitSource()
-                    return false;
-                }
-                updateDeadline();
-                return true;
-            } finally {
-                latchedDeadline = null;
-                setAccess(NONE);
-                sourceLock.unlock();
+            if (state() >= COMPLETING) {
+                return false;
             }
+            initIfNew();
+            if (!awaitSinkDeadline()) {
+                return false;
+            }
+            setAccess(SINK);
+            
+            core.onOffer(controller, input);
+            
+            updateSinkDeadline();
+            updateSourceDeadline();
+            return true;
         } finally {
-            sinkLock.unlock();
+            latchedSinkDeadline = null;
+            latchedSourceDeadline = null;
+            setAccess(NONE);
+            lock.unlock();
         }
     }
     
     @Override
     public void complete(Throwable error) throws Exception {
-        sinkLock.lockInterruptibly();
+        lock.lockInterruptibly();
         try {
-            sourceLock.lockInterruptibly();
-            try {
-                if (state() >= COMPLETING) {
-                    return;
-                }
-                initIfNew();
-                setAccess(SINK);
-                
-                core.onComplete(controller, error);
-                
-                if (state() == CLOSED) { // Possible if onComplete() called awaitSource()
-                    return;
-                }
-                updateDeadline();
-                setState(COMPLETING);
-            } finally {
-                latchedDeadline = null;
-                setAccess(NONE);
-                sourceLock.unlock();
+            if (state() >= COMPLETING) {
+                return;
             }
+            initIfNew();
+            setAccess(SINK);
+            
+            core.onComplete(controller, error);
+            
+            updateSourceDeadline();
+            setState(COMPLETING);
+            readyForSink.signalAll();
         } finally {
-            sinkLock.unlock();
+            latchedSinkDeadline = null;
+            latchedSourceDeadline = null;
+            setAccess(NONE);
+            lock.unlock();
         }
     }
     
     @Override
     public Out poll() throws Exception {
         for (;;) {
-            sourceLock.lockInterruptibly();
+            lock.lockInterruptibly();
             try {
                 if (state() == CLOSED) {
                     return null;
                 }
                 initIfNew();
-                if (!awaitDeadline()) {
+                if (!awaitSourceDeadline()) {
                     return null;
                 }
                 setAccess(SOURCE);
                 
                 core.onPoll(controller);
                 
-                updateDeadline();
+                updateSinkDeadline();
+                updateSourceDeadline();
                 if (latchedClose()) {
                     close();
                 }
@@ -273,26 +282,28 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
                     return latchedOutput;
                 }
             } finally {
+                latchedSinkDeadline = null;
+                latchedSourceDeadline = null;
                 latchedOutput = null;
-                latchedDeadline = null;
+                setLatchedClose(false);
                 setAccess(NONE);
-                sourceLock.unlock();
+                lock.unlock();
             }
         }
     }
     
     @Override
     public void close() {
-        sourceLock.lock();
+        lock.lock();
         try {
             if (state() == CLOSED) {
                 return;
             }
             setState(CLOSED);
-            polled.signal(); // Wake sink blocked in awaitSource()
-            offered.signalAll(); // Wake sources blocked in awaitDeadline()
+            readyForSink.signalAll();
+            readyForSource.signalAll();
         } finally {
-            sourceLock.unlock();
+            lock.unlock();
         }
     }
 }

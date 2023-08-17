@@ -498,13 +498,14 @@ public class Conduits {
     //  In general, when/how can it be safe for close()/complete(err) to actually throw?
     //  Maybe ShutdownOnFailure is not the right scope for pipelines?
     
-    // TODO: Guards:
+    // TODO: Guards
     //  - Nullness (params and function results)
     //  - Bounds / Invariants
     //  - Mutability (Copy lists)
     // TODO: Correctness
     //  - Ensure proper locking, CAS, etc
     //  - Ensure consistent behavior across operator variants (eg [step]broadcast)
+    //  - Ensure exceptions are recoverable / undo partial action
     
     // Being able to compose/andThen internally within a Sink/Source mainly enables encapsulation of the boundary
     // asynchrony within drainFromSource/ToSink, at the cost of not being able to step (does not produce StepSink/Source).
@@ -1450,30 +1451,27 @@ public class Conduits {
         
         class Batch implements TimedSegue.Core<T, A> {
             A batch = null;
-            Instant currentDeadline = null;
             boolean done = false;
             Throwable err = null;
             
             @Override
-            public Instant onInit() {
-                return Instant.MAX;
-            }
+            public void onInit(TimedSegue.SinkController ctl) { }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
-                // Alternative implementations might adjust or reset the buffer instead of blocking
-                while (batch != null && currentDeadline == Instant.MIN) {
-                    if (!ctl.awaitAdvance()) {
-                        return;
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
+                A b = batch;
+                if (b == null) {
+                    b = Objects.requireNonNull(batchSupplier.get());
+                }
+                accumulator.accept(b, input);
+                Instant deadline = deadlineMapper.apply(b).orElse(null);
+                batch = b; // No more exception risk -- assign batch
+                if (deadline != null) {
+                    ctl.latchSourceDeadline(deadline);
+                    if (deadline == Instant.MIN) {
+                        // Alternative implementations might adjust or reset the buffer instead of blocking
+                        ctl.latchSinkDeadline(Instant.MAX);
                     }
-                }
-                if (batch == null) {
-                    batch = Objects.requireNonNull(batchSupplier.get());
-                }
-                accumulator.accept(batch, input);
-                currentDeadline = deadlineMapper.apply(batch).orElse(null);
-                if (currentDeadline != null) {
-                    ctl.latchDeadline(currentDeadline);
                 }
             }
             
@@ -1490,16 +1488,15 @@ public class Conduits {
                 }
                 ctl.latchOutput(batch);
                 batch = null;
-                currentDeadline = null;
-                ctl.latchDeadline(Instant.MAX);
-                ctl.signalAdvance();
+                ctl.latchSourceDeadline(Instant.MAX);
+                ctl.latchSinkDeadline(Instant.MIN);
             }
             
             @Override
             public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
-                ctl.latchDeadline(Instant.MIN);
+                ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
@@ -1538,29 +1535,25 @@ public class Conduits {
             Throwable err = null;
             
             @Override
-            public Instant onInit() {
+            public void onInit(TimedSegue.SinkController ctl) {
                 queue = new ArrayDeque<>();
                 lastObservedAccrual = clock().instant();
-                return Instant.MAX;
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
-                // Optional blocking for boundedness, here based on cost rather than queue size
-                while (cost >= costLimit) {
-                    if (!ctl.awaitAdvance()) {
-                        return;
-                    }
-                }
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
                 long elementCost = costMapper.applyAsLong(input);
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
-                cost = Math.addExact(cost, elementCost);
+                if ((cost = Math.addExact(cost, elementCost)) >= costLimit) {
+                    // Optional blocking for boundedness, here based on cost rather than queue size
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
-                    ctl.latchDeadline(Instant.MIN); // Let source-side do token math
+                    ctl.latchSourceDeadline(Instant.MIN); // Let source-side do token math
                 }
             }
             
@@ -1589,27 +1582,26 @@ public class Conduits {
                     tokens -= head.cost;
                     cost -= head.cost;
                     queue.poll();
-                    ctl.signalAdvance();
+                    ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head.element);
                     head = queue.peek();
-                    if (head != null) {
-                        if (tokens >= head.cost) {
-                            ctl.latchDeadline(Instant.MIN);
-                            return;
+                    if (head == null) {
+                        if (done) {
+                            ctl.latchClose();
+                        } else {
+                            ctl.latchSourceDeadline(Instant.MAX);
                         }
-                        // Fall-through to scheduling!
-                    } else if (!done) {
-                        ctl.latchDeadline(Instant.MAX);
                         return;
-                    } else {
-                        ctl.latchClose();
+                    } else if (tokens >= head.cost) {
+                        ctl.latchSourceDeadline(Instant.MIN);
                         return;
                     }
+                    // else tokens < head.cost; Fall-through to scheduling
                 }
                 // Schedule to wake up when we have enough tokens for next emission
                 tempTokenLimit = head.cost;
                 long tokensNeeded = head.cost - tokens;
-                ctl.latchDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
+                ctl.latchSourceDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
             }
             
             @Override
@@ -1617,7 +1609,7 @@ public class Conduits {
                 err = error;
                 done = true;
                 if (error != null || queue.isEmpty()) {
-                    ctl.latchDeadline(Instant.MIN);
+                    ctl.latchSourceDeadline(Instant.MIN);
                 }
             }
         }
@@ -1639,23 +1631,20 @@ public class Conduits {
             Throwable err = null;
             
             @Override
-            public Instant onInit() {
+            public void onInit(TimedSegue.SinkController ctl) {
                 pq = new PriorityQueue<>(bufferLimit);
-                return Instant.MAX;
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
-                while (pq.size() >= bufferLimit) {
-                    if (!ctl.awaitAdvance()) {
-                        return;
-                    }
-                }
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
                 Instant deadline = Objects.requireNonNull(deadlineMapper.apply(input));
                 Expiring<T> e = new Expiring<>(input, deadline);
                 pq.offer(e);
                 if (pq.peek() == e) {
-                    ctl.latchDeadline(deadline);
+                    ctl.latchSourceDeadline(deadline);
+                }
+                if (pq.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
                 }
             }
             
@@ -1669,13 +1658,13 @@ public class Conduits {
                     ctl.latchClose();
                     return;
                 }
-                ctl.signalAdvance();
+                ctl.latchSinkDeadline(Instant.MIN);
                 ctl.latchOutput(head.element);
                 head = pq.peek();
                 if (head != null) {
-                    ctl.latchDeadline(head.deadline);
+                    ctl.latchSourceDeadline(head.deadline);
                 } else if (!done) {
-                    ctl.latchDeadline(Instant.MAX);
+                    ctl.latchSourceDeadline(Instant.MAX);
                 } else {
                     ctl.latchClose();
                 }
@@ -1686,7 +1675,7 @@ public class Conduits {
                 err = error;
                 done = true;
                 if (error != null || pq.isEmpty()) {
-                    ctl.latchDeadline(Instant.MIN);
+                    ctl.latchSourceDeadline(Instant.MIN);
                 }
             }
         }
@@ -1713,20 +1702,18 @@ public class Conduits {
             Throwable err = null;
             
             @Override
-            public Instant onInit() {
+            public void onInit(TimedSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
-                return clock().instant().plus(timeout);
+                ctl.latchSourceDeadline(clock().instant().plus(timeout));
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
-                while (queue.size() >= bufferLimit) {
-                    if (!ctl.awaitAdvance()) {
-                        return;
-                    }
-                }
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
                 queue.offer(input);
-                ctl.latchDeadline(Instant.MIN);
+                ctl.latchSourceDeadline(Instant.MIN);
+                if (queue.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
             }
             
             @Override
@@ -1736,12 +1723,12 @@ public class Conduits {
                 }
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.signalAdvance();
+                    ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head);
-                    ctl.latchDeadline((!queue.isEmpty() || done) ? Instant.MIN : clock().instant().plus(timeout));
+                    ctl.latchSourceDeadline((!queue.isEmpty() || done) ? Instant.MIN : clock().instant().plus(timeout));
                 } else if (!done) {
-                    ctl.latchOutput(extraSupplier.get());
-                    ctl.latchDeadline(clock().instant().plus(timeout));
+                    ctl.latchOutput(extraSupplier.get()); // TODO: May throw
+                    ctl.latchSourceDeadline(clock().instant().plus(timeout));
                 } else {
                     ctl.latchClose();
                 }
@@ -1751,7 +1738,7 @@ public class Conduits {
             public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
-                ctl.latchDeadline(Instant.MIN);
+                ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
@@ -1774,25 +1761,24 @@ public class Conduits {
             Throwable err = null;
             
             @Override
-            public Instant onInit() {
+            public void onInit(TimedSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
                 if (initial != null) {
                     queue.offer(initial);
-                    return Instant.MIN;
+                    ctl.latchSourceDeadline(Instant.MIN);
+                } else {
+                    ctl.latchSourceDeadline(Instant.MAX);
                 }
-                return Instant.MAX;
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) throws InterruptedException {
-                while (queue.size() >= bufferLimit) {
-                    if (!ctl.awaitAdvance()) {
-                        return;
-                    }
-                }
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
                 queue.offer(input);
                 iter = null;
-                ctl.latchDeadline(Instant.MIN);
+                ctl.latchSourceDeadline(Instant.MIN);
+                if (queue.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
             }
             
             @Override
@@ -1802,19 +1788,19 @@ public class Conduits {
                 }
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.signalAdvance();
+                    ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (queue.peek() != null) {
-                        ctl.latchDeadline(Instant.MIN);
+                        ctl.latchSourceDeadline(Instant.MIN);
                     } else if (!done) {
-                        iter = Objects.requireNonNull(mapper.apply(head));
-                        ctl.latchDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                        iter = Objects.requireNonNull(mapper.apply(head)); // TODO: May throw
+                        ctl.latchSourceDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
                     } else {
                         ctl.latchClose();
                     }
                 } else if (!done) {
                     ctl.latchOutput(iter.next());
-                    ctl.latchDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                    ctl.latchSourceDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
                 } else {
                     ctl.latchClose();
                 }
@@ -1824,7 +1810,7 @@ public class Conduits {
             public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
                 err = error;
                 done = true;
-                ctl.latchDeadline(Instant.MIN);
+                ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
