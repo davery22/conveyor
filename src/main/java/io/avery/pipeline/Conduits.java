@@ -31,7 +31,7 @@ public class Conduits {
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
-        final Conduit.StepSink<T> conduit;
+        final Conduit.StepSink<T> stage;
         final Gatherer.Sink<T> gsink;
         A acc = null;
         int state = NEW;
@@ -44,10 +44,10 @@ public class Conduits {
             this.supplier = gatherer.supplier();
             this.integrator = gatherer.integrator();
             this.finisher = gatherer.finisher();
-            this.conduit = Objects.requireNonNull(sink);
+            this.stage = Objects.requireNonNull(sink);
             this.gsink = el -> {
                 try {
-                    return conduit().offer(el);
+                    return stage().offer(el);
                 } catch (Error | RuntimeException e) {
                     throw e;
                 } catch (Exception e) {
@@ -62,8 +62,8 @@ public class Conduits {
             };
         }
         
-        Conduit.StepSink<T> conduit() {
-            return conduit;
+        Conduit.StepSink<T> stage() {
+            return stage;
         }
         
         void initIfNew() {
@@ -108,7 +108,7 @@ public class Conduits {
                 if (error == null) {
                     finisher.accept(acc, gsink);
                 }
-                conduit().complete(error);
+                stage().complete(error);
                 state = COMPLETED;
             } catch (WrappingException e) {
                 if (e.getCause() instanceof InterruptedException) {
@@ -127,18 +127,18 @@ public class Conduits {
         }
         
         @Override
-        Conduit.Segue<T, Out> conduit() {
-            return (Conduit.Segue<T, Out>) conduit;
+        Conduit.Segue<T, Out> stage() {
+            return (Conduit.Segue<T, Out>) stage;
         }
         
         @Override
         public Out poll() throws Exception {
-            return conduit().poll();
+            return stage().poll();
         }
         
         @Override
         public void close() throws Exception {
-            conduit().close();
+            stage().close();
         }
     }
     
@@ -266,6 +266,7 @@ public class Conduits {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     class HelperSource implements Conduit.StepSource<T> {
                         @Override
+                        @SuppressWarnings("unchecked")
                         public T poll() throws Exception {
                             for (;;) {
                                 Object out = segue.poll();
@@ -307,6 +308,75 @@ public class Conduits {
         }
         
         return new FusedSink();
+    }
+    
+    public static <In, T> Conduit.Sink<In> compose(Conduit.Sink<T> sink, Conduit.Segue<In, T> segue) {
+        class FusedSink implements Conduit.Sink<In> {
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var task1 = scope.fork(() -> {
+                        // TODO: Should complete() return boolean?
+                        boolean drained = false;
+                        try {
+                            drained = source.drainToSink(segue);
+                            segue.complete(null);
+                        } catch (Throwable e) {
+                            segue.complete(e);
+                        }
+                        return drained;
+                    });
+                    var task2 = scope.fork(() -> {
+                        try (segue) {
+                            return sink.drainFromSource(segue);
+                        }
+                    });
+                    scope.join().throwIfFailed();
+                    return task1.get() && task2.get();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                sink.complete(error);
+            }
+        }
+        
+        return new FusedSink();
+    }
+    
+    public static <T, Out> Conduit.Source<Out> andThen(Conduit.Source<T> source, Conduit.Segue<T, Out> segue) {
+        class FusedSource implements Conduit.Source<Out> {
+            @Override
+            public boolean drainToSink(Conduit.StepSink<? super Out> sink) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var task1 = scope.fork(() -> {
+                        boolean drained = false;
+                        try {
+                            drained = source.drainToSink(segue);
+                            segue.complete(null);
+                        } catch (Throwable e) {
+                            segue.complete(e);
+                        }
+                        return drained;
+                    });
+                    var task2 = scope.fork(() -> {
+                        try (segue) {
+                            return sink.drainFromSource(segue);
+                        }
+                    });
+                    scope.join().throwIfFailed();
+                    return task1.get() && task2.get();
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                source.close();
+            }
+        }
+        
+        return new FusedSource();
     }
     
     // concat() could work by creating a Conduit.Source that switches between 2 Conduit.Sources,
@@ -375,10 +445,10 @@ public class Conduits {
     // would not work, because correct behavior means that we should re-poll each source as soon as its previous poll
     // finishes, since sources may emit at different rates.
     
-    // Non-step from step     - ALWAYS(?) possible
-    // Non-step from non-step - ALWAYS(?) possible
-    // Step from step         - SOMETIMES possible
+    // Non-step from non-step - ALWAYS possible - At worst, can reuse 'Step from step' impl with Segues
+    // Non-step from step     - ALWAYS possible - See above
     // Step from non-step     - NEVER possible
+    // Step from step         - SOMETIMES possible
     
     // Streams tend to be a good approach to parallelism when the source can be split
     //  - Run the whole pipeline on each split of the source, in its own thread
@@ -427,6 +497,22 @@ public class Conduits {
     // TODO: What about eg balance(), where one of several Sinks might be synchronous, causing a throw...
     //  In general, when/how can it be safe for close()/complete(err) to actually throw?
     //  Maybe ShutdownOnFailure is not the right scope for pipelines?
+    
+    // TODO: Guards:
+    //  - Nullness (params and function results)
+    //  - Bounds / Invariants
+    //  - Mutability (Copy lists)
+    // TODO: Correctness
+    //  - Ensure proper locking, CAS, etc
+    //  - Ensure consistent behavior across operator variants (eg [step]broadcast)
+    
+    // Being able to compose/andThen internally within a Sink/Source mainly enables encapsulation of the boundary
+    // asynchrony within drainFromSource/ToSink, at the cost of not being able to step (does not produce StepSink/Source).
+    // People will always be able to write Sinks/Sources this way, even if we extract boundary async to Pipelines.
+    // (Likewise, people will always be able to extend Sinks/Sources with 'drainWithin'-style methods, even if we have
+    // Pipelines. This would kind of violate Liskov substitution though.)
+    // It's not clear if this encapsulation is worth it for 1:1 operators. It may be more worth it for fan-in/out
+    // operators? In those cases, setting up + forking a Pipeline for each input Source/Sink may be a larger ordeal.
     
     
     // --- Sinks ---
@@ -731,6 +817,8 @@ public class Conduits {
         return new Balance();
     }
     
+    // TODO: stepBroadcast cancels when ANY sink cancels, but broadcast cancels when ALL sinks cancel
+    
     public static <T> Conduit.StepSink<T> stepBroadcast(List<? extends Conduit.StepSink<T>> sinks) {
         class StepBroadcast implements Conduit.StepSink<T> {
             @Override
@@ -752,6 +840,24 @@ public class Conduits {
         
         return new StepBroadcast();
     }
+    
+    // Current broadcast:
+    //  - drainFromSource = 1 thread PER sink (sink.drainFromSource(helperSource))
+    //  - each sink tries to poll the same source, blocks if it gets ahead of other sinks
+    // Alternative broadcast:
+    //  - drainFromSource = 1 buffer for each sink;
+    //                      1 thread for source.drainToSink(stepBroadcast(buffers)) [+ 1 thread PER buffer PER offer]
+    //                    + 1 thread PER sink (sink.drainFromSource(buffer))
+    //  - source offers to buffers, sinks poll from buffers
+    //  - each sink tries to poll its own buffer, blocks if its buffer empties (indicating other sinks' buffers are full, source cannot offer)
+    
+    // We can generally do arbitrary things between 1 (or N) source(s) and 1 (or M) sink(s).
+    //
+    // In Sink.drainFromSource(StepSource), we can run a Segue, then StepSource.poll -> Segue.offer | Sink.drainFromSource(Segue)
+    //  - Makes a new Sink that chains before the original Sink, like Sink.compose(Segue) but not a StepSink
+    //
+    // In Source.drainToSink(StepSink),     we can run a Segue, then Source.drainToSink(Segue) | Segue.poll -> StepSink.offer
+    //  - Makes a new Source that chains after the original Source, like Source.andThen(Segue) but not a StepSource
     
     public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
         class Broadcast implements Conduit.Sink<T> {
@@ -795,11 +901,11 @@ public class Conduits {
                             }
                             bitSet.set(pos);
                             int seen = bitSet.cardinality();
-                            if (seen == 1) {
-                                // First-one-in - Poll
-                                done = (current = source.poll()) == null;
-                            }
-                            if (seen == count) {
+                            if (seen == 1 && (current = source.poll()) == null) {
+                                // First-one-in - Polled
+                                done = true;
+                                ready.signalAll();
+                            } else if (seen == count) {
                                 // Last-one-in - Wake up others for next round
                                 bitSet.clear();
                                 ready.signalAll();
@@ -853,18 +959,23 @@ public class Conduits {
             @Override
             public boolean offer(T input) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    IntConsumer router = i -> {
-                        var sink = sinks.get(i); // Note: Can throw IOOBE
-                        scope.fork(() -> {
-                            // TODO: Check return - handle cancel
-                            sink.offer(input);
-                            return null;
-                        });
-                    };
-                    selector.accept(input, router); // Note: User-defined callback can throw exception
+                    List<StructuredTaskScope.Subtask<Boolean>> tasks = new ArrayList<>();
+                    try {
+                        IntConsumer router = i -> {
+                            var sink = sinks.get(i); // Note: Can throw IOOBE
+                            tasks.add(scope.fork(() -> sink.offer(input)));
+                        };
+                        selector.accept(input, router); // Note: User-defined callback can throw exception
+                    } catch (Error | Exception e) {
+                        scope.shutdown();
+                        throw e;
+                    }
                     scope.join().throwIfFailed();
+                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
+                    // TODO: This returns false when ANY sink cancels,
+                    //  but the sink that cancelled may not be selected in subsequent offers,
+                    //  causing return true again.
                 }
-                return true; // TODO: Unless any/all sinks have cancelled
             }
             
             @Override
@@ -997,18 +1108,45 @@ public class Conduits {
 //    public static <T> Conduit.Source<T> mergeSorted(List<? extends Conduit.Source<T>> sources,
 //                                                    Comparator<? super T> comparator) {
 //        class MergeSorted implements Conduit.Source<T> {
+//            final ReentrantLock lock = new ReentrantLock();
+//            final Condition ready = lock.newCondition();
+//            final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
+//
 //            @Override
 //            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
-//                var stepSink = new Conduit.StepSink<T>() {
+//                class HelperSink implements Conduit.StepSink<T> {
+//                    final int pos;
+//
+//                    HelperSink(int pos) {
+//                        this.pos = pos;
+//                    }
+//
+//                    // TODO: We could probably be speedier by keeping our own buffer for each source, so that the source
+//                    //  has more work to do when we wake it up. But if we did that, we would essentially have StepSources
+//                    //  as input, and this would reduce to stepMergeSorted. This would also imply that something is
+//                    //  externally driving the original Sources to feed the buffers (Source -> StepSink | StepSource ->)
+//                    //  -
+//                    //  If I made the buffers (Segues) internally, I could actually keep the signature the same and run
+//                    //  everything inside drainToSink:
+//                    //   - fork(() -> source.drainToSink(buffer))*
+//                    //   - fork(() -> stepMergeSorted(buffers, comp).drainToSink(sink))
+//
 //                    @Override
 //                    public boolean offer(T input) throws Exception {
-//
+//                        lock.lockInterruptibly();
+//                        try {
+//                            // If this is the first round, wait for everyone to offer
+//                            // If we are the last to offer, poll latest for min, wake up index to offer downstream
+//                            latest.offer(new Indexed<>(input, pos));
+//                        } finally {
+//                            lock.unlock();
+//                        }
 //                    }
-//                };
+//                }
 //
 //                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//                    var tasks = sources.stream()
-//                        .map(source -> scope.fork(() -> source.drainToSink(stepSink)))
+//                    var tasks = IntStream.range(0, sources.size())
+//                        .mapToObj(i -> scope.fork(() -> sources.get(i).drainToSink(new HelperSink(i))))
 //                        .toList();
 //                    scope.join().throwIfFailed();
 //                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
@@ -1808,8 +1946,8 @@ public class Conduits {
             this.sink = sink;
         }
         
-        @SuppressWarnings({"unchecked", "rawtypes"})
         @Override
+        @SuppressWarnings({"unchecked", "rawtypes"})
         public void drainWithin(Consumer<Callable<?>> fork) {
             source.drainWithin(fork);
             fork.accept(() -> {
