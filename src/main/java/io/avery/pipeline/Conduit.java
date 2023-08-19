@@ -1,6 +1,5 @@
 package io.avery.pipeline;
 
-import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -10,14 +9,14 @@ public class Conduit {
     private Conduit() {}
     
     public interface Stage {
-        default void drainWithin(Consumer<Callable<?>> fork) {}
+        default <T> void run(BiConsumer<Source<T>, Sink<T>> connector) { }
     }
     
     @FunctionalInterface
     public interface Source<Out> extends Stage, AutoCloseable {
         boolean drainToSink(StepSink<? super Out> sink) throws Exception;
         
-        default void close() throws Exception {}
+        default void close() throws Exception { }
         
         default void forEach(Consumer<? super Out> action) throws Exception {
             class ConsumerSink implements StepSink<Out> {

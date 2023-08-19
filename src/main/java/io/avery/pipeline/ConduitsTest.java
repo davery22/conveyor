@@ -2,8 +2,10 @@ package io.avery.pipeline;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
 import java.util.Scanner;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
@@ -15,47 +17,61 @@ import java.util.stream.Stream;
 class ConduitsTest {
     // TODO: Remove
     public static void main(String[] args) throws Exception {
-        test2();
+        test1();
+//        test2();
+//        testBidi();
+
+//        try (var in = new Scanner(System.in)) {
+//            for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
+//                System.out.println(line);
+//            }
+//        }
     }
     
-    public static void test2() throws Exception {
+    static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
             var buffer = ConduitsTest.buffer(10);
+            var lines = Stream.generate(new Scanner(System.in)::nextLine)
+                .takeWhile(line -> !"stop".equalsIgnoreCase(line))
+                .iterator();
             
             Conduits
-                .<String>source(sink -> {
-                    try (var in = new Scanner(System.in)) {
-                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
-                            if (!sink.offer(line)) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    }
-                })
-                .andThen(ConduitsTest.buffer(4))
+                .stepSource(() -> lines.hasNext() ? lines.next() : null)
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s,
                     buffer
                 ))
+                .run(Conduits.drainToCompletion(scope::fork));
+            buffer
+                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
+                .run(Conduits.drainToCompletion(scope::fork));
+            
+            scope.join().throwIfFailed();
+
+//            Conduits
+//                .<String>source(sink -> {
+//                    try (var in = new Scanner(System.in)) {
+//                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
+//                            if (!sink.offer(line)) {
+//                                return false;
+//                            }
+//                        }
+//                        return true;
+//                    }
+//                })
+//                .andThen(ConduitsTest.buffer(4))
 //                .andThen(Conduits.balance(
 //                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
 //                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
 //                        buffer
 //                    )).toList()
 //                ))
-                .drainWithin(scope::fork);
-            buffer
-                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .drainWithin(scope::fork);
-            
-            scope.join().throwIfFailed();
         }
     }
     
-    public static void test1() throws Exception {
+    static void test2() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 //            var segue = Conduits.stepFuse(
 //                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
@@ -106,14 +122,37 @@ class ConduitsTest {
                         100
                     )
                 ))
-//                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
                     16,
                     source -> { source.forEach(System.out::println); return true; }
                 ))
-                .drainWithin(scope::fork);
+                .run(Conduits.drainToCompletion(scope::fork));
             
+            scope.join().throwIfFailed();
+        }
+    }
+    
+    static void testBidi() throws InterruptedException, ExecutionException {
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            var buffer = Conduits.extrapolate(0, e -> Collections.emptyIterator(), 256);
+            var probe = Conduits.<Integer>source(sink -> {
+                try (var in = new Scanner(System.in)) {
+                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
+                        if (!sink.offer(line.length())) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+            });
+            Conduits
+                .zip(buffer, probe, Integer::sum)
+                .andThen(Conduits.stepBroadcast(List.of(
+                    buffer,
+                    Conduits.stepSink(e -> { System.out.println(e); return true; })
+                )))
+                .run(Conduits.drainToCompletion(scope::fork));
             scope.join().throwIfFailed();
         }
     }

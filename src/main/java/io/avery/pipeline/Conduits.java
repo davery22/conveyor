@@ -8,6 +8,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.IntStream;
@@ -313,26 +314,10 @@ public class Conduits {
     public static <In, T> Conduit.Sink<In> compose(Conduit.Sink<T> sink, Conduit.Segue<In, T> segue) {
         class FusedSink implements Conduit.Sink<In> {
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends In> source) {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    var task1 = scope.fork(() -> {
-                        // TODO: Should complete() return boolean?
-                        boolean drained = false;
-                        try {
-                            drained = source.drainToSink(segue);
-                            segue.complete(null);
-                        } catch (Throwable e) {
-                            segue.complete(e);
-                        }
-                        return drained;
-                    });
-                    var task2 = scope.fork(() -> {
-                        try (segue) {
-                            return sink.drainFromSource(segue);
-                        }
-                    });
-                    scope.join().throwIfFailed();
-                    return task1.get() && task2.get();
+                    source.andThen(segue).andThen(sink).run(drainToCompletion(scope::fork));
+                    return false;
                 }
             }
             
@@ -348,25 +333,10 @@ public class Conduits {
     public static <T, Out> Conduit.Source<Out> andThen(Conduit.Source<T> source, Conduit.Segue<T, Out> segue) {
         class FusedSource implements Conduit.Source<Out> {
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super Out> sink) throws Exception {
+            public boolean drainToSink(Conduit.StepSink<? super Out> sink) {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    var task1 = scope.fork(() -> {
-                        boolean drained = false;
-                        try {
-                            drained = source.drainToSink(segue);
-                            segue.complete(null);
-                        } catch (Throwable e) {
-                            segue.complete(e);
-                        }
-                        return drained;
-                    });
-                    var task2 = scope.fork(() -> {
-                        try (segue) {
-                            return sink.drainFromSource(segue);
-                        }
-                    });
-                    scope.join().throwIfFailed();
-                    return task1.get() && task2.get();
+                    source.andThen(segue).andThen(sink).run(drainToCompletion(scope::fork));
+                    return false;
                 }
             }
             
@@ -447,8 +417,9 @@ public class Conduits {
     
     // Non-step from non-step - ALWAYS possible - At worst, can reuse 'Step from step' impl with Segues
     // Non-step from step     - ALWAYS possible - See above
-    // Step from non-step     - NEVER possible
-    // Step from step         - SOMETIMES possible
+    // Step from non-step     - NEVER possible - Requires external asynchrony to pause draining, or unbounded buffering
+    //                                           (possible using other buffer-overflow handling, eg error, drop)
+    // Step from step         - SOMETIMES possible - If asynchrony is scoped to the poll/offer, or buffering is bounded
     
     // Streams tend to be a good approach to parallelism when the source can be split
     //  - Run the whole pipeline on each split of the source, in its own thread
@@ -505,15 +476,31 @@ public class Conduits {
     // TODO: Correctness
     //  - Ensure proper locking, CAS, etc
     //  - Ensure consistent behavior across operator variants (eg [step]broadcast)
-    //  - Ensure exceptions are recoverable / undo partial action
+    //  - Ensure exceptions are recoverable / avoid partial effects
     
     // Being able to compose/andThen internally within a Sink/Source mainly enables encapsulation of the boundary
     // asynchrony within drainFromSource/ToSink, at the cost of not being able to step (does not produce StepSink/Source).
     // People will always be able to write Sinks/Sources this way, even if we extract boundary async to Pipelines.
-    // (Likewise, people will always be able to extend Sinks/Sources with 'drainWithin'-style methods, even if we have
+    // (Likewise, people will always be able to extend Sinks/Sources with 'run'-style methods, even if we have
     // Pipelines. This would kind of violate Liskov substitution though.)
     // It's not clear if this encapsulation is worth it for 1:1 operators. It may be more worth it for fan-in/out
     // operators? In those cases, setting up + forking a Pipeline for each input Source/Sink may be a larger ordeal.
+    
+    // TimedSegue design
+    //  - Using deadlines on both sides to avoid the need for direct management of Conditions, timed waits, etc
+    //  - Latching deadlines and waiting at the start of offer/poll, to avoid the need for more locks, and make error recovery possible
+    //    - This means that some use cases, like 'transfer' (wait after updating state) and 'offer multiple' (update + wait multiple times), are inexpressible
+    //    - This is by design - aiming for simplicity for common cases, rather than maximum expressiveness or optimal performance
+    
+    // About chaining Sink -> StepSource, or StepSink -> Source:
+    //  - It's reasonable to describe these as separate pipelines, eg
+    //    - SOURCE.andThen(sinkFactory(buffer)).run(...); | buffer.andThen(SINK).run(...)
+    //  - Methods like .andThen(sink, buffer) make sense on (closed) Stages, but not all Stages, breaking inheritance
+    //    - Not to mention the buffer must be part of the sink; need a 'extends Sink and StepSource'-builder
+    //    - Such types would add complexity that doesn't pull its weight
+    //    - Such types still wouldn't be able to model fan-in/out situations
+    
+    // TODO: Add scope + thread names
     
     
     // --- Sinks ---
@@ -534,6 +521,7 @@ public class Conduits {
         return mapBalanceOrdered(mapper, IntStream.range(0, parallelism).mapToObj(i -> sink).toList());
     }
     
+    // TODO: Do better
     public static <T, P, U> Conduit.Sink<T> mapBalancePartitioned(Function<? super T, P> classifier,
                                                                   BiFunction<? super T, ? super P, ? extends Callable<U>> mapper,
                                                                   List<? extends Conduit.Sink<U>> sinks,
@@ -1889,6 +1877,42 @@ public class Conduits {
         return sink;
     }
     
+    public static <T> Conduit.StepSource<T> stepSource(Conduit.StepSource<T> source) {
+        return source;
+    }
+    
+    public static <T> Conduit.StepSink<T> stepSink(Conduit.StepSink<T> sink) {
+        return sink;
+    }
+    
+    public static <T> BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> drainToCompletion(Consumer<Callable<?>> fork) {
+        Objects.requireNonNull(fork);
+        class DrainToCompletion implements BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> {
+            // What would a boolean return here be signalling? That no sinks cancelled? That all sources completed?
+            @Override
+            public void accept(Conduit.Source<T> source, Conduit.Sink<T> sink) {
+                source.run(this);
+                fork.accept(() -> {
+                    try (source) {
+                        if (sink instanceof Conduit.StepSink<T> ss) {
+                            source.drainToSink(ss);
+                        } else if (source instanceof Conduit.StepSource<T> ss) {
+                            sink.drainFromSource(ss);
+                        } else {
+                            throw new IllegalArgumentException("source must be StepSource or sink must be StepSink");
+                        }
+                        sink.complete(null);
+                    } catch (Throwable error) {
+                        sink.complete(error);
+                    }
+                    return null;
+                });
+                sink.run(this);
+            }
+        }
+        return new DrainToCompletion();
+    }
+    
     private static class Indexed<T> {
         final T element;
         final int index;
@@ -1933,23 +1957,9 @@ public class Conduits {
         }
         
         @Override
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        public void drainWithin(Consumer<Callable<?>> fork) {
-            source.drainWithin(fork);
-            fork.accept(() -> {
-                try (source) {
-                    if (sink instanceof Conduit.StepSink ss) {
-                        source.drainToSink(ss);
-                    } else {
-                        sink.drainFromSource((Conduit.StepSource) source);
-                    }
-                    sink.complete(null);
-                } catch (Throwable error) {
-                    sink.complete(error);
-                }
-                return null;
-            });
-            sink.drainWithin(fork);
+        @SuppressWarnings("unchecked")
+        public <T> void run(BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> connector) {
+            connector.accept((Conduit.Source<T>) source, (Conduit.Sink<T>) sink);
         }
 
         Conduit.Source<?> first() {
