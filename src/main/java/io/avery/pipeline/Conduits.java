@@ -8,7 +8,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.IntStream;
@@ -314,9 +313,23 @@ public class Conduits {
     public static <In, T> Conduit.Sink<In> compose(Conduit.Sink<T> sink, Conduit.Segue<In, T> segue) {
         class FusedSink implements Conduit.Sink<In> {
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends In> source) {
+            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    source.andThen(segue).andThen(sink).run(drainToCompletion(scope::fork));
+                    scope.fork(() -> {
+                        try {
+                            source.drainToSink(segue);
+                            segue.complete(null);
+                        } catch (Throwable e) {
+                            segue.complete(e);
+                        }
+                        return null;
+                    });
+                    scope.fork(() -> {
+                        try (segue) {
+                            return sink.drainFromSource(segue);
+                        }
+                    });
+                    scope.join().throwIfFailed();
                     return false;
                 }
             }
@@ -333,9 +346,26 @@ public class Conduits {
     public static <T, Out> Conduit.Source<Out> andThen(Conduit.Source<T> source, Conduit.Segue<T, Out> segue) {
         class FusedSource implements Conduit.Source<Out> {
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super Out> sink) {
+            public boolean drainToSink(Conduit.StepSink<? super Out> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    source.andThen(segue).andThen(sink).run(drainToCompletion(scope::fork));
+                    source.andThen(segue).run(drainToCompletion(scope::fork));
+                    scope.fork(() -> {
+                        try {
+                            source.drainToSink(segue);
+                            segue.complete(null);
+                        } catch (Throwable e) {
+                            segue.complete(e);
+                        }
+                        return null;
+                    });
+                    scope.fork(() -> {
+                        // TODO: Is it right to just let this throw, instead of letting the sink potentially handle?
+                        //  Yes; we expect that the caller will be catching the exception and completing the sink
+                        try (segue) {
+                            return sink.drainFromSource(segue);
+                        }
+                    });
+                    scope.join().throwIfFailed();
                     return false;
                 }
             }
@@ -477,6 +507,10 @@ public class Conduits {
     //  - Ensure proper locking, CAS, etc
     //  - Ensure consistent behavior across operator variants (eg [step]broadcast)
     //  - Ensure exceptions are recoverable / avoid partial effects
+    // TODO: Performance
+    //  - Watch for locks that are held across poll / offer
+    //    - Alternative: Use thread isolation
+    //    - Worse alternative: Produce and consume on the same thread
     
     // Being able to compose/andThen internally within a Sink/Source mainly enables encapsulation of the boundary
     // asynchrony within drainFromSource/ToSink, at the cost of not being able to step (does not produce StepSink/Source).
@@ -519,6 +553,330 @@ public class Conduits {
                                                          Function<? super T, ? extends Callable<U>> mapper,
                                                          Conduit.StepSink<U> sink) {
         return mapBalanceOrdered(mapper, IntStream.range(0, parallelism).mapToObj(i -> sink).toList());
+    }
+    
+    public static <T, P, U> Conduit.Sink<T> mapAsyncPartitioned(int concurrency,
+                                                                int permitsPerPartition,
+                                                                int bufferLimit,
+                                                                Function<? super T, P> classifier,
+                                                                BiFunction<? super T, ? super P, ? extends Callable<U>> mapper,
+                                                                Conduit.Sink<U> sink) {
+//        if (permitsPerPartition >= sinks.size()) {
+//            return mapBalanceOrdered(t -> mapper.apply(t, classifier.apply(t)), sinks);
+//        }
+        
+        if (permitsPerPartition < 1) {
+            throw new IllegalArgumentException();
+        }
+        
+        class Item {
+            // Value of out is initially partition key
+            // When output is computed, output replaces partition key, and null replaces input
+            Object out;
+            T in;
+            
+            Item(P key, T in) {
+                this.out = key;
+                this.in = in;
+            }
+        }
+        
+        class Partition {
+            // Only use buffer if we have no permits left
+            final Deque<Item> buffer = new LinkedList<>();
+            int permits = permitsPerPartition;
+        }
+        
+        // If partition has permits, offer onto the global buffer
+        // Else offer onto the partition buffer
+        // When element is completed:
+        //  - If partition buffer has elements, poll and offer onto the global buffer
+        //  - Else increment partition permits
+        //    - If partition permits == max, remove partition
+        
+        class MapAsyncPartitioned implements Conduit.Sink<T> {
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition completionNotFull = lock.newCondition();
+            final Condition workNotEmpty = lock.newCondition();
+            final Condition outputReady = lock.newCondition();
+            final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
+            final Deque<Item> workBuffer = new ArrayDeque<>(bufferLimit);
+            final Map<P, Partition> partitionByKey = new HashMap<>();
+            Throwable err1 = null;
+            Throwable err2 = null;
+            int state1 = NEW;
+            int state2 = NEW;
+            
+            static final int NEW        = 0;
+            static final int RUNNING    = 1;
+            static final int COMPLETING = 2;
+            static final int CLOSED     = 3;
+            
+            static final VarHandle STATE1;
+            static {
+                try {
+                    STATE1 = MethodHandles.lookup().findVarHandle(MapAsyncPartitioned.class, "state1", int.class);
+                } catch (ReflectiveOperationException e) {
+                    throw new ExceptionInInitializerError(e);
+                }
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                if (!STATE1.compareAndSet(this, NEW, RUNNING)) {
+                    throw new IllegalStateException("sink already consumed or completed");
+                }
+                
+                class Partitioner implements Conduit.Sink<T>, Conduit.StepSource<Item> {
+                    @Override
+                    public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                        for (;;) {
+                            lock.lockInterruptibly();
+                            try {
+                                for (;;) {
+                                    if (state1 >= COMPLETING) {
+                                        return false;
+                                    } else if (completionBuffer.size() < bufferLimit) {
+                                        break;
+                                    }
+                                    completionNotFull.await();
+                                }
+                            } finally {
+                                lock.unlock();
+                            }
+                            
+                            T in = source.poll();
+                            if (in == null) {
+                                return true;
+                            }
+                            P key = classifier.apply(in);
+                            var item = new Item(key, in);
+                            
+                            lock.lockInterruptibly();
+                            try {
+                                completionBuffer.offer(item);
+                                var partition = partitionByKey.computeIfAbsent(key, k -> new Partition());
+                                if (partition.permits > 0) {
+                                    partition.permits--;
+                                    workBuffer.offer(item);
+                                    workNotEmpty.signal();
+                                } else {
+                                    partition.buffer.offer(item);
+                                }
+                            } finally {
+                                lock.unlock();
+                            }
+                        }
+                    }
+                    
+                    @Override
+                    public void complete(Throwable error) throws Exception {
+                        lock.lockInterruptibly();
+                        try {
+                            if (state1 >= COMPLETING) {
+                                return;
+                            }
+                            state1 = COMPLETING;
+                            if ((err1 = error) != null || completionBuffer.isEmpty()) {
+                                workNotEmpty.signalAll();
+                            }
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                    
+                // --- END OF THREAD 1 -|- START OF THREAD(S) 2 ---
+                    
+                    @Override
+                    public Item poll() throws UpstreamException, InterruptedException {
+                        //assert lock.isHeldByCurrentThread();
+                        for (;;) {
+                            if (state1 >= COMPLETING) {
+                                if (err1 != null) {
+                                    throw new UpstreamException(err1);
+                                } else if (state1 == CLOSED || completionBuffer.isEmpty()) {
+                                    return null;
+                                }
+                            }
+                            Item item = workBuffer.poll();
+                            if (item != null) {
+                                return item;
+                            }
+                            workNotEmpty.await();
+                        }
+                    }
+                    
+                    @Override
+                    public void close() {
+                        lock.lock();
+                        try {
+                            state1 = CLOSED;
+                            completionNotFull.signal();
+                            workNotEmpty.signalAll();
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                }
+                
+                class Worker implements Conduit.Sink<Item>, Conduit.StepSource<U> {
+                    @Override
+                    public boolean drainFromSource(Conduit.StepSource<? extends Item> source) throws Exception {
+                        for (;;) {
+                            Item item = null;
+                            P key = null;
+                            Callable<U> callable;
+                            U out = null;
+                            
+                            try {
+                                lock.lockInterruptibly();
+                                try {
+                                    if (state2 >= COMPLETING) {
+                                        return false;
+                                    } else if ((item = source.poll()) == null) {
+                                        return true;
+                                    }
+                                    @SuppressWarnings("unchecked")
+                                    P k = key = (P) item.out;
+                                    callable = mapper.apply(item.in, key);
+                                } finally {
+                                    lock.unlock();
+                                }
+                                out = callable.call();
+                            } finally {
+                                if (item != null) {
+                                    lock.lock();
+                                    try {
+                                        item.in = null;
+                                        item.out = out;
+                                        Partition partition = partitionByKey.get(key);
+                                        Item nextItem = partition.buffer.poll();
+                                        if (nextItem != null) {
+                                            workBuffer.offer(nextItem);
+                                            workNotEmpty.signal();
+                                        } else if (++partition.permits == permitsPerPartition) {
+                                            partitionByKey.remove(key);
+                                        }
+                                        if (item == completionBuffer.peek()) {
+                                            outputReady.signal();
+                                        }
+                                    } finally {
+                                        lock.unlock();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    @Override
+                    public void complete(Throwable error) throws Exception {
+                        lock.lockInterruptibly();
+                        try {
+                            if (state2 >= COMPLETING) {
+                                return;
+                            }
+                            state2 = COMPLETING;
+                            if ((err2 = error) != null || completionBuffer.isEmpty()) {
+                                outputReady.signal();
+                            }
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                    
+                // --- END OF THREAD(S) 2 -|- START OF THREAD 3 ---
+                    
+                    @Override
+                    public U poll() throws Exception {
+                        for (;;) {
+                            lock.lockInterruptibly();
+                            try {
+                                Item item;
+                                for (;;) {
+                                    item = completionBuffer.peek();
+                                    if (state2 >= COMPLETING) {
+                                        if (err2 != null) {
+                                            throw new UpstreamException(err2);
+                                        } else if (state2 == CLOSED || item == null) {
+                                            return null;
+                                        }
+                                    }
+                                    if (item != null && item.in == null) {
+                                        break;
+                                    }
+                                    outputReady.await();
+                                }
+                                completionBuffer.poll();
+                                completionNotFull.signal();
+                                if (item.out == null) { // Skip nulls
+                                    continue;
+                                }
+                                Item nextItem;
+                                if ((nextItem = completionBuffer.peek()) != null && nextItem.in == null) {
+                                    outputReady.signal();
+                                }
+                                @SuppressWarnings("unchecked")
+                                U out = (U) item.out;
+                                return out;
+                            } finally {
+                                lock.unlock();
+                            }
+                        }
+                    }
+                    
+                    @Override
+                    public void close() {
+                        lock.lock();
+                        try {
+                            state2 = CLOSED;
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                }
+                
+                // Actually run the threads
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var partitioner = new Partitioner();
+                    var worker = new Worker();
+                    var resultTask = scope.fork(() -> { // THREAD 1
+                        boolean drained = false;
+                        try {
+                            drained = partitioner.drainFromSource(source);
+                            partitioner.complete(null);
+                        } catch (Throwable e) {
+                            partitioner.complete(e);
+                        }
+                        return drained;
+                    });
+                    for (int i = 0; i < concurrency; i++) { // THREAD(S) 2
+                        scope.fork(() -> {
+                            try (partitioner) {
+                                worker.drainFromSource(partitioner);
+                                worker.complete(null);
+                            } catch (Throwable e) {
+                                worker.complete(e);
+                            }
+                            return null;
+                        });
+                    }
+                    scope.fork(() -> { // THREAD 3
+                        try (worker) {
+                            return sink.drainFromSource(worker);
+                        }
+                    });
+                    scope.join().throwIfFailed();
+                    return resultTask.get();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                sink.complete(error);
+            }
+        }
+        
+        return new MapAsyncPartitioned();
     }
     
     // TODO: Do better
@@ -743,7 +1101,7 @@ public class Conduits {
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
-                var stepSource = new Conduit.StepSource<U>() {
+                class HelperSource implements Conduit.StepSource<U> {
                     @Override
                     public U poll() throws Exception {
                         for (;;) {
@@ -764,7 +1122,8 @@ public class Conduits {
                             }
                         }
                     }
-                };
+                }
+                var stepSource = new HelperSource();
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = sinks.stream()
@@ -794,6 +1153,15 @@ public class Conduits {
                         .toList();
                     scope.join().throwIfFailed();
                     return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
+                    // TODO: ^ What does this even mean?
+                    //  - If it means 'will this sink accept more elements', the answer should always be 'false'
+                    //  - If it means 'will the original sinks accept more elements', the answer is 'which ones?'
+                    //    - all of them? any of them?
+                    //  - true: stopped because of source(s); false: stopped because of sink(s)
+                    //  Practical use:
+                    //  - If Sink#drainFromSource(StepSource) returns false, we can poll from the StepSource again
+                    //  - If Source#drainToSink(StepSink) returns true, we can offer to the StepSink again
+                    //  - So, it's about what we can do with the param afterward!
                 }
             }
             

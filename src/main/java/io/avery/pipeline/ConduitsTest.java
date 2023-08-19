@@ -38,7 +38,7 @@ class ConduitsTest {
             Conduits
                 .stepSource(() -> lines.hasNext() ? lines.next() : null)
                 .andThen(Conduits.mapAsyncPartitioned(
-                    10, 3,
+                    10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s,
                     buffer

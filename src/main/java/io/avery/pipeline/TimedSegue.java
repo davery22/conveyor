@@ -225,6 +225,7 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
             
             updateSinkDeadline();
             updateSourceDeadline();
+            // TODO: latchComplete()?
             return true;
         } finally {
             latchedSinkDeadline = null;
