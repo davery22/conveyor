@@ -30,7 +30,6 @@ class ConduitsTest {
     
     static void test1() throws Exception {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var buffer = ConduitsTest.buffer(10);
             var lines = Stream.generate(new Scanner(System.in)::nextLine)
                 .takeWhile(line -> !"stop".equalsIgnoreCase(line))
                 .iterator();
@@ -40,11 +39,8 @@ class ConduitsTest {
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
-                    (s, c) -> () -> c + ":" + s,
-                    buffer
+                    (s, c) -> () -> c + ":" + s
                 ))
-                .run(Conduits.drainToCompletion(scope::fork));
-            buffer
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(Conduits.drainToCompletion(scope::fork));
             
