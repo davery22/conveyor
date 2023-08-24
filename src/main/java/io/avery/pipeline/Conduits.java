@@ -31,7 +31,7 @@ public class Conduits {
         final Supplier<A> supplier;
         final Gatherer.Integrator<A, In, T> integrator;
         final BiConsumer<A, Gatherer.Sink<? super T>> finisher;
-        final Conduit.StepSink<T> stage;
+        final Conduit.BaseStepSink<T> stepSink;
         final Gatherer.Sink<T> gsink;
         A acc = null;
         int state = NEW;
@@ -40,14 +40,14 @@ public class Conduits {
         static final int RUNNING   = 1;
         static final int COMPLETED = 2;
         
-        FusedStepSink(Gatherer<In, A, T> gatherer, Conduit.StepSink<T> sink) {
+        FusedStepSink(Gatherer<In, A, T> gatherer, Conduit.BaseStepSink<T> sink) {
             this.supplier = gatherer.supplier();
             this.integrator = gatherer.integrator();
             this.finisher = gatherer.finisher();
-            this.stage = Objects.requireNonNull(sink);
+            this.stepSink = Objects.requireNonNull(sink);
             this.gsink = el -> {
                 try {
-                    return stage().offer(el);
+                    return stepSink.offer(el);
                 } catch (Error | RuntimeException e) {
                     throw e;
                 } catch (Exception e) {
@@ -60,10 +60,6 @@ public class Conduits {
                     throw new WrappingException(e);
                 }
             };
-        }
-        
-        Conduit.StepSink<T> stage() {
-            return stage;
         }
         
         void initIfNew() {
@@ -108,7 +104,7 @@ public class Conduits {
                 if (error == null) {
                     finisher.accept(acc, gsink);
                 }
-                stage().complete(error);
+                stepSink.complete(error);
                 state = COMPLETED;
             } catch (WrappingException e) {
                 if (e.getCause() instanceof InterruptedException) {
@@ -121,41 +117,14 @@ public class Conduits {
         }
     }
     
-    private static class FusedSegue<In, T, A, Out> extends FusedStepSink<In, T, A> implements Conduit.Segue<In, Out> {
-        FusedSegue(Gatherer<In, A, T> gatherer, Conduit.Segue<T, Out> segue) {
-            super(gatherer, segue);
-        }
-        
-        @Override
-        Conduit.Segue<T, Out> stage() {
-            return (Conduit.Segue<T, Out>) stage;
-        }
-        
-        @Override
-        public Out poll() throws Exception {
-            return stage().poll();
-        }
-        
-        @Override
-        public void close() throws Exception {
-            stage().close();
-        }
-    }
-    
-    public static <In, T, A> Conduit.StepSink<In> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.StepSink<T> sink) {
+    public static <In, T, A> Conduit.StepSink<In> fuse(Gatherer<In, A, ? extends T> gatherer, Conduit.BaseStepSink<T> sink) {
         @SuppressWarnings("unchecked")
         Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
         return new FusedStepSink<>(g, sink);
     }
     
-    public static <In, T, A, Out> Conduit.Segue<In, Out> stepFuse(Gatherer<In, A, ? extends T> gatherer, Conduit.Segue<T, Out> segue) {
-        @SuppressWarnings("unchecked")
-        Gatherer<In, A, T> g = (Gatherer<In, A, T>) gatherer;
-        return new FusedSegue<>(g, segue);
-    }
-    
     // TODO: Probably remove this
-    public static <T, A, Out> Conduit.StepSource<Out> stepFuse(Conduit.StepSource<T> source,
+    public static <T, A, Out> Conduit.StepSource<Out> stepFuse(Conduit.BaseStepSource<T> source,
                                                                Gatherer<? super T, A, Out> gatherer,
                                                                int bufferLimit) {
         var supplier = gatherer.supplier();
@@ -235,7 +204,7 @@ public class Conduits {
     
     public static <In, T, A> Conduit.Sink<In> fuse(Gatherer<In, A, ? extends T> gatherer,
                                                    int bufferLimit,
-                                                   Conduit.Sink<T> sink) {
+                                                   Conduit.BaseSink<T> sink) {
         // We take advantage of the fact that Sink.drainFromSource(StepSource)
         // encloses the Sink's usage of the StepSource. We define a delegating
         // StepSource that can launch asynchronous tasks - bounded by the
@@ -255,14 +224,12 @@ public class Conduits {
             @Override public BiConsumer<A, Sink<? super Object>> finisher() { return gatherer.finisher()::accept; }
             @Override public Set<Characteristics> characteristics() { return gatherer.characteristics(); }
         }
-        var segue = stepFuse(
-            new DelimitedGatherer(),
-            Conduits.extrapolate(delimiter, e -> Collections.emptyIterator(), bufferLimit)
-        );
+        var buffer = Conduits.extrapolate(delimiter, e -> Collections.emptyIterator(), bufferLimit);
+        var segue = fuse(new DelimitedGatherer(), buffer.sink()).andThen(buffer.source());
         
         class FusedSink implements Conduit.Sink<In> {
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws Exception {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends In> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     class HelperSource implements Conduit.StepSource<T> {
                         @Override
@@ -310,10 +277,10 @@ public class Conduits {
         return new FusedSink();
     }
     
-    public static <In, T> Conduit.Sink<In> compose(Conduit.Sink<T> sink, Conduit.Segue<In, T> segue) {
+    public static <In, T> Conduit.Sink<In> compose(Conduit.BaseSink<T> sink, Conduit.Segue<In, T> segue) {
         class FusedSink implements Conduit.Sink<In> {
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends In> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends In> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     scope.fork(() -> {
                         try {
@@ -343,12 +310,11 @@ public class Conduits {
         return new FusedSink();
     }
     
-    public static <T, Out> Conduit.Source<Out> andThen(Conduit.Source<T> source, Conduit.Segue<T, Out> segue) {
+    public static <T, Out> Conduit.Source<Out> andThen(Conduit.BaseSource<T> source, Conduit.Segue<T, Out> segue) {
         class FusedSource implements Conduit.Source<Out> {
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super Out> sink) throws InterruptedException, ExecutionException {
+            public boolean drainToSink(Conduit.BaseStepSink<? super Out> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                    source.andThen(segue).run(drainToCompletion(scope::fork));
                     scope.fork(() -> {
                         try {
                             source.drainToSink(segue);
@@ -584,12 +550,12 @@ public class Conduits {
     // Worker gives permit back to partition
     // If partition has max permits, worker removes partition
     
-    public static <T, K, U> Conduit.StepSource<U> mapAsyncPartitioned(Conduit.StepSource<T> upstream,
-                                                                      int parallelism,
-                                                                      int permitsPerPartition,
-                                                                      int bufferLimit,
-                                                                      Function<? super T, K> classifier,
-                                                                      BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
+    public static <T, K, U> Conduit.SinkStepSource<T, U> mapAsyncPartitioned(Conduit.BaseStepSource<T> upstream,
+                                                                             int parallelism,
+                                                                             int permitsPerPartition,
+                                                                             int bufferLimit,
+                                                                             Function<? super T, K> classifier,
+                                                                             BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
         if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");
         }
@@ -619,7 +585,7 @@ public class Conduits {
             int permits = permitsPerPartition;
         }
         
-        class MapAsyncPartitioned implements Conduit.StepSource<U> {
+        class MapAsyncPartitioned implements Conduit.SinkStepSource<T, U> {
             final ReentrantLock sourceLock = new ReentrantLock();
             final ReentrantLock lock = new ReentrantLock();
             final Condition completionNotFull = lock.newCondition();
@@ -635,7 +601,7 @@ public class Conduits {
             
             class Worker implements Conduit.Sink<T> {
                 @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
                     K key = null;
                     Item item = null;
                     Callable<U> callable = null;
@@ -723,21 +689,33 @@ public class Conduits {
                         }
                     }
                 }
-                
-                @Override
-                public void complete(Throwable error) throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return;
-                        }
-                        state = COMPLETING;
-                        if ((err = error) != null || completionBuffer.isEmpty()) {
-                            outputReady.signalAll();
-                        }
-                    } finally {
-                        lock.unlock();
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var tasks = IntStream.range(0, parallelism)
+                        .mapToObj(i -> new Worker())
+                        .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
+                        .toList();
+                    scope.join().throwIfFailed();
+                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    if (state >= COMPLETING) {
+                        return;
                     }
+                    state = COMPLETING;
+                    if ((err = error) != null || completionBuffer.isEmpty()) {
+                        outputReady.signalAll();
+                    }
+                } finally {
+                    lock.unlock();
                 }
             }
             
@@ -790,21 +768,15 @@ public class Conduits {
                     lock.unlock();
                 }
             }
-            
-            @Override
-            public <A> void run(BiConsumer<Conduit.Source<A>, Conduit.Sink<A>> connector) {
-                var workers = IntStream.range(0, parallelism).mapToObj(i -> new Worker()).toList();
-                upstream.andThen(balance(workers)).run(connector);
-            }
         }
         
         return new MapAsyncPartitioned();
     }
     
-    public static <T, U> Conduit.StepSource<U> mapAsyncOrdered(Conduit.StepSource<T> upstream,
-                                                               int parallelism,
-                                                               int bufferLimit,
-                                                               Function<? super T, ? extends Callable<U>> mapper) {
+    public static <T, U> Conduit.SinkStepSource<T, U> mapAsyncOrdered(Conduit.BaseStepSource<T> upstream,
+                                                                      int parallelism,
+                                                                      int bufferLimit,
+                                                                      Function<? super T, ? extends Callable<U>> mapper) {
         if (parallelism < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism and bufferLimit must be positive");
         }
@@ -822,7 +794,7 @@ public class Conduits {
             }
         }
         
-        class MapAsyncOrdered implements Conduit.StepSource<U> {
+        class MapAsyncOrdered implements Conduit.SinkStepSource<T, U> {
             final ReentrantLock sourceLock = new ReentrantLock();
             final ReentrantLock lock = new ReentrantLock();
             final Condition completionNotFull = lock.newCondition();
@@ -837,7 +809,7 @@ public class Conduits {
             
             class Worker implements Conduit.Sink<T> {
                 @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
                     for (;;) {
                         Item item = null;
                         Callable<U> callable;
@@ -886,21 +858,33 @@ public class Conduits {
                         }
                     }
                 }
-                
-                @Override
-                public void complete(Throwable error) throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return;
-                        }
-                        state = COMPLETING;
-                        if ((err = error) != null || completionBuffer.isEmpty()) {
-                            outputReady.signalAll();
-                        }
-                    } finally {
-                        lock.unlock();
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    var tasks = IntStream.range(0, parallelism)
+                        .mapToObj(i -> new Worker())
+                        .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
+                        .toList();
+                    scope.join().throwIfFailed();
+                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    if (state >= COMPLETING) {
+                        return;
                     }
+                    state = COMPLETING;
+                    if ((err = error) != null || completionBuffer.isEmpty()) {
+                        outputReady.signalAll();
+                    }
+                } finally {
+                    lock.unlock();
                 }
             }
             
@@ -951,12 +935,6 @@ public class Conduits {
                     lock.unlock();
                 }
             }
-            
-            @Override
-            public <A> void run(BiConsumer<Conduit.Source<A>, Conduit.Sink<A>> connector) {
-                var workers = IntStream.range(0, parallelism).mapToObj(i -> new Worker()).toList();
-                upstream.andThen(balance(workers)).run(connector);
-            }
         }
         
         return new MapAsyncOrdered();
@@ -964,13 +942,13 @@ public class Conduits {
     
     public static <T, U> Conduit.Sink<T> mapAsync(int parallelism,
                                                   Function<? super T, ? extends Callable<U>> mapper,
-                                                  Conduit.StepSink<U> downstream) {
+                                                  Conduit.BaseStepSink<U> downstream) {
         class MapAsync implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             
             class Worker implements Conduit.Sink<T> {
                 @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
                     for (;;) {
                         T in;
                         Callable<U> callable;
@@ -993,7 +971,7 @@ public class Conduits {
             }
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = IntStream.range(0, parallelism)
                         .mapToObj(i -> new Worker())
@@ -1015,13 +993,13 @@ public class Conduits {
     
     // TODO: Profile vs mapAsyncOrdered
     public static <T, U> Conduit.Sink<T> mapBalanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
-                                                           List<? extends Conduit.Sink<U>> sinks) {
+                                                           List<? extends Conduit.BaseSink<U>> sinks) {
         class MapBalanceOrdered implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             CountDownLatch currLatch = new CountDownLatch(0);
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 class HelperSource implements Conduit.StepSource<U> {
                     CountDownLatch latch = new CountDownLatch(1);
                     
@@ -1088,12 +1066,12 @@ public class Conduits {
     // This could be separated into a 'map(stepSource, toCallable)' | balance(sinks.map(sink -> fuse(callCallable, sink))
     
     public static <T, U> Conduit.Sink<T> mapBalance(Function<? super T, ? extends Callable<U>> mapper,
-                                                    List<? extends Conduit.Sink<U>> sinks) {
+                                                    List<? extends Conduit.BaseSink<U>> sinks) {
         class MapBalance implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 class HelperSource implements Conduit.StepSource<U> {
                     @Override
                     public U poll() throws Exception {
@@ -1136,10 +1114,10 @@ public class Conduits {
         return new MapBalance();
     }
     
-    public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
+    public static <T> Conduit.Sink<T> balance(List<? extends Conduit.BaseSink<T>> sinks) {
         class Balance implements Conduit.Sink<T> {
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = sinks.stream()
                         .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
@@ -1160,7 +1138,7 @@ public class Conduits {
     
     // TODO: stepBroadcast cancels when ANY sink cancels, but broadcast cancels when ALL sinks cancel
     
-    public static <T> Conduit.StepSink<T> stepBroadcast(List<? extends Conduit.StepSink<T>> sinks) {
+    public static <T> Conduit.StepSink<T> stepBroadcast(List<? extends Conduit.BaseStepSink<T>> sinks) {
         class StepBroadcast implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws InterruptedException, ExecutionException {
@@ -1200,7 +1178,7 @@ public class Conduits {
     // In Source.drainToSink(StepSink),     we can run a Segue, then Source.drainToSink(Segue) | Segue.poll -> StepSink.offer
     //  - Makes a new Source that chains after the original Source, like Source.andThen(Segue) but not a StepSource
     
-    public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
+    public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.BaseSink<T>> sinks) {
         class Broadcast implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             final Condition ready = lock.newCondition();
@@ -1210,7 +1188,7 @@ public class Conduits {
             T current = null;
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+            public boolean drainFromSource(Conduit.BaseStepSource<? extends T> source) throws Exception {
                 // Every sink has to call drainFromSource(source) in its own thread
                 // The poll() on that source needs to respond differently based on which sink is calling
                 //  - If the sink has already consumed this round's element, wait for next round
@@ -1294,7 +1272,7 @@ public class Conduits {
         return new Broadcast();
     }
     
-    public static <T> Conduit.StepSink<T> stepPartition(List<? extends Conduit.StepSink<T>> sinks,
+    public static <T> Conduit.StepSink<T> stepPartition(List<? extends Conduit.BaseStepSink<T>> sinks,
                                                         BiConsumer<T, IntConsumer> selector) {
         class StepPartition implements Conduit.StepSink<T> {
             @Override
@@ -1332,7 +1310,7 @@ public class Conduits {
     
     // --- Sources ---
     
-    public static <T> Conduit.StepSource<T> stepConcat(List<? extends Conduit.StepSource<T>> sources) {
+    public static <T> Conduit.StepSource<T> stepConcat(List<? extends Conduit.BaseStepSource<T>> sources) {
         class StepConcat implements Conduit.StepSource<T> {
             int i = 0;
             
@@ -1356,10 +1334,10 @@ public class Conduits {
         return new StepConcat();
     }
     
-    public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
+    public static <T> Conduit.Source<T> concat(List<? extends Conduit.BaseSource<T>> sources) {
         class Concat implements Conduit.Source<T> {
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws Exception {
                 for (var source : sources) {
                     if (!source.drainToSink(sink)) {
                         return false;
@@ -1377,10 +1355,10 @@ public class Conduits {
         return new Concat();
     }
     
-    public static <T> Conduit.Source<T> merge(List<? extends Conduit.Source<T>> sources) {
+    public static <T> Conduit.Source<T> merge(List<? extends Conduit.BaseSource<T>> sources) {
         class Merge implements Conduit.Source<T> {
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
                     var tasks = sources.stream()
                         .map(source -> scope.fork(() -> source.drainToSink(sink)))
@@ -1399,8 +1377,8 @@ public class Conduits {
         return new Merge();
     }
     
-    public static <T> Conduit.StepSource<T> stepMergeSorted(List<? extends Conduit.StepSource<T>> sources,
-                                                            Comparator<? super T> comparator) {
+    public static <T> Conduit.StepSource<T> stepMergeSorted(List<? extends Conduit.BaseStepSource<T>> sources,
+                                                                Comparator<? super T> comparator) {
         class StepMergeSorted implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = -1;
@@ -1446,7 +1424,7 @@ public class Conduits {
         return new StepMergeSorted();
     }
     
-//    public static <T> Conduit.Source<T> mergeSorted(List<? extends Conduit.Source<T>> sources,
+//    public static <T> Conduit.Source<T> mergeSorted(List<? extends Conduit.BaseSource<T>> sources,
 //                                                    Comparator<? super T> comparator) {
 //        class MergeSorted implements Conduit.Source<T> {
 //            final ReentrantLock lock = new ReentrantLock();
@@ -1454,7 +1432,7 @@ public class Conduits {
 //            final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
 //
 //            @Override
-//            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+//            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws Exception {
 //                class HelperSink implements Conduit.StepSink<T> {
 //                    final int pos;
 //
@@ -1503,8 +1481,8 @@ public class Conduits {
 //        return new MergeSorted();
 //    }
     
-    public static <T1, T2, T> Conduit.StepSource<T> stepZip(Conduit.StepSource<T1> source1,
-                                                            Conduit.StepSource<T2> source2,
+    public static <T1, T2, T> Conduit.StepSource<T> stepZip(Conduit.BaseStepSource<T1> source1,
+                                                            Conduit.BaseStepSource<T2> source2,
                                                             BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
@@ -1560,8 +1538,8 @@ public class Conduits {
         return new StepZip();
     }
     
-    public static <T1, T2, T> Conduit.Source<T> zip(Conduit.Source<T1> source1,
-                                                    Conduit.Source<T2> source2,
+    public static <T1, T2, T> Conduit.Source<T> zip(Conduit.BaseSource<T1> source1,
+                                                    Conduit.BaseSource<T2> source2,
                                                     BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
@@ -1589,7 +1567,7 @@ public class Conduits {
             }
             
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws Exception {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -1666,8 +1644,8 @@ public class Conduits {
         return new Zip();
     }
     
-    public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
-                                                          Conduit.Source<T2> source2,
+    public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.BaseSource<T1> source1,
+                                                          Conduit.BaseSource<T2> source2,
                                                           BiFunction<? super T1, ? super T2, T> merger) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
@@ -1695,7 +1673,7 @@ public class Conduits {
             }
             
             @Override
-            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 if (!STATE.compareAndSet(this, NEW, RUNNING)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
@@ -2197,7 +2175,7 @@ public class Conduits {
         }
     }
     
-    public static void parallelClose(Collection<? extends Conduit.Source<?>> sources) throws InterruptedException, ExecutionException {
+    public static void parallelClose(Collection<? extends Conduit.BaseSource<?>> sources) throws InterruptedException, ExecutionException {
         try (var scope = new AggregateFailure()) {
             for (var source : sources) {
                 scope.fork(() -> {
@@ -2209,7 +2187,7 @@ public class Conduits {
         }
     }
     
-    public static void parallelComplete(Collection<? extends Conduit.Sink<?>> sinks, Throwable error) throws InterruptedException, ExecutionException {
+    public static void parallelComplete(Collection<? extends Conduit.BaseSink<?>> sinks, Throwable error) throws InterruptedException, ExecutionException {
         try (var scope = new AggregateFailure()) {
             for (var sink : sinks) {
                 scope.fork(() -> {
@@ -2237,17 +2215,17 @@ public class Conduits {
         return sink;
     }
     
-    public static <T> BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> drainToCompletion(Consumer<Callable<?>> fork) {
+    public static <T> BiConsumer<Conduit.BaseSource<T>, Conduit.BaseSink<T>> drainToCompletion(Consumer<Callable<?>> fork) {
         Objects.requireNonNull(fork);
-        class DrainToCompletion implements BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> {
+        class DrainToCompletion implements BiConsumer<Conduit.BaseSource<T>, Conduit.BaseSink<T>> {
             @Override
-            public void accept(Conduit.Source<T> source, Conduit.Sink<T> sink) {
+            public void accept(Conduit.BaseSource<T> source, Conduit.BaseSink<T> sink) {
                 source.run(this);
                 fork.accept(() -> {
                     try (source) {
-                        if (sink instanceof Conduit.StepSink<T> ss) {
+                        if (sink instanceof Conduit.BaseStepSink<T> ss) {
                             source.drainToSink(ss);
-                        } else if (source instanceof Conduit.StepSource<T> ss) {
+                        } else if (source instanceof Conduit.BaseStepSource<T> ss) {
                             sink.drainFromSource(ss);
                         } else {
                             throw new IllegalArgumentException("source must be StepSource or sink must be StepSink");
@@ -2298,99 +2276,99 @@ public class Conduits {
         }
     }
     
-    static sealed class ChainedStage implements Conduit.Stage {
-        final Conduit.Source<?> source;
-        final Conduit.Sink<?> sink;
-        
-        ChainedStage(Conduit.Source<?> source, Conduit.Sink<?> sink) {
-            this.source = source;
-            this.sink = sink;
-        }
-        
-        @Override
-        @SuppressWarnings("unchecked")
-        public <T> void run(BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> connector) {
-            connector.accept((Conduit.Source<T>) source, (Conduit.Sink<T>) sink);
-        }
-
-        Conduit.Source<?> first() {
-            return source instanceof ChainedStage cs ? cs.first() : source;
-        }
-        
-        Conduit.Sink<?> last() {
-            return sink instanceof ChainedStage cs ? cs.last() : sink;
-        }
-    }
-    
-    static final class ChainedStepSource<Out> extends ChainedStage implements Conduit.StepSource<Out> {
-        final Conduit.StepSource<Out> stepSource;
-        
-        @SuppressWarnings("unchecked")
-        ChainedStepSource(Conduit.Source<?> source, Conduit.Sink<?> sink) {
-            super(source, sink);
-            stepSource = (Conduit.StepSource<Out>) last();
-        }
-        
-        @Override
-        public Out poll() throws Exception {
-            return stepSource.poll();
-        }
-        
-        @Override
-        public void close() throws Exception {
-            stepSource.close();
-        }
-    }
-    
-    static final class ChainedStepSink<In> extends ChainedStage implements Conduit.StepSink<In> {
-        final Conduit.StepSink<In> stepSink;
-        
-        @SuppressWarnings("unchecked")
-        ChainedStepSink(Conduit.Source<?> source, Conduit.Sink<?> sink) {
-            super(source, sink);
-            stepSink = (Conduit.StepSink<In>) first();
-        }
-        
-        @Override
-        public boolean offer(In input) throws Exception {
-            return stepSink.offer(input);
-        }
-        
-        @Override
-        public void complete(Throwable error) throws Exception {
-            stepSink.complete(error);
-        }
-    }
-    
-    static final class ChainedSegue<In, Out> extends ChainedStage implements Conduit.Segue<In, Out> {
-        final Conduit.StepSink<In> stepSink;
-        final Conduit.StepSource<Out> stepSource;
-        
-        @SuppressWarnings("unchecked")
-        ChainedSegue(Conduit.Source<?> source, Conduit.Sink<?> sink) {
-            super(source, sink);
-            stepSink = (Conduit.StepSink<In>) first();
-            stepSource = (Conduit.StepSource<Out>) last();
-        }
-        
-        @Override
-        public boolean offer(In input) throws Exception {
-            return stepSink.offer(input);
-        }
-        
-        @Override
-        public void complete(Throwable error) throws Exception {
-            stepSink.complete(error);
-        }
-        
-        @Override
-        public Out poll() throws Exception {
-            return stepSource.poll();
-        }
-        
-        @Override
-        public void close() throws Exception {
-            stepSource.close();
-        }
-    }
+//    static sealed class ChainedStage implements Conduit.Stage {
+//        final Conduit.BaseSource<?> source;
+//        final Conduit.BaseSink<?> sink;
+//
+//        ChainedStage(Conduit.BaseSource<?> source, Conduit.BaseSink<?> sink) {
+//            this.source = source;
+//            this.sink = sink;
+//        }
+//
+//        @Override
+//        @SuppressWarnings("unchecked")
+//        public <T> void run(BiConsumer<Conduit.BaseSource<T>, Conduit.BaseSink<T>> connector) {
+//            connector.accept((Conduit.BaseSource<T>) source, (Conduit.BaseSink<T>) sink);
+//        }
+//
+//        Conduit.BaseSource<?> first() {
+//            return source instanceof ChainedStage cs ? cs.first() : source;
+//        }
+//
+//        Conduit.BaseSink<?> last() {
+//            return sink instanceof ChainedStage cs ? cs.last() : sink;
+//        }
+//    }
+//
+//    static final class ChainedStepSource<Out> extends ChainedStage implements Conduit.BaseStepSource<Out> {
+//        final Conduit.BaseStepSource<Out> stepSource;
+//
+//        @SuppressWarnings("unchecked")
+//        ChainedStepSource(Conduit.BaseSource<?> source, Conduit.BaseSink<?> sink) {
+//            super(source, sink);
+//            stepSource = (Conduit.BaseStepSource<Out>) last();
+//        }
+//
+//        @Override
+//        public Out poll() throws Exception {
+//            return stepSource.poll();
+//        }
+//
+//        @Override
+//        public void close() throws Exception {
+//            stepSource.close();
+//        }
+//    }
+//
+//    static final class ChainedStepSink<In> extends ChainedStage implements Conduit.BaseStepSink<In> {
+//        final Conduit.BaseStepSink<In> stepSink;
+//
+//        @SuppressWarnings("unchecked")
+//        ChainedStepSink(Conduit.BaseSource<?> source, Conduit.BaseSink<?> sink) {
+//            super(source, sink);
+//            stepSink = (Conduit.BaseStepSink<In>) first();
+//        }
+//
+//        @Override
+//        public boolean offer(In input) throws Exception {
+//            return stepSink.offer(input);
+//        }
+//
+//        @Override
+//        public void complete(Throwable error) throws Exception {
+//            stepSink.complete(error);
+//        }
+//    }
+//
+//    static final class ChainedSegue<In, Out> extends ChainedStage implements Conduit.Segue<In, Out> {
+//        final Conduit.BaseStepSink<In> stepSink;
+//        final Conduit.BaseStepSource<Out> stepSource;
+//
+//        @SuppressWarnings("unchecked")
+//        ChainedSegue(Conduit.BaseSource<?> source, Conduit.BaseSink<?> sink) {
+//            super(source, sink);
+//            stepSink = (Conduit.BaseStepSink<In>) first();
+//            stepSource = (Conduit.BaseStepSource<Out>) last();
+//        }
+//
+//        @Override
+//        public boolean offer(In input) throws Exception {
+//            return stepSink.offer(input);
+//        }
+//
+//        @Override
+//        public void complete(Throwable error) throws Exception {
+//            stepSink.complete(error);
+//        }
+//
+//        @Override
+//        public Out poll() throws Exception {
+//            return stepSource.poll();
+//        }
+//
+//        @Override
+//        public void close() throws Exception {
+//            stepSource.close();
+//        }
+//    }
 }
