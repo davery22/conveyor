@@ -557,23 +557,32 @@ public class Conduits {
     
     // TODO: Dropping elements...
     //  - eg in zip, can't know we will use either value until we have both
+    //  - eg in balance, if sinks have buffers, one sink may eagerly take elements, then fail and drop its buffer
     //  - eg in stepBroadcast with eagerCancel (actually, in that case some sinks process more than others)
     
+    // TODO: We should override run() to run any Sources/Sinks passed to us?
+    //  Hrm, but think of a buffer that is passed to a Sink (that runs it), but used as a Source separately - would be run twice
+    //   - Same with a buffer that is passed to a Source (that runs it), like zip(), but used as a Sink separately
+    //   - This would only be safe if buffer.run() doesn't do anything (or is idempotent)
+    //  Maybe: Run things when they must be connected to our internals? (Because we can't avoid it then)
     
     // --- Sinks ---
     
+    // TODO: Move to Segues
     public static <T, K, U> Conduit.Segue<T, U> mapAsyncPartitioned(int parallelism,
                                                                     int permitsPerPartition,
                                                                     int bufferLimit,
                                                                     Function<? super T, K> classifier,
                                                                     BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
-//        if (permitsPerPartition >= parallelism) {
-//            return mapAsyncOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)), sink);
-//        }
-        
-        if (permitsPerPartition < 1) {
-            throw new IllegalArgumentException();
+        if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
+            throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");
         }
+        Objects.requireNonNull(classifier);
+        Objects.requireNonNull(mapper);
+        
+//        if (permitsPerPartition >= parallelism) {
+//            return mapAsyncOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
+//        }
         
         class Item {
             // Value of out is initially partition key
@@ -608,10 +617,10 @@ public class Conduits {
             final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
             final Deque<Item> workBuffer = new ArrayDeque<>(bufferLimit);
             final Map<K, Partition> partitionByKey = new HashMap<>();
-            Throwable err1 = null;
-            Throwable err2 = null;
             int state1 = RUNNING;
             int state2 = RUNNING;
+            Throwable err1 = null;
+            Throwable err2 = null;
             
             static final int RUNNING    = 0;
             static final int COMPLETING = 1;
@@ -626,7 +635,6 @@ public class Conduits {
                 try {
                     for (;;) {
                         if (state1 >= COMPLETING) {
-                            // NOTE: In this case we'd be dropping the last input from the source
                             return false;
                         } else if (completionBuffer.size() < bufferLimit) {
                             break;
@@ -670,7 +678,9 @@ public class Conduits {
                     // Only called by Workers
                     //assert lock.isHeldByCurrentThread();
                     for (;;) {
-                        if (state1 >= COMPLETING) {
+                        if (state2 >= COMPLETING) {
+                            return null;
+                        } else if (state1 >= COMPLETING) {
                             if (err1 != null) {
                                 throw new UpstreamException(err1);
                             } else if (state1 == CLOSED || completionBuffer.isEmpty()) {
@@ -709,10 +719,8 @@ public class Conduits {
                         try {
                             lock.lockInterruptibly();
                             try {
-                                if (state2 >= COMPLETING) {
-                                    return false;
-                                } else if ((item = source.poll()) == null) {
-                                    return true;
+                                if ((item = source.poll()) == null) {
+                                    return state2 < COMPLETING;
                                 }
                                 @SuppressWarnings("unchecked")
                                 K k = key = (K) item.out;
@@ -822,16 +830,235 @@ public class Conduits {
     }
     
     
-//    public static <T, U> Conduit.Sink<T> mapAsyncOrdered(int parallelism,
-//                                                         int bufferLimit,
-//                                                         Function<? super T, ? extends Callable<U>> mapper,
-//                                                         Conduit.Sink<U> sink) {
-//        // 2 buffers:
-//        //  1. A work buffer, for waiting on inputs in order before computing outputs
-//        //  2. A completion buffer, for waiting on outputs in order before emitting
-//        // A wide buffer (M) allows N<<M threads to keep working while outputs are waiting to be polled
-//        // Maybe we can just use the source as buffer instead of a work buffer?
-//    }
+    // POLL:
+    // Worker polls element from source
+    // If completion buffer is full, worker waits until not full
+    // Worker offers element to completion buffer
+    // If element partition has permits, worker takes one and begins work (END)
+    // Worker offers element to partition buffer, goes to step 1
+    
+    // TODO^: If partition has no permits, then MAX other workers are already working the partition, so leave that be
+    //  But if those workers fail (and we recover), might we forget about the partition?
+    
+    // OFFER:
+    // Worker polls partition buffer, continues if not empty (END)
+    // Worker gives permit back to partition
+    // If partition has max permits, worker removes partition
+    
+    public static <T, K, U> Conduit.StepSource<U> mapAsyncPartitioned(Conduit.StepSource<T> upstream,
+                                                                      int parallelism,
+                                                                      int permitsPerPartition,
+                                                                      int bufferLimit,
+                                                                      Function<? super T, K> classifier,
+                                                                      BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
+        if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
+            throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");
+        }
+        Objects.requireNonNull(upstream);
+        Objects.requireNonNull(classifier);
+        Objects.requireNonNull(mapper);
+        
+//        if (permitsPerPartition >= parallelism) {
+//            return mapAsyncOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
+//        }
+        
+        class Item {
+            // Value of out is initially partition key
+            // When output is computed, output replaces partition key, and null replaces input
+            Object out;
+            T in;
+            
+            Item(K key, T in) {
+                this.out = key;
+                this.in = in;
+            }
+        }
+        
+        class Partition {
+            // Only use buffer if we have no permits left
+            final Deque<Item> buffer = new LinkedList<>();
+            int permits = permitsPerPartition;
+        }
+        
+        class MapAsyncPartitioned implements Conduit.StepSource<U> {
+            final ReentrantLock sourceLock = new ReentrantLock();
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition completionNotFull = lock.newCondition();
+            final Condition outputReady = lock.newCondition();
+            final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
+            final Map<K, Partition> partitionByKey = new HashMap<>();
+            int state = RUNNING;
+            Throwable err = null;
+            
+            static final int RUNNING    = 0;
+            static final int COMPLETING = 1;
+            static final int CLOSED     = 2;
+            
+            class Worker implements Conduit.Sink<T> {
+                @Override
+                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                    K key = null;
+                    Item item = null;
+                    Callable<U> callable = null;
+                    Exception ex = null;
+                    
+                    for (;;) {
+                        try {
+                            if (item == null) {
+                                sourceLock.lockInterruptibly();
+                                try {
+                                    T in = source.poll();
+                                    if (in == null) {
+                                        return true;
+                                    }
+                                    key = classifier.apply(in);
+                                    item = new Item(key, in);
+                                    
+                                    lock.lockInterruptibly();
+                                    try {
+                                        if (state == CLOSED) {
+                                            return false;
+                                        }
+                                        while (completionBuffer.size() == bufferLimit) {
+                                            completionNotFull.await();
+                                            if (state == CLOSED) {
+                                                return false;
+                                            }
+                                        }
+                                        completionBuffer.offer(item);
+                                        Partition partition = partitionByKey.computeIfAbsent(key, k -> new Partition());
+                                        if (partition.permits > 0) {
+                                            partition.permits--;
+                                        } else {
+                                            partition.buffer.offer(item);
+                                            key = null;
+                                            item = null;
+                                            continue;
+                                        }
+                                        callable = mapper.apply(item.in, key);
+                                    } finally {
+                                        lock.unlock();
+                                    }
+                                } finally {
+                                    sourceLock.unlock();
+                                }
+                            }
+                            item.out = callable.call();
+                        } catch (Exception e) {
+                            ex = e;
+                        } finally {
+                            if (item != null) {
+                                lock.lock();
+                                try {
+                                    for (;;) {
+                                        item.in = null;
+                                        if (item == completionBuffer.peek()) {
+                                            outputReady.signal();
+                                        }
+                                        Partition partition = partitionByKey.get(key);
+                                        key = null;
+                                        item = null;
+                                        callable = null;
+                                        if (ex == null && (item = partition.buffer.poll()) != null) {
+                                            @SuppressWarnings("unchecked")
+                                            K k = key = (K) item.out;
+                                            try {
+                                                callable = mapper.apply(item.in, key);
+                                            } catch (Exception e) {
+                                                ex = e;
+                                                continue;
+                                            }
+                                        } else if (++partition.permits == permitsPerPartition) {
+                                            partitionByKey.remove(key);
+                                        }
+                                        break;
+                                    }
+                                } finally {
+                                    lock.unlock();
+                                }
+                            }
+                        }
+                        
+                        if (ex != null) {
+                            throw ex;
+                        }
+                    }
+                }
+                
+                @Override
+                public void complete(Throwable error) throws Exception {
+                    lock.lockInterruptibly();
+                    try {
+                        if (state >= COMPLETING) {
+                            return;
+                        }
+                        state = COMPLETING;
+                        if ((err = error) != null || completionBuffer.isEmpty()) {
+                            outputReady.signalAll();
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            @Override
+            public U poll() throws Exception {
+                for (;;) {
+                    lock.lockInterruptibly();
+                    try {
+                        Item item;
+                        for (;;) {
+                            item = completionBuffer.peek();
+                            if (state >= COMPLETING) {
+                                if (err != null) {
+                                    throw new UpstreamException(err);
+                                } else if (state == CLOSED || item == null) {
+                                    return null;
+                                }
+                            }
+                            if (item != null && item.in == null) {
+                                break;
+                            }
+                            outputReady.await();
+                        }
+                        completionBuffer.poll();
+                        completionNotFull.signal();
+                        if (item.out == null) { // Skip nulls
+                            continue;
+                        }
+                        Item nextItem = completionBuffer.peek();
+                        if (nextItem != null && nextItem.in == null) {
+                            outputReady.signal();
+                        }
+                        @SuppressWarnings("unchecked")
+                        U out = (U) item.out;
+                        return out;
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            @Override
+            public void close() {
+                lock.lock();
+                try {
+                    state = CLOSED;
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            @Override
+            public <A> void run(BiConsumer<Conduit.Source<A>, Conduit.Sink<A>> connector) {
+                var workers = IntStream.range(0, parallelism).mapToObj(i -> new Worker()).toList();
+                upstream.andThen(balance(workers)).run(connector);
+            }
+        }
+        
+        return new MapAsyncPartitioned();
+    }
     
     // TODO: Profile vs mapAsyncOrdered
     public static <T, U> Conduit.Sink<T> mapBalanceOrdered(Function<? super T, ? extends Callable<U>> mapper,
@@ -892,7 +1119,7 @@ public class Conduits {
                         }))
                         .toList();
                     scope.join().throwIfFailed();
-                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
+                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -943,7 +1170,7 @@ public class Conduits {
                         .map(sink -> scope.fork(() -> sink.drainFromSource(stepSource)))
                         .toList();
                     scope.join().throwIfFailed();
-                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
+                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
                 }
             }
             
@@ -2060,7 +2287,6 @@ public class Conduits {
     public static <T> BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> drainToCompletion(Consumer<Callable<?>> fork) {
         Objects.requireNonNull(fork);
         class DrainToCompletion implements BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> {
-            // What would a boolean return here be signalling? That no sinks cancelled? That all sources completed?
             @Override
             public void accept(Conduit.Source<T> source, Conduit.Sink<T> sink) {
                 source.run(this);
