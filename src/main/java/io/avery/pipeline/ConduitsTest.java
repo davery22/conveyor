@@ -34,22 +34,15 @@ class ConduitsTest {
                 .takeWhile(line -> !"stop".equalsIgnoreCase(line))
                 .iterator();
 
-//            Conduits
-//                .stepSource(() -> lines.hasNext() ? lines.next() : null)
-//                .andThen(Conduits.mapAsyncPartitioned(
-//                    10, 3, 15,
-//                    (String s) -> s.isEmpty() ? '*' : s.charAt(0),
-//                    (s, c) -> () -> c + ":" + s
-//                ))
             Conduits
-                .mapAsyncPartitioned(
-                    Conduits.stepSource(() -> lines.hasNext() ? lines.next() : null),
-                    10, 3, 5,
+                .stepSource(() -> lines.hasNext() ? lines.next() : null)
+                .andThen(Conduits.mapAsyncPartitioned(
+                    10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s
-                )
+                ))
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.drainToCompletion(scope::fork));
+                .run(scope);
             
             scope.join().throwIfFailed();
 
@@ -104,6 +97,13 @@ class ConduitsTest {
 //                }
 //                return null;
 //            });
+            var seg = Conduits
+                .tokenBucket(
+                    Duration.ofSeconds(1),
+                    String::length,
+                    10,
+                    100
+                );
             
             Conduits
                 .<String>source(sink -> {
@@ -118,19 +118,15 @@ class ConduitsTest {
                 })
                 .andThen(Conduits.stepFuse(
                     ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-                    Conduits.tokenBucket(
-                        Duration.ofSeconds(1),
-                        String::length,
-                        10,
-                        100
-                    )
+                    seg.sink()
                 ))
+                .andThen(seg.source())
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
                     16,
                     source -> { source.forEach(System.out::println); return true; }
                 ))
-                .run(Conduits.drainToCompletion(scope::fork));
+                .run(scope);
             
             scope.join().throwIfFailed();
         }
@@ -149,13 +145,15 @@ class ConduitsTest {
                     return true;
                 }
             });
+            
             Conduits
-                .zip(buffer, probe, Integer::sum)
+                .zip(buffer.source(), probe, Integer::sum)
                 .andThen(Conduits.stepBroadcast(List.of(
-                    buffer,
+                    buffer.sink(),
                     Conduits.stepSink(e -> { System.out.println(e); return true; })
                 )))
-                .run(Conduits.drainToCompletion(scope::fork));
+                .run(scope);
+            
             scope.join().throwIfFailed();
         }
     }

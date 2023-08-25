@@ -1,5 +1,6 @@
 package io.avery.pipeline;
 
+import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -8,12 +9,24 @@ import java.util.stream.Collector;
 public class Conduit {
     private Conduit() {}
     
-    public sealed interface Stage permits BaseSink, BaseSource, Silo, Conduits.ChainedStage {
-        default <T> void run(BiConsumer<BaseSource<T>, BaseSink<T>> connector) { }
+    public sealed interface Stage {
+        // TODO: User should not decide what T is
+//        default <T> void run(BiConsumer<Source<T>, Sink<T>> connector) { }
+        default void run(StructuredTaskScope<?> scope) { }
     }
     
-    public sealed interface BaseSink<In> extends Stage {
-        boolean drainFromSource(BaseStepSource<? extends In> source) throws Exception;
+    public sealed interface Silo extends Stage permits Conduits.ClosedSilo, Conduits.ChainSilo {
+        default Silo compose(Silo before) { return new Conduits.ChainSilo(before, this); }
+        default <T> Sink<T> compose(Sink<T> before) { return new Conduits.ChainSink<>(before, this); }
+        default <T> StepSink<T> compose(StepSink<T> before) { return new Conduits.ChainStepSink<>(before, this); }
+        default Silo andThen(Silo after) { return new Conduits.ChainSilo(this, after); }
+        default <T> Source<T> andThen(Source<T> after) { return new Conduits.ChainSource<>(this, after); }
+        default <T> StepSource<T> andThen(StepSource<T> after) { return new Conduits.ChainStepSource<>(this, after); }
+    }
+    
+    @FunctionalInterface
+    public non-sealed interface Sink<In> extends Stage {
+        boolean drainFromSource(StepSource<? extends In> source) throws Exception;
         
         default void complete(Throwable error) throws Exception {
             // Default impl handles the case where the Sink has no async downstream.
@@ -22,10 +35,18 @@ public class Conduit {
                 throw new UpstreamException(error);
             }
         }
+        
+        default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
+        default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(Segue<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(),  this)); }
+        default Sink<In> andThen(Silo after) { return new Conduits.ChainSink<>(this, after); }
+        default <T> SinkSource<In, T> andThen(Source<T> after) { return new Conduits.ChainSinkSource<>(this, after); }
+        default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { return new Conduits.ChainSinkStepSource<>(this, after); }
     }
     
-    public sealed interface BaseSource<Out> extends Stage, AutoCloseable {
-        boolean drainToSink(BaseStepSink<? super Out> sink) throws Exception;
+    @FunctionalInterface
+    public non-sealed interface Source<Out> extends Stage, AutoCloseable {
+        boolean drainToSink(StepSink<? super Out> sink) throws Exception;
         
         default void close() throws Exception { }
         
@@ -57,13 +78,21 @@ public class Conduit {
             drainToSink(new CollectorSink());
             return finisher.apply(acc);
         }
+        
+        default Source<Out> compose(Silo before) { return new Conduits.ChainSource<>(before, this); }
+        default <T> SinkSource<T, Out> compose(Sink<T> before) { return new Conduits.ChainSinkSource<>(before, this); }
+        default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { return new Conduits.ChainStepSinkSource<>(before, this); }
+        default Silo andThen(StepSink<? super Out> after) { return new Conduits.ClosedSilo<>(this, after); }
+        default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
     }
     
-    public sealed interface BaseStepSink<In> extends BaseSink<In> {
+    @FunctionalInterface
+    public interface StepSink<In> extends Sink<In> {
         boolean offer(In input) throws Exception;
         
         @Override
-        default boolean drainFromSource(BaseStepSource<? extends In> source) throws Exception {
+        default boolean drainFromSource(StepSource<? extends In> source) throws Exception {
             for (In e; (e = source.poll()) != null; ) {
                 if (!offer(e)) {
                     return false;
@@ -71,13 +100,21 @@ public class Conduit {
             }
             return true;
         }
+        
+        default Silo compose(Source<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
+        default <T> Sink<T> compose(SinkSource<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
+        @Override default StepSink<In> andThen(Silo after) { return new Conduits.ChainStepSink<>(this, after); }
+        @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { return new Conduits.ChainStepSinkSource<>(this, after); }
+        @Override default <T> Segue<In, T> andThen(StepSource<T> after) { return new Conduits.ChainSegue<>(this, after); }
     }
     
-    public sealed interface BaseStepSource<Out> extends BaseSource<Out> {
+    @FunctionalInterface
+    public interface StepSource<Out> extends Source<Out> {
         Out poll() throws Exception;
         
         @Override
-        default boolean drainToSink(BaseStepSink<? super Out> sink) throws Exception {
+        default boolean drainToSink(StepSink<? super Out> sink) throws Exception {
             for (Out e; (e = poll()) != null; ) {
                 if (!sink.offer(e)) {
                     return false;
@@ -85,128 +122,64 @@ public class Conduit {
             }
             return true;
         }
-    }
-    
-    public non-sealed interface Silo extends Stage {
-        default Silo compose(Silo before) { }
-        default <T> Sink<T> compose(Sink<T> before) { }
-        default <T> StepSink<T> compose(StepSink<T> before) { }
-        default Silo andThen(Silo after) { }
-        default <T> Source<T> andThen(Source<T> after) { }
-        default <T> StepSource<T> andThen(StepSource<T> after) { }
-    }
-    
-    @FunctionalInterface
-    public non-sealed interface Sink<In> extends BaseSink<In> {
-        default Silo compose(StepSource<? extends In> before) { }
-        default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { }
-        default <T> StepSink<T> compose(Segue<T, ? extends In> before) { }
-        default Sink<In> andThen(Silo after) { }
-        default <T> SinkSource<In, T> andThen(Source<T> after) { }
-        default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { }
-    }
-    
-    @FunctionalInterface
-    public non-sealed interface Source<Out> extends BaseSource<Out> {
-        default Source<Out> compose(Silo before) { }
-        default <T> SinkSource<T, Out> compose(Sink<T> before) { }
-        default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { }
-        default Silo andThen(StepSink<? super Out> after) { }
-        default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { }
-        default <T> StepSource<T> andThen(Segue<? super Out, T> after) { }
-    }
-    
-    @FunctionalInterface
-    public non-sealed interface StepSink<In> extends Sink<In>, BaseStepSink<In> {
-        default Silo compose(Source<? extends In> before) { }
-        default <T> Sink<T> compose(SinkSource<T, ? extends In> before) { }
-        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { }
-        @Override default StepSink<In> andThen(Silo after) { }
-        @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { }
-        @Override default <T> Segue<In, T> andThen(StepSource<T> after) { }
-    }
-    
-    @FunctionalInterface
-    public non-sealed interface StepSource<Out> extends Source<Out>, BaseStepSource<Out> {
-        @Override default StepSource<Out> compose(Silo before) { }
-        @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { }
-        @Override default <T> Segue<T, Out> compose(StepSink<T> before) { }
-        default Silo andThen(Sink<? super Out> after) { }
-        default <T> Source<T> andThen(SinkSource<? super Out, T> after) { }
-        default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { }
-    }
-    
-    public non-sealed interface SinkSource<In, Out> extends BaseSink<In>, BaseSource<Out> {
-        default Sink<In> sink() {
-            var self = this;
-            class WrapperSink implements Sink<In> {
-                @Override public boolean drainFromSource(BaseStepSource<? extends In> source) throws Exception { return self.drainFromSource(source); }
-                @Override public void complete(Throwable error) throws Exception { self.complete(error); }
-            }
-            return new WrapperSink();
-        }
         
-        default Source<Out> source() {
-            var self = this;
-            class WrapperSource implements Source<Out> {
-                @Override public boolean drainToSink(BaseStepSink<? super Out> sink) throws Exception { return self.drainToSink(sink); }
-                @Override public void close() throws Exception { self.close(); }
-            }
-            return new WrapperSource();
-        }
-        
-        default Source<Out> compose(StepSource<? extends In> before) { }
-        default <T> SinkSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { }
-        default <T> StepSinkSource<T, Out> compose(Segue<T, ? extends In> before) { }
-        default Sink<In> andThen(StepSink<? super Out> after) { }
-        default <T> SinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { }
-        default <T> SinkStepSource<In, T> andThen(Segue<? super Out, T> after) { }
+        @Override default StepSource<Out> compose(Silo before) { return new Conduits.ChainStepSource<>(before, this); }
+        @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { return new Conduits.ChainSinkStepSource<>(before, this); }
+        @Override default <T> Segue<T, Out> compose(StepSink<T> before) { return new Conduits.ChainSegue<>(before, this); }
+        default Silo andThen(Sink<? super Out> after) { return new Conduits.ClosedSilo<>(this, after); }
+        default <T> Source<T> andThen(SinkSource<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
     }
     
-    public non-sealed interface StepSinkSource<In, Out> extends BaseStepSink<In>, SinkSource<In, Out> {
-        @Override
-        default StepSink<In> sink() {
-            var self = this;
-            class WrapperStepSink implements StepSink<In> {
-                @Override public boolean offer(In input) throws Exception { return self.offer(input); }
-                @Override public void complete(Throwable error) throws Exception { self.complete(error); }
-            }
-            return new WrapperStepSink();
-        }
+    // We are going to end up with a tree (each node has left/right)
+    // Would we like to keep the tree balanced (to minimize stack usage during traversal)?
+    //  - This would require something like a persistent RB tree, which feels excessive, and is log(N) insertion
+    // Better: Keep the left-side to depth=1, so that we are a linked list, then loop
+    //  - No: Maintaining this property means that either 'andThen' or 'compose' will be O(N)
+    // What might matter to some is: For a SinkSource, which side runs the Silos in-between?
+    //  - If we created it by compose-ing only Source/Sinks, Source-side would run Silos (right-associative)
+    //  - If we created it by andThen-ing only Source/Sinks, Sink-side would run Silos (left-associative)
+    
+    public interface SinkSource<In, Out> {
+        Sink<In> sink();
+        Source<Out> source();
         
-        default Source<Out> compose(Source<? extends In> before) { }
-        default <T> SinkSource<T, Out> compose(SinkSource<T, ? extends In> before) { }
-        default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { }
-        @Override default StepSink<In> andThen(StepSink<? super Out> after) { }
-        @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { }
-        @Override default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { }
+        default Source<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
+        default <T> SinkSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        default Sink<In> andThen(StepSink<? super Out> after) { return new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
+        default <T> SinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSinkSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
     }
     
-    public non-sealed interface SinkStepSource<In, Out> extends SinkSource<In, Out>, BaseStepSource<Out> {
-        @Override
-        default StepSource<Out> source() {
-            var self = this;
-            class WrapperStepSource implements StepSource<Out> {
-                @Override public Out poll() throws Exception { return self.poll(); }
-                @Override public void close() throws Exception { self.close(); }
-            }
-            return new WrapperStepSource();
-        }
+    public interface StepSinkSource<In, Out> extends SinkSource<In, Out> {
+        @Override StepSink<In> sink();
         
-        @Override default StepSource<Out> compose(StepSource<? extends In> before) { }
-        @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { }
-        @Override default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { }
-        default Sink<In> andThen(Sink<? super Out> after) { }
-        default <T> SinkSource<In, T> andThen(SinkSource<? super Out, T> after) { }
-        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { }
+        default Source<Out> compose(Source<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
+        default <T> SinkSource<T, Out> compose(SinkSource<T, ? extends In> before) { return new Conduits.ChainSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
+        @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+    }
+    
+    public interface SinkStepSource<In, Out> extends SinkSource<In, Out> {
+        @Override StepSource<Out> source();
+        
+        @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
+        @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        default Sink<In> andThen(Sink<? super Out> after) { return new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
+        default <T> SinkSource<In, T> andThen(SinkSource<? super Out, T> after) { return new Conduits.ChainSinkSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
     }
     
     public interface Segue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
-        @Override default StepSource<Out> compose(Source<? extends In> before) { }
-        @Override default <T> SinkStepSource<T, Out> compose(SinkSource<T, ? extends In> before) { }
-        @Override default <T> Segue<T, Out> compose(StepSinkSource<T, ? extends In> before) { }
-        @Override default StepSink<In> andThen(Sink<? super Out> after) { }
-        @Override default <T> StepSinkSource<In, T> andThen(SinkSource<? super Out, T> after) { }
-        @Override default <T> Segue<In, T> andThen(SinkStepSource<? super Out, T> after) { }
+        @Override default StepSource<Out> compose(Source<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
+        @Override default <T> SinkStepSource<T, Out> compose(SinkSource<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default <T> Segue<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default StepSink<In> andThen(Sink<? super Out> after) { return new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
+        @Override default <T> StepSinkSource<In, T> andThen(SinkSource<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default <T> Segue<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
     }
 }

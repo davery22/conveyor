@@ -207,104 +207,118 @@ public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
         }
     }
     
-    @Override
-    public boolean offer(In input) throws Exception {
-        Objects.requireNonNull(input);
-        lock.lockInterruptibly();
-        try {
-            if (state() >= COMPLETING) {
-                return false;
-            }
-            initIfNew();
-            if (!awaitSinkDeadline()) {
-                return false;
-            }
-            setAccess(SINK);
-            
-            core.onOffer(controller, input);
-            
-            updateSinkDeadline();
-            updateSourceDeadline();
-            // TODO: latchComplete()?
-            return true;
-        } finally {
-            latchedSinkDeadline = null;
-            latchedSourceDeadline = null;
-            setAccess(NONE);
-            lock.unlock();
-        }
-    }
-    
-    @Override
-    public void complete(Throwable error) throws Exception {
-        lock.lockInterruptibly();
-        try {
-            if (state() >= COMPLETING) {
-                return;
-            }
-            initIfNew();
-            setAccess(SINK);
-            
-            core.onComplete(controller, error);
-            
-            updateSourceDeadline();
-            setState(COMPLETING);
-            readyForSink.signalAll();
-        } finally {
-            latchedSinkDeadline = null;
-            latchedSourceDeadline = null;
-            setAccess(NONE);
-            lock.unlock();
-        }
-    }
-    
-    @Override
-    public Out poll() throws Exception {
-        for (;;) {
+    class Sink implements Conduit.StepSink<In> {
+        @Override
+        public boolean offer(In input) throws Exception {
+            Objects.requireNonNull(input);
             lock.lockInterruptibly();
             try {
-                if (state() == CLOSED) {
-                    return null;
+                if (state() >= COMPLETING) {
+                    return false;
                 }
                 initIfNew();
-                if (!awaitSourceDeadline()) {
-                    return null;
+                if (!awaitSinkDeadline()) {
+                    return false;
                 }
-                setAccess(SOURCE);
+                setAccess(SINK);
                 
-                core.onPoll(controller);
+                core.onOffer(controller, input);
                 
                 updateSinkDeadline();
                 updateSourceDeadline();
-                if (latchedClose()) {
-                    close();
-                }
-                if (latchedOutput != null) {
-                    return latchedOutput;
-                }
+                // TODO: latchComplete()?
+                return true;
             } finally {
                 latchedSinkDeadline = null;
                 latchedSourceDeadline = null;
-                latchedOutput = null;
-                setLatchedClose(false);
+                setAccess(NONE);
+                lock.unlock();
+            }
+        }
+        
+        @Override
+        public void complete(Throwable error) throws Exception {
+            lock.lockInterruptibly();
+            try {
+                if (state() >= COMPLETING) {
+                    return;
+                }
+                initIfNew();
+                setAccess(SINK);
+                
+                core.onComplete(controller, error);
+                
+                updateSourceDeadline();
+                setState(COMPLETING);
+                readyForSink.signalAll();
+            } finally {
+                latchedSinkDeadline = null;
+                latchedSourceDeadline = null;
                 setAccess(NONE);
                 lock.unlock();
             }
         }
     }
     
-    @Override
-    public void close() {
-        lock.lock();
-        try {
-            if (state() == CLOSED) {
-                return;
+    class Source implements Conduit.StepSource<Out> {
+        @Override
+        public Out poll() throws Exception {
+            for (;;) {
+                lock.lockInterruptibly();
+                try {
+                    if (state() == CLOSED) {
+                        return null;
+                    }
+                    initIfNew();
+                    if (!awaitSourceDeadline()) {
+                        return null;
+                    }
+                    setAccess(SOURCE);
+                    
+                    core.onPoll(controller);
+                    
+                    updateSinkDeadline();
+                    updateSourceDeadline();
+                    if (latchedClose()) {
+                        close();
+                    }
+                    if (latchedOutput != null) {
+                        return latchedOutput;
+                    }
+                } finally {
+                    latchedSinkDeadline = null;
+                    latchedSourceDeadline = null;
+                    latchedOutput = null;
+                    setLatchedClose(false);
+                    setAccess(NONE);
+                    lock.unlock();
+                }
             }
-            setState(CLOSED);
-            readyForSink.signalAll();
-            readyForSource.signalAll();
-        } finally {
-            lock.unlock();
         }
+        
+        @Override
+        public void close() {
+            lock.lock();
+            try {
+                if (state() == CLOSED) {
+                    return;
+                }
+                setState(CLOSED);
+                readyForSink.signalAll();
+                readyForSource.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+    
+    @Override
+    public Conduit.StepSink<In> sink() {
+        return new Sink();
+    }
+    
+    @Override
+    public Conduit.StepSource<Out> source() {
+        return new Source();
     }
 }
