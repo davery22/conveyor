@@ -521,8 +521,6 @@ public class Conduits {
     //  - If Source#drainToSink(StepSink) returns true, we can offer to the StepSink again
     //  - So, it's about what we can do with the param afterward!
     
-    // TODO: Add scope + thread names
-    
     // Talking points:
     //  - why exception cause chaining
     //  - semantics of the boolean return of drainFromSource/ToSink, and why the default impls can be the same
@@ -544,6 +542,57 @@ public class Conduits {
     //  - Example: stepBroadcast(), where we pass in StepSinks obtained from eg segue.andThen(sink)
     //    - We need to run() the StepSinks for values to actually reach the true Sinks
     //    - Is there any benefit to NOT calling run() in the combinator Stage, and only doing it somewhere else?
+    
+    // We are going to end up with a tree (each node has left/right)
+    // Would we like to keep the tree balanced (to minimize stack usage during traversal)?
+    //  - This would require something like a persistent RB tree, which feels excessive, and is log(N) insertion
+    // Better: Keep the left-side to depth=1, so that we are a linked list, then loop
+    //  - No: Maintaining this property means that either 'andThen' or 'compose' will be O(N)
+    // What might matter to some is: For a SinkSource, which side runs the Silos in-between?
+    //  - If we created it by compose-ing only Source/Sinks, Source-side would run Silos (right-associative)
+    //  - If we created it by andThen-ing only Source/Sinks, Sink-side would run Silos (left-associative)
+    
+    // Current broadcast:
+    //  - drainFromSource = 1 thread PER sink (sink.drainFromSource(helperSource))
+    //  - each sink tries to poll the same source, blocks if it gets ahead of other sinks
+    // Alternative broadcast:
+    //  - drainFromSource = 1 buffer for each sink;
+    //                      1 thread for source.drainToSink(stepBroadcast(buffers)) [+ 1 thread PER buffer PER offer]
+    //                    + 1 thread PER sink (sink.drainFromSource(buffer))
+    //  - source offers to buffers, sinks poll from buffers
+    //  - each sink tries to poll its own buffer, blocks if its buffer empties (indicating other sinks' buffers are full, source cannot offer)
+    //
+    // We can generally do arbitrary things between 1 (or N) source(s) and 1 (or M) sink(s).
+    //
+    // In Sink.drainFromSource(StepSource), we can run a Segue, then StepSource.poll -> Segue.offer | Sink.drainFromSource(Segue)
+    //  - Makes a new Sink that chains before the original Sink, like Sink.compose(Segue) but not a StepSink
+    //
+    // In Source.drainToSink(StepSink),     we can run a Segue, then Source.drainToSink(Segue) | Segue.poll -> StepSink.offer
+    //  - Makes a new Source that chains after the original Source, like Source.andThen(Segue) but not a StepSource
+    
+    // [step]fuse() is a curious case. It accepts a StepSink and returns a StepSink. It can be implemented Sink -> Sink,
+    // but fundamentally needs a buffer to handle backpressure when pushing multiple elements.
+    
+    // A Sink demands a stronger capability from its [Step]Source - the capability to poll()
+    // A Source demands a stronger capability from its [Step]Sink - the capability to offer()
+    // A builder can sometimes provide a stronger capability by demanding a stronger capability from its inputs
+    //
+    // The capability to poll()/offer() implies that the [Step]Source/Sink does not have a long-lived asynchronous scope
+    // (or that it is managed by the Sink/Source calling it)
+    
+    // For mapAsyncPartitioned(), making it a Sink allows us to poll a StepSource
+    // By asking for a stronger capability from the Source, we avoid needing to provide it ourselves (no internal poll())
+    // Which we certainly would have needed to, because the next step is a fundamental Sink (balance() has a long-lived async scope)
+    
+    // New theory:
+    // Some combinators are 'fundamental' Sources/Sinks, due to needing a long-lived asynchronous scope (or other things?)
+    // Others can be written as Step-Sources/Sinks, providing stronger capability by demanding stronger capability from inputs.
+    // Inputs can be given stronger capability by chaining the Source/Sink to a Segue, yielding a Step-Source/Sink.
+    // If the Segue is a handoff, we get something with similar performance to writing a non-step combinator by hand.
+    //  - Assuming that
+    // If the Segue has a buffer / more substance, that amortizes the cost of context-switching.
+    
+    
     
     // --- Sinks ---
     
@@ -705,7 +754,7 @@ public class Conduits {
             class Sink implements Conduit.Sink<T> {
                 @Override
                 public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsyncPartitioned-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                         var tasks = IntStream.range(0, parallelism)
                             .mapToObj(i -> new Worker())
                             .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
@@ -879,7 +928,7 @@ public class Conduits {
             class Sink implements Conduit.Sink<T> {
                 @Override
                 public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsyncOrdered-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                         var tasks = IntStream.range(0, parallelism)
                             .mapToObj(i -> new Worker())
                             .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
@@ -995,7 +1044,7 @@ public class Conduits {
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsync-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = IntStream.range(0, parallelism)
                         .mapToObj(i -> new Worker())
                         .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
@@ -1141,7 +1190,7 @@ public class Conduits {
         class Balance implements Conduit.Sink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sinks.stream()
                         .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
                         .toList();
@@ -1165,7 +1214,7 @@ public class Conduits {
         class StepBroadcast implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws InterruptedException, ExecutionException {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("broadcast-offer", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sinks.stream()
                         .map(sink -> scope.fork(() -> sink.offer(input)))
                         .toList();
@@ -1183,24 +1232,7 @@ public class Conduits {
         return new StepBroadcast();
     }
     
-    // Current broadcast:
-    //  - drainFromSource = 1 thread PER sink (sink.drainFromSource(helperSource))
-    //  - each sink tries to poll the same source, blocks if it gets ahead of other sinks
-    // Alternative broadcast:
-    //  - drainFromSource = 1 buffer for each sink;
-    //                      1 thread for source.drainToSink(stepBroadcast(buffers)) [+ 1 thread PER buffer PER offer]
-    //                    + 1 thread PER sink (sink.drainFromSource(buffer))
-    //  - source offers to buffers, sinks poll from buffers
-    //  - each sink tries to poll its own buffer, blocks if its buffer empties (indicating other sinks' buffers are full, source cannot offer)
-    
-    // We can generally do arbitrary things between 1 (or N) source(s) and 1 (or M) sink(s).
-    //
-    // In Sink.drainFromSource(StepSource), we can run a Segue, then StepSource.poll -> Segue.offer | Sink.drainFromSource(Segue)
-    //  - Makes a new Sink that chains before the original Sink, like Sink.compose(Segue) but not a StepSink
-    //
-    // In Source.drainToSink(StepSink),     we can run a Segue, then Source.drainToSink(Segue) | Segue.poll -> StepSink.offer
-    //  - Makes a new Source that chains after the original Source, like Source.andThen(Segue) but not a StepSource
-    
+    // TODO: Remove
     public static <T> Conduit.Sink<T> broadcast(List<? extends Conduit.Sink<T>> sinks) {
         class Broadcast implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
@@ -1300,7 +1332,7 @@ public class Conduits {
         class StepPartition implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws Exception {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("partition-offer", Thread.ofVirtual().name("thread-", 0).factory())) {
                     List<StructuredTaskScope.Subtask<Boolean>> tasks = new ArrayList<>();
                     try {
                         IntConsumer router = i -> {
@@ -1390,7 +1422,7 @@ public class Conduits {
         class Merge implements Conduit.Source<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sources.stream()
                         .map(source -> scope.fork(() -> source.drainToSink(sink)))
                         .toList();
@@ -1418,7 +1450,7 @@ public class Conduits {
             public T poll() throws Exception {
                 if (lastIndex == -1) {
                     // First poll - poll all sources to bootstrap the queue
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mergeSorted-poll", Thread.ofVirtual().name("thread-", 0).factory())) {
                         var tasks = sources.stream()
                             .map(source -> scope.fork(source::poll))
                             .toList();
@@ -1454,63 +1486,6 @@ public class Conduits {
         return new StepMergeSorted();
     }
     
-//    public static <T> Conduit.Source<T> mergeSorted(List<? extends Conduit.BaseSource<T>> sources,
-//                                                    Comparator<? super T> comparator) {
-//        class MergeSorted implements Conduit.Source<T> {
-//            final ReentrantLock lock = new ReentrantLock();
-//            final Condition ready = lock.newCondition();
-//            final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
-//
-//            @Override
-//            public boolean drainToSink(Conduit.BaseStepSink<? super T> sink) throws Exception {
-//                class HelperSink implements Conduit.StepSink<T> {
-//                    final int pos;
-//
-//                    HelperSink(int pos) {
-//                        this.pos = pos;
-//                    }
-//
-//                    // TODO: We could probably be speedier by keeping our own buffer for each source, so that the source
-//                    //  has more work to do when we wake it up. But if we did that, we would essentially have StepSources
-//                    //  as input, and this would reduce to stepMergeSorted. This would also imply that something is
-//                    //  externally driving the original Sources to feed the buffers (Source -> StepSink | StepSource ->)
-//                    //  -
-//                    //  If I made the buffers (Segues) internally, I could actually keep the signature the same and run
-//                    //  everything inside drainToSink:
-//                    //   - fork(() -> source.drainToSink(buffer))*
-//                    //   - fork(() -> stepMergeSorted(buffers, comp).drainToSink(sink))
-//
-//                    @Override
-//                    public boolean offer(T input) throws Exception {
-//                        lock.lockInterruptibly();
-//                        try {
-//                            // If this is the first round, wait for everyone to offer
-//                            // If we are the last to offer, poll latest for min, wake up index to offer downstream
-//                            latest.offer(new Indexed<>(input, pos));
-//                        } finally {
-//                            lock.unlock();
-//                        }
-//                    }
-//                }
-//
-//                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-//                    var tasks = IntStream.range(0, sources.size())
-//                        .mapToObj(i -> scope.fork(() -> sources.get(i).drainToSink(new HelperSink(i))))
-//                        .toList();
-//                    scope.join().throwIfFailed();
-//                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
-//                }
-//            }
-//
-//            @Override
-//            public void close() throws Exception {
-//                parallelClose(sources);
-//            }
-//        }
-//
-//        return new MergeSorted();
-//    }
-    
     public static <T1, T2, T> Conduit.StepSource<T> stepZip(Conduit.StepSource<T1> source1,
                                                             Conduit.StepSource<T2> source2,
                                                             BiFunction<? super T1, ? super T2, T> merger) {
@@ -1533,7 +1508,7 @@ public class Conduits {
                     lock.unlock();
                     return null;
                 }
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("zip-poll", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var task1 = scope.fork(source1::poll);
                     var task2 = scope.fork(source2::poll);
                     scope.join().throwIfFailed();
@@ -1567,6 +1542,7 @@ public class Conduits {
         return new StepZip();
     }
     
+    // TODO: Remove
     public static <T1, T2, T> Conduit.Source<T> zip(Conduit.Source<T1> source1,
                                                     Conduit.Source<T2> source2,
                                                     BiFunction<? super T1, ? super T2, T> merger) {
@@ -1672,28 +1648,6 @@ public class Conduits {
         return new Zip();
     }
     
-    // [step]fuse() is a curious case. It accepts a StepSink and returns a StepSink. It can be implemented Sink -> Sink,
-    // but fundamentally needs a buffer to handle backpressure when pushing multiple elements.
-    
-    // A Sink demands a stronger capability from its [Step]Source - the capability to poll()
-    // A Source demands a stronger capability from its [Step]Sink - the capability to offer()
-    // A builder can sometimes provide a stronger capability by demanding a stronger capability from its inputs
-    //
-    // The capability to poll()/offer() implies that the [Step]Source/Sink does not have a long-lived asynchronous scope
-    // (or that it is managed by the Sink/Source calling it)
-    
-    // For mapAsyncPartitioned(), making it a Sink allows us to poll a StepSource
-    // By asking for a stronger capability from the Source, we avoid needing to provide it ourselves (no internal poll())
-    // Which we certainly would have needed to, because the next step is a fundamental Sink (balance() has a long-lived async scope)
-    
-    // New theory:
-    // Some combinators are 'fundamental' Sources/Sinks, due to needing a long-lived asynchronous scope (or other things?)
-    // Others can be written as Step-Sources/Sinks, providing stronger capability by demanding stronger capability from inputs.
-    // Inputs can be given stronger capability by chaining the Source/Sink to a Segue, yielding a Step-Source/Sink.
-    // If the Segue is a handoff, we get something with similar performance to writing a non-step combinator by hand.
-    //  - Assuming that
-    // If the Segue has a buffer / more substance, that amortizes the cost of context-switching.
-    
     public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
                                                           Conduit.Source<T2> source2,
                                                           BiFunction<? super T1, ? super T2, T> merger) {
@@ -1775,7 +1729,7 @@ public class Conduits {
                     abstract Y latest2();
                 }
                 
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("zipLatest-drainToSink", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var task1 = scope.fork(() -> source1.drainToSink(new HelperSink<>() {
                         @Override void setLatest1(T1 t) { latest1 = t; }
                         @Override T2 latest2() { return latest2; }
