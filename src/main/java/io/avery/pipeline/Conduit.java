@@ -10,8 +10,6 @@ public class Conduit {
     private Conduit() {}
     
     public sealed interface Stage {
-        // TODO: User should not decide what T is
-//        default <T> void run(BiConsumer<Source<T>, Sink<T>> connector) { }
         default void run(StructuredTaskScope<?> scope) { }
     }
     
@@ -130,15 +128,6 @@ public class Conduit {
         default <T> Source<T> andThen(SinkSource<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
         default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
     }
-    
-    // We are going to end up with a tree (each node has left/right)
-    // Would we like to keep the tree balanced (to minimize stack usage during traversal)?
-    //  - This would require something like a persistent RB tree, which feels excessive, and is log(N) insertion
-    // Better: Keep the left-side to depth=1, so that we are a linked list, then loop
-    //  - No: Maintaining this property means that either 'andThen' or 'compose' will be O(N)
-    // What might matter to some is: For a SinkSource, which side runs the Silos in-between?
-    //  - If we created it by compose-ing only Source/Sinks, Source-side would run Silos (right-associative)
-    //  - If we created it by andThen-ing only Source/Sinks, Sink-side would run Silos (left-associative)
     
     public interface SinkSource<In, Out> {
         Sink<In> sink();

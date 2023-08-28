@@ -538,6 +538,12 @@ public class Conduits {
     //   - Same with a buffer that is passed to a Source (that runs it), like zip(), but used as a Sink separately
     //   - This would only be safe if buffer.run() doesn't do anything (or is idempotent)
     //  Maybe: Run things when they must be connected to our internals? (Because we can't avoid it then)
+    // TODO: I'm pretty sure we should run() Stages that we pass / use in combinators
+    //  - The risk is in reusing the same Stages in a separate / external pipeline, thus run()-ing again
+    //    - We can eliminate this risk by making run() idempotent - eg use a CAS in the Chain impls
+    //  - Example: stepBroadcast(), where we pass in StepSinks obtained from eg segue.andThen(sink)
+    //    - We need to run() the StepSinks for values to actually reach the true Sinks
+    //    - Is there any benefit to NOT calling run() in the combinator Stage, and only doing it somewhere else?
     
     // --- Sinks ---
     
@@ -1311,6 +1317,9 @@ public class Conduits {
                     // TODO: This returns false when ANY sink cancels,
                     //  but the sink that cancelled may not be selected in subsequent offers,
                     //  causing return true again.
+                    // TODO: Track active sinks, use eagerCancel config
+                    // TODO: Multiple offers to same sink can arrive out-of-order due to different threads
+                    // TODO: Transform elements while offering
                 }
             }
             
@@ -1323,7 +1332,12 @@ public class Conduits {
         return new StepPartition();
     }
     
-    // TODO: partition
+    // TODO: partition + dual (select?)
+    
+    // balance + merge [mergeSorted]
+    // broadcast + zip [zipLatest]
+    // partition + select
+    // exhaust + concat
     
     // --- Sources ---
     
@@ -1395,7 +1409,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.StepSource<T> stepMergeSorted(List<? extends Conduit.StepSource<T>> sources,
-                                                                Comparator<? super T> comparator) {
+                                                            Comparator<? super T> comparator) {
         class StepMergeSorted implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = -1;
@@ -1405,10 +1419,9 @@ public class Conduits {
                 if (lastIndex == -1) {
                     // First poll - poll all sources to bootstrap the queue
                     try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-                        List<StructuredTaskScope.Subtask<T>> tasks = new ArrayList<>();
-                        for (var source : sources) {
-                            tasks.add(scope.fork(source::poll));
-                        }
+                        var tasks = sources.stream()
+                            .map(source -> scope.fork(source::poll))
+                            .toList();
                         scope.join().throwIfFailed();
                         for (int i = 0; i < tasks.size(); i++) {
                             var t = tasks.get(i).get();
@@ -1539,13 +1552,12 @@ public class Conduits {
             @Override
             public void close() throws Exception {
                 lock.lockInterruptibly();
-                if (state == CLOSED) {
-                    lock.unlock();
-                    return;
-                }
                 try {
-                    parallelClose(List.of(source1, source2));
+                    if (state == CLOSED) {
+                        return;
+                    }
                     state = CLOSED;
+                    parallelClose(List.of(source1, source2));
                 } finally {
                     lock.unlock();
                 }
@@ -1645,13 +1657,12 @@ public class Conduits {
             @Override
             public void close() throws Exception {
                 lock.lockInterruptibly();
-                if (state == CLOSED) {
-                    lock.unlock();
-                    return;
-                }
                 try {
-                    parallelClose(List.of(source1, source2));
+                    if (state == CLOSED) {
+                        return;
+                    }
                     state = CLOSED;
+                    parallelClose(List.of(source1, source2));
                 } finally {
                     lock.unlock();
                 }
@@ -1660,6 +1671,28 @@ public class Conduits {
         
         return new Zip();
     }
+    
+    // [step]fuse() is a curious case. It accepts a StepSink and returns a StepSink. It can be implemented Sink -> Sink,
+    // but fundamentally needs a buffer to handle backpressure when pushing multiple elements.
+    
+    // A Sink demands a stronger capability from its [Step]Source - the capability to poll()
+    // A Source demands a stronger capability from its [Step]Sink - the capability to offer()
+    // A builder can sometimes provide a stronger capability by demanding a stronger capability from its inputs
+    //
+    // The capability to poll()/offer() implies that the [Step]Source/Sink does not have a long-lived asynchronous scope
+    // (or that it is managed by the Sink/Source calling it)
+    
+    // For mapAsyncPartitioned(), making it a Sink allows us to poll a StepSource
+    // By asking for a stronger capability from the Source, we avoid needing to provide it ourselves (no internal poll())
+    // Which we certainly would have needed to, because the next step is a fundamental Sink (balance() has a long-lived async scope)
+    
+    // New theory:
+    // Some combinators are 'fundamental' Sources/Sinks, due to needing a long-lived asynchronous scope (or other things?)
+    // Others can be written as Step-Sources/Sinks, providing stronger capability by demanding stronger capability from inputs.
+    // Inputs can be given stronger capability by chaining the Source/Sink to a Segue, yielding a Step-Source/Sink.
+    // If the Segue is a handoff, we get something with similar performance to writing a non-step combinator by hand.
+    //  - Assuming that
+    // If the Segue has a buffer / more substance, that amortizes the cost of context-switching.
     
     public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
                                                           Conduit.Source<T2> source2,
@@ -1759,13 +1792,12 @@ public class Conduits {
             @Override
             public void close() throws Exception {
                 lock.lockInterruptibly();
-                if (state == CLOSED) {
-                    lock.unlock();
-                    return;
-                }
                 try {
-                    parallelClose(List.of(source1, source2));
+                    if (state == CLOSED) {
+                        return;
+                    }
                     state = CLOSED;
+                    parallelClose(List.of(source1, source2));
                 } finally {
                     lock.unlock();
                 }
@@ -2186,7 +2218,6 @@ public class Conduits {
             ensureOwnerAndJoined();
             Throwable err = error;
             if (err != null) {
-                // TODO: Does this handle suppression correctly?
                 throw new ExecutionException(err);
             }
         }
@@ -2232,33 +2263,6 @@ public class Conduits {
         return sink;
     }
     
-//    public static <T> BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> drainToCompletion(Consumer<Callable<?>> fork) {
-//        Objects.requireNonNull(fork);
-//        class DrainToCompletion implements BiConsumer<Conduit.Source<T>, Conduit.Sink<T>> {
-//            @Override
-//            public void accept(Conduit.Source<T> source, Conduit.Sink<T> sink) {
-//                source.run(this);
-//                fork.accept(() -> {
-//                    try (source) {
-//                        if (sink instanceof Conduit.StepSink<T> ss) {
-//                            source.drainToSink(ss);
-//                        } else if (source instanceof Conduit.StepSource<T> ss) {
-//                            sink.drainFromSource(ss);
-//                        } else {
-//                            throw new IllegalArgumentException("source must be StepSource or sink must be StepSink");
-//                        }
-//                        sink.complete(null);
-//                    } catch (Throwable error) {
-//                        sink.complete(error);
-//                    }
-//                    return null;
-//                });
-//                sink.run(this);
-//            }
-//        }
-//        return new DrainToCompletion();
-//    }
-    
     private static class Indexed<T> {
         final T element;
         final int index;
@@ -2293,9 +2297,31 @@ public class Conduits {
         }
     }
     
-    record ClosedSilo<T>(Conduit.Source<? extends T> source, Conduit.Sink<? super T> sink) implements Conduit.Silo {
+    static final class ClosedSilo<T> implements Conduit.Silo {
+        final Conduit.Source<? extends T> source;
+        final Conduit.Sink<? super T> sink;
+        boolean ran = false;
+        
+        static final VarHandle RAN;
+        static {
+            try {
+                RAN = MethodHandles.lookup().findVarHandle(ClosedSilo.class, "ran", boolean.class);
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+        
+        ClosedSilo(Conduit.Source<? extends T> source, Conduit.Sink<? super T> sink) {
+            this.source = source;
+            this.sink = sink;
+        }
+        
         @Override
         public void run(StructuredTaskScope<?> scope) {
+            if (!RAN.compareAndSet(this, false, true)) {
+                return;
+            }
+            
             source.run(scope);
             scope.fork(() -> {
                 try (source) {
@@ -2307,21 +2333,12 @@ public class Conduits {
                         throw new AssertionError("source must be StepSource or sink must be StepSink");
                     }
                     sink.complete(null);
-                }
-                catch (Throwable error) {
+                } catch (Throwable error) {
                     sink.complete(error);
                 }
                 return null;
             });
             sink.run(scope);
-        }
-    }
-    
-    record ChainSilo(Conduit.Silo left, Conduit.Silo right) implements Conduit.Silo {
-        @Override
-        public void run(StructuredTaskScope<?> scope) {
-            left.run(scope);
-            right.run(scope);
         }
     }
     
@@ -2337,6 +2354,12 @@ public class Conduits {
         public void run(StructuredTaskScope<?> scope) {
             left.run(scope);
             right.run(scope);
+        }
+    }
+    
+    static final class ChainSilo extends Chain implements Conduit.Silo {
+        ChainSilo(Conduit.Silo left, Conduit.Silo right) {
+            super(left, right);
         }
     }
     
