@@ -8,7 +8,6 @@ import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -19,7 +18,8 @@ import java.util.stream.Stream;
 class ConduitsTest {
     // TODO: Remove
     public static void main(String[] args) throws Exception {
-        testNostepVsBuffer();
+        testMapAsyncVsMapBalanced();
+//        testNostepVsBuffer();
 //        testSpeed();
 //        test1();
 //        test2();
@@ -30,6 +30,31 @@ class ConduitsTest {
 //                System.out.println(line);
 //            }
 //        }
+    }
+    
+    static void testMapAsyncVsMapBalanced() throws Exception {
+        var start = Instant.now();
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            long[] a = { 0 };
+            var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
+            
+            Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null)
+//                .andThen(Conduits.mapBalanceOrdered(
+//                    i -> () -> i * 2,
+//                    IntStream.range(0, 4).mapToObj(i -> Conduits.<Long>stepSink(e -> { a[0] += e; return true; })).toList()
+//                ))
+                .andThen(Conduits.mapAsyncOrdered(
+                    4, 400,
+                    i -> () -> i * 2
+                ))
+                .andThen(Conduits.stepSink(e -> { a[0] += e; return true; }))
+                .run(scope);
+            
+            scope.join().throwIfFailed();
+            System.out.println(a[0]);
+        }
+        var end = Instant.now();
+        System.out.println(Duration.between(start, end));
     }
     
     static void testNostepVsBuffer() throws Exception {
@@ -58,7 +83,7 @@ class ConduitsTest {
 //                    Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; }),
 //                    Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; })
 //                )))
-                .andThen(Conduits.stepBroadcast(List.of(
+                .andThen(Conduits.broadcast(List.of(
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> a[0] += e+1); return true; })),
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
@@ -86,9 +111,6 @@ class ConduitsTest {
                     }
                     return true;
                 })
-//                .andThen(buffer(1))
-//                .andThen(Conduits.buffer(1))
-//                .andThen(Conduits.handoff())
                 .andThen(Conduits.stepSink(e -> { res[0] += e; return true; }))
                 .run(scope);
             
@@ -194,8 +216,7 @@ class ConduitsTest {
                 .andThen(seg.source())
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
-                    Conduits.buffer(16).andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-//                    Conduits.handoff().andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
+                    ConduitsTest.buffer(16).andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 ))
                 .run(scope);
             
@@ -206,20 +227,14 @@ class ConduitsTest {
     static void testBidi() throws InterruptedException, ExecutionException {
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
             var buffer = Conduits.extrapolate(0, e -> Collections.emptyIterator(), 256);
-            var probe = Conduits.<Integer>source(sink -> {
-                try (var in = new Scanner(System.in)) {
-                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
-                        if (!sink.offer(line.length())) {
-                            return false;
-                        }
-                    }
-                    return true;
-                }
-            });
+            var iter = Stream.generate(new Scanner(System.in)::nextLine)
+                .takeWhile(line -> !"stop".equalsIgnoreCase(line))
+                .iterator();
+            var probe = Conduits.stepSource(() -> iter.hasNext() ? iter.next().length() : null);
             
             Conduits
                 .zip(buffer.source(), probe, Integer::sum)
-                .andThen(Conduits.stepBroadcast(List.of(
+                .andThen(Conduits.broadcast(List.of(
                     buffer.sink(),
                     Conduits.stepSink(e -> { System.out.println(e); return true; })
                 )))
