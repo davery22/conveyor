@@ -262,20 +262,9 @@ public class Conduits {
     
     // --- Sinks ---
     
-    public static <In, T, A> Conduit.StepSink<In> fuse(Gatherer<In, A, T> gatherer, Conduit.StepSink<? super T> downstream) {
+    public static <In, T, A> Conduit.StepSink<In> fuse(Gatherer<In, A, T> gatherer, Conduit.StepSink<? super T> sink) {
         Objects.requireNonNull(gatherer);
-        Objects.requireNonNull(downstream);
-        
-        class WrappingException extends RuntimeException {
-            WrappingException(Exception e) {
-                super(e);
-            }
-            
-            @Override
-            public synchronized Exception getCause() {
-                return (Exception) super.getCause();
-            }
-        }
+        Objects.requireNonNull(sink);
         
         var lock = new ReentrantLock();
         var supplier = gatherer.supplier();
@@ -283,7 +272,7 @@ public class Conduits {
         var finisher = gatherer.finisher();
         Gatherer.Sink<T> gsink = el -> {
             try {
-                return downstream.offer(el);
+                return sink.offer(el);
             } catch (Error | RuntimeException e) {
                 throw e;
             } catch (Exception e) {
@@ -347,7 +336,7 @@ public class Conduits {
                     if (error == null) {
                         finisher.accept(acc, gsink);
                     }
-                    downstream.complete(error);
+                    sink.complete(error);
                     state = COMPLETED;
                 } catch (WrappingException e) {
                     if (e.getCause() instanceof InterruptedException) {
@@ -361,34 +350,33 @@ public class Conduits {
             
             @Override
             public void run(StructuredTaskScope<?> scope) {
-                downstream.run(scope);
+                sink.run(scope);
             }
         }
         
         return new Fuse();
     }
     
-    
-    // POLL:
-    // Worker polls element from source
-    // If completion buffer is full, worker waits until not full
-    // Worker offers element to completion buffer
-    // If element partition has permits, worker takes one and begins work (END)
-    // Worker offers element to partition buffer, goes to step 1
-    
-    // TODO^: If partition has no permits, then MAX other workers are already working the partition, so leave that be
-    //  But if those workers fail (and we recover), might we forget about the partition?
-    
-    // OFFER:
-    // Worker polls partition buffer, continues if not empty (END)
-    // Worker gives permit back to partition
-    // If partition has max permits, worker removes partition
-    
     public static <T, K, U> Conduit.SinkStepSource<T, U> mapAsyncPartitioned(int parallelism,
                                                                              int permitsPerPartition,
                                                                              int bufferLimit,
                                                                              Function<? super T, K> classifier,
                                                                              BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
+        // POLL:
+        // Worker polls element from source
+        // If completion buffer is full, worker waits until not full
+        // Worker offers element to completion buffer
+        // If element partition has permits, worker takes one and begins work (END)
+        // Worker offers element to partition buffer, goes to step 1
+        
+        // TODO^: If partition has no permits, then MAX other workers are already working the partition, so leave that be
+        //  But if those workers fail (and we recover), might we forget about the partition?
+        
+        // OFFER:
+        // Worker polls partition buffer, continues if not empty (END)
+        // Worker gives permit back to partition
+        // If partition has max permits, worker removes partition
+        
         if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");
         }
@@ -786,7 +774,7 @@ public class Conduits {
     
     public static <T, U> Conduit.Sink<T> mapAsync(int parallelism,
                                                   Function<? super T, ? extends Callable<U>> mapper,
-                                                  Conduit.StepSink<U> downstream) {
+                                                  Conduit.StepSink<U> sink) {
         class MapAsync implements Conduit.Sink<T> {
             final ReentrantLock lock = new ReentrantLock();
             
@@ -807,7 +795,7 @@ public class Conduits {
                             lock.unlock();
                         }
                         U out = callable.call();
-                        if (out != null && !downstream.offer(out)) {
+                        if (out != null && !sink.offer(out)) {
                             return false;
                         }
                     }
@@ -828,12 +816,12 @@ public class Conduits {
             
             @Override
             public void complete(Throwable error) throws Exception {
-                downstream.complete(error);
+                sink.complete(error);
             }
             
             @Override
             public void run(StructuredTaskScope<?> scope) {
-                downstream.run(scope);
+                sink.run(scope);
             }
         }
         
@@ -854,8 +842,15 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws InterruptedException, ExecutionException {
-                parallelComplete(sinks, error);
+            public void complete(Throwable error) throws Exception {
+                composedComplete(sinks, 0, error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var sink : sinks) {
+                    sink.run(scope);
+                }
             }
         }
         
@@ -867,21 +862,16 @@ public class Conduits {
             @Override
             public boolean offer(T input) throws Exception {
                 for (var sink : sinks) {
-                    if (!sink.offer(input)) return false;
+                    if (!sink.offer(input)) {
+                        return false;
+                    }
                 }
                 return true;
-//                try (var scope = new StructuredTaskScope.ShutdownOnFailure("broadcast-offer", Thread.ofVirtual().name("thread-", 0).factory())) {
-//                    var tasks = sinks.stream()
-//                        .map(sink -> scope.fork(() -> sink.offer(input)))
-//                        .toList();
-//                    scope.join().throwIfFailed();
-//                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
-//                }
             }
             
             @Override
-            public void complete(Throwable error) throws InterruptedException, ExecutionException {
-                parallelComplete(sinks, error);
+            public void complete(Throwable error) throws Exception {
+                composedComplete(sinks, 0, error);
             }
             
             @Override
@@ -895,47 +885,66 @@ public class Conduits {
         return new Broadcast();
     }
     
-    public static <T> Conduit.StepSink<T> partition(List<? extends Conduit.StepSink<T>> sinks,
-                                                    BiConsumer<T, IntConsumer> selector) {
-        class Partition implements Conduit.StepSink<T> {
+    public static <T, U> Conduit.StepSink<T> route(BiConsumer<T, BiConsumer<Integer, U>> router,
+                                                   boolean eagerCancel,
+                                                   List<? extends Conduit.StepSink<U>> sinks) {
+        BitSet active = new BitSet(sinks.size());
+        active.set(0, sinks.size(), true);
+        BiConsumer<Integer, U> pusher = (i, u) -> {
+            try {
+                var sink = sinks.get(i); // Note: Can throw IOOBE
+                if (active.get(i) && !sink.offer(u)) {
+                    active.clear(i);
+                }
+            } catch (Error | RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                // We are not allowed to throw checked exceptions in this context;
+                // wrap them so that we might rediscover them farther up the stack.
+                // (They might still be dropped or re-wrapped between here and there.)
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new WrappingException(e);
+            }
+        };
+        
+        class Route implements Conduit.StepSink<T> {
+            boolean done = false;
+            
             @Override
             public boolean offer(T input) throws Exception {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure("partition-offer", Thread.ofVirtual().name("thread-", 0).factory())) {
-                    List<StructuredTaskScope.Subtask<Boolean>> tasks = new ArrayList<>();
-                    try {
-                        IntConsumer router = i -> {
-                            var sink = sinks.get(i); // Note: Can throw IOOBE
-                            tasks.add(scope.fork(() -> sink.offer(input)));
-                        };
-                        selector.accept(input, router); // Note: User-defined callback can throw exception
-                    } catch (Error | Exception e) {
-                        scope.shutdown();
-                        throw e;
-                    }
-                    scope.join().throwIfFailed();
-                    return tasks.stream().allMatch(StructuredTaskScope.Subtask::get);
-                    // TODO: This returns false when ANY sink cancels,
-                    //  but the sink that cancelled may not be selected in subsequent offers,
-                    //  causing return true again.
-                    // TODO: Track active sinks, use eagerCancel config
-                    // TODO: Multiple offers to same sink can arrive out-of-order due to different threads
-                    // TODO: Transform elements while offering
+                if (done) {
+                    return false;
                 }
+                try {
+                    router.accept(input, pusher); // Note: User-defined callback can throw exception
+                } catch (WrappingException e) {
+                    if (e.getCause() instanceof InterruptedException) {
+                        Thread.interrupted();
+                    }
+                    throw e.getCause();
+                } finally {
+                    done = eagerCancel ? active.cardinality() < sinks.size() : active.isEmpty();
+                }
+                return !done;
             }
             
             @Override
             public void complete(Throwable error) throws Exception {
-                parallelComplete(sinks, error);
+                composedComplete(sinks, 0, error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var sink : sinks) {
+                    sink.run(scope);
+                }
             }
         }
         
-        return new Partition();
+        return new Route();
     }
-    
-    // balance + merge [mergeSorted]
-    // broadcast + zip [zipLatest]
-    // partition + select(?)
-    // exhaust(?) + concat
     
     // --- Sources ---
     
@@ -956,7 +965,14 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                parallelClose(sources);
+                composedClose(sources, 0);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var source : sources) {
+                    source.run(scope);
+                }
             }
         }
         
@@ -977,7 +993,14 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                parallelClose(sources);
+                composedClose(sources, 0);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var source : sources) {
+                    source.run(scope);
+                }
             }
         }
         
@@ -999,7 +1022,14 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                parallelClose(sources);
+                composedClose(sources, 0);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var source : sources) {
+                    source.run(scope);
+                }
             }
         }
         
@@ -1016,16 +1046,10 @@ public class Conduits {
             public T poll() throws Exception {
                 if (lastIndex == -1) {
                     // First poll - poll all sources to bootstrap the queue
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mergeSorted-poll", Thread.ofVirtual().name("thread-", 0).factory())) {
-                        var tasks = sources.stream()
-                            .map(source -> scope.fork(source::poll))
-                            .toList();
-                        scope.join().throwIfFailed();
-                        for (int i = 0; i < tasks.size(); i++) {
-                            var t = tasks.get(i).get();
-                            if (t != null) {
-                                latest.offer(new Indexed<>(t, i));
-                            }
+                    for (int i = 0; i < sources.size(); i++) {
+                        var t = sources.get(i).poll();
+                        if (t != null) {
+                            latest.offer(new Indexed<>(t, i));
                         }
                     }
                 } else {
@@ -1045,7 +1069,14 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                parallelClose(sources);
+                composedClose(sources, 0);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var source : sources) {
+                    source.run(scope);
+                }
             }
         }
         
@@ -1070,21 +1101,21 @@ public class Conduits {
             @Override
             public T poll() throws Exception {
                 lock.lockInterruptibly();
-                if (state >= COMPLETING) {
-                    lock.unlock();
-                    return null;
-                }
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure("zip-poll", Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var task1 = scope.fork(source1::poll);
-                    var task2 = scope.fork(source2::poll);
-                    scope.join().throwIfFailed();
-                    var result1 = task1.get();
-                    var result2 = task2.get();
-                    if (result1 == null || result2 == null) {
+                try {
+                    if (state >= COMPLETING) {
+                        return null;
+                    }
+                    var e1 = source1.poll();
+                    if (e1 == null) {
                         state = COMPLETING;
                         return null;
                     }
-                    return Objects.requireNonNull(merger.apply(result1, result2));
+                    var e2 = source2.poll();
+                    if (e2 == null) {
+                        state = COMPLETING;
+                        return null;
+                    }
+                    return Objects.requireNonNull(merger.apply(e1, e2));
                 } finally {
                     lock.unlock();
                 }
@@ -1098,10 +1129,16 @@ public class Conduits {
                         return;
                     }
                     state = CLOSED;
-                    parallelClose(List.of(source1, source2));
+                    try (source1; source2) { }
                 } finally {
                     lock.unlock();
                 }
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                source1.run(scope);
+                source2.run(scope);
             }
         }
         
@@ -1211,10 +1248,16 @@ public class Conduits {
                         return;
                     }
                     state = CLOSED;
-                    parallelClose(List.of(source1, source2));
+                    try (source1; source2) { }
                 } finally {
                     lock.unlock();
                 }
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                source1.run(scope);
+                source2.run(scope);
             }
         }
         
@@ -1508,7 +1551,7 @@ public class Conduits {
                     ctl.latchOutput(head);
                     ctl.latchSourceDeadline((!queue.isEmpty() || done) ? Instant.MIN : clock().instant().plus(timeout));
                 } else if (!done) {
-                    ctl.latchOutput(extraSupplier.get()); // TODO: May throw
+                    ctl.latchOutput(extraSupplier.get());
                     ctl.latchSourceDeadline(clock().instant().plus(timeout));
                 } else {
                     ctl.latchClose();
@@ -1599,68 +1642,6 @@ public class Conduits {
         return new TimedSegue<>(core);
     }
     
-    // TODO: Expose
-    private static class AggregateFailure extends StructuredTaskScope<Object> {
-        volatile Throwable error;
-        
-        static final VarHandle ERROR;
-        static {
-            try {
-                ERROR = MethodHandles.lookup().findVarHandle(AggregateFailure.class, "error", Throwable.class);
-            } catch (Exception e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
-        
-        @Override
-        protected void handleComplete(Subtask<?> subtask) {
-            if (subtask.state() == Subtask.State.FAILED) {
-                Throwable err = subtask.exception();
-                if (!ERROR.compareAndSet(this, null, err)) {
-                    error.addSuppressed(err);
-                }
-            }
-        }
-        
-        @Override
-        public AggregateFailure join() throws InterruptedException {
-            super.join();
-            return this;
-        }
-        
-        public void throwIfFailed() throws ExecutionException {
-            ensureOwnerAndJoined();
-            Throwable err = error;
-            if (err != null) {
-                throw new ExecutionException(err);
-            }
-        }
-    }
-    
-    public static void parallelClose(Collection<? extends Conduit.Source<?>> sources) throws InterruptedException, ExecutionException {
-        try (var scope = new AggregateFailure()) {
-            for (var source : sources) {
-                scope.fork(() -> {
-                    source.close();
-                    return null;
-                });
-            }
-            scope.join().throwIfFailed();
-        }
-    }
-    
-    public static void parallelComplete(Collection<? extends Conduit.Sink<?>> sinks, Throwable error) throws InterruptedException, ExecutionException {
-        try (var scope = new AggregateFailure()) {
-            for (var sink : sinks) {
-                scope.fork(() -> {
-                    sink.complete(error);
-                    return null;
-                });
-            }
-            scope.join().throwIfFailed();
-        }
-    }
-    
     public static <T> Conduit.Source<T> source(Conduit.Source<T> source) {
         return source;
     }
@@ -1675,6 +1656,38 @@ public class Conduits {
     
     public static <T> Conduit.StepSink<T> stepSink(Conduit.StepSink<T> sink) {
         return sink;
+    }
+    
+    private static void composedClose(List<? extends Conduit.Source<?>> sources, int i) throws Exception {
+        if (i == sources.size()) {
+            return;
+        }
+        try (var ignored = sources.get(i)) {
+            composedClose(sources, i+1);
+        }
+    }
+    
+    private static void composedComplete(List<? extends Conduit.Sink<?>> sinks, int i, Throwable e) throws Exception {
+        if (i == sinks.size()) {
+            return;
+        }
+        Throwable primaryEx = null;
+        try {
+            composedComplete(sinks, i+1, e);
+        } catch (Error | Exception ex) {
+            primaryEx = ex;
+            throw ex;
+        } finally {
+            if (primaryEx != null) {
+                try {
+                    sinks.get(i).complete(e);
+                } catch (Throwable suppressedEx) {
+                    primaryEx.addSuppressed(suppressedEx);
+                }
+            } else {
+                sinks.get(i).complete(e);
+            }
+        }
     }
     
     private static class Indexed<T> {
@@ -1708,6 +1721,17 @@ public class Conduits {
         
         public int compareTo(Expiring other) {
             return deadline.compareTo(other.deadline);
+        }
+    }
+    
+    private static class WrappingException extends RuntimeException {
+        WrappingException(Exception e) {
+            super(e);
+        }
+        
+        @Override
+        public synchronized Exception getCause() {
+            return (Exception) super.getCause();
         }
     }
     
