@@ -258,6 +258,16 @@ public class Conduits {
     //  - Assuming that
     // If the Segue has a buffer / more substance, that amortizes the cost of context-switching.
     
+    // TODO: The lack of these invariants seems problematic for plain Sinks/Source,
+    //       as complete/close could be called concurrently with drainFromSource/ToSink, leading to pain?
+    //       - If the shared stage is not lock-protected, complete/close may dangerously race with offer/poll
+    //       - But, a shared stage that is not lock-protected implies offers/polls may dangerously race with each other
+    //  Sink invariant? complete() will be called after all offer()s (or after drainFromSource())
+    //   - counter-ex: Many sinks/sources that offer to the same sink
+    //   - common case: passing the same buffer for multiple sinks to offer to, possibly with different async bounds between ('custom merge')
+    //  Source invariant? close() will be called after all poll()s (or after drainToSink())
+    //   - counter-ex: Many sinks/sources that poll from the same source
+    //   - haven't really seen an example of this one - currently no reusing source-side of buffers ('custom balance')
     
     
     // --- Sinks ---
@@ -266,7 +276,6 @@ public class Conduits {
         Objects.requireNonNull(gatherer);
         Objects.requireNonNull(sink);
         
-        var lock = new ReentrantLock();
         var supplier = gatherer.supplier();
         var integrator = gatherer.integrator();
         var finisher = gatherer.finisher();
@@ -295,7 +304,6 @@ public class Conduits {
             static final int COMPLETED = 2;
             
             void initIfNew() {
-                //assert lock.isHeldByCurrentThread();
                 if (state == NEW) {
                     acc = supplier.get();
                     state = RUNNING;
@@ -304,7 +312,6 @@ public class Conduits {
             
             @Override
             public boolean offer(In input) throws Exception {
-                lock.lockInterruptibly();
                 try {
                     if (state == COMPLETED) {
                         return false;
@@ -320,14 +327,11 @@ public class Conduits {
                         Thread.interrupted();
                     }
                     throw e.getCause();
-                } finally {
-                    lock.unlock();
                 }
             }
             
             @Override
             public void complete(Throwable error) throws Exception {
-                lock.lockInterruptibly();
                 try {
                     if (state == COMPLETED) {
                         return;
@@ -343,8 +347,6 @@ public class Conduits {
                         Thread.interrupted();
                     }
                     throw e.getCause();
-                } finally {
-                    lock.unlock();
                 }
             }
             
@@ -828,10 +830,107 @@ public class Conduits {
         return new MapAsync();
     }
     
+    public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
+                                                 BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory,
+                                                 boolean recreateCompletedSinks) {
+        // TODO: Consider capturing the scope in run(), and blocking createdSinks' run() until scope is available.
+        //  There is already the risk that drainFromSource blocks if run() is not called -- downstreams are not polling.
+        //  So no loss there. But then we can put downstream completions in complete() - ie where they would normally go
+        //  if the downstreams were passed in rather than created internally. And, then we can be a StepSink rather than
+        //  a plain Sink.
+        
+        class GroupBy implements Conduit.Sink<T> {
+            final Map<K, Object> sinkByKey = new HashMap<>();
+            
+            static final Object TOMBSTONE = new Object();
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                try (var scope = new SlowFailScope("groupBy-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
+                    var task = scope.fork(() -> {
+                        Throwable err = null;
+                        try {
+                            for (T val; (val = source.poll()) != null; ) {
+                                K key = classifier.apply(val);
+                                var s = sinkByKey.get(key);
+                                if (s == TOMBSTONE) {
+                                    continue;
+                                }
+                                @SuppressWarnings("unchecked")
+                                var sink = (Conduit.StepSink<? super T>) s;
+                                if (sink == null) {
+                                    sink = sinkFactory.apply(key, val);
+                                    if (sink == null) {
+                                        continue;
+                                    }
+                                    // Note that running a sink per key could produce unbounded threads.
+                                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
+                                    // incomplete sinks and returning null if maxed (thus dropping elements).
+                                    sinkByKey.put(key, sink);
+                                    sink.run(scope);
+                                }
+                                if (!sink.offer(val)) {
+                                    sink.complete(null);
+                                    if (recreateCompletedSinks) {
+                                        sinkByKey.remove(key);
+                                    } else {
+                                        sinkByKey.put(key, TOMBSTONE);
+                                    }
+                                }
+                            }
+                            return true; // Source finished
+                        } catch (Error | Exception e) {
+                            err = e;
+                            return false; // Let the downstream(s) handle in the finally-block
+                        } finally {
+                            sinkByKey.values().removeIf(TOMBSTONE::equals);
+                            @SuppressWarnings({"rawtypes", "unchecked"})
+                            var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
+                            composedComplete(iter, err); // TODO: Stack?
+                        }
+                    });
+                    throwIfFailed(scope.join().exception().orElse(null));
+                    return task.get();
+                }
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                throwIfFailed(error);
+                // We can't complete the sinks in here, because they are run() and joined in drainFromSource().
+                // If we tried to join before completing, we might deadlock on downstreams that are blocked waiting for us to offer.
+                // Other options:
+                //  - Pass a scope to this operator
+                //    - We would be able to make this a StepSink, ie implement offer() instead of drainFromSource()
+                //    - Without managed ShutdownOnFailure, we couldn't interrupt the main thread when any downstreams throw.
+                //      - Do we want to interrupt the main thread when any downstreams throw? Not normally how propagation works...
+                //    - Passed scope could be different from the 'main' scope, even enclosing it
+                //
+                // TODO: Interesting only if called concurrently
+                //  ... Which only happens if this sink is being shared
+                //  ... Which is not kosher for plain Sinks
+                //  ... Do something, or no?
+            }
+            
+            void throwIfFailed(Throwable error) throws Exception {
+                if (error != null) {
+                    if (error instanceof Exception e) {
+                        throw e;
+                    }
+                    throw (Error) error;
+                }
+            }
+        }
+        
+        return new GroupBy();
+    }
+    
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
         class Balance implements Conduit.Sink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
+                // TODO: State check?
+                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sinks.stream()
                         .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
@@ -843,7 +942,7 @@ public class Conduits {
             
             @Override
             public void complete(Throwable error) throws Exception {
-                composedComplete(sinks, 0, error);
+                composedComplete(sinks.iterator(), error);
             }
             
             @Override
@@ -871,7 +970,7 @@ public class Conduits {
             
             @Override
             public void complete(Throwable error) throws Exception {
-                composedComplete(sinks, 0, error);
+                composedComplete(sinks.iterator(), error);
             }
             
             @Override
@@ -932,7 +1031,7 @@ public class Conduits {
             
             @Override
             public void complete(Throwable error) throws Exception {
-                composedComplete(sinks, 0, error);
+                composedComplete(sinks.iterator(), error);
             }
             
             @Override
@@ -965,7 +1064,7 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                composedClose(sources, 0);
+                composedClose(sources.iterator());
             }
             
             @Override
@@ -983,6 +1082,8 @@ public class Conduits {
         class Concat implements Conduit.Source<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+                // TODO: State check?
+                
                 for (var source : sources) {
                     if (!source.drainToSink(sink)) {
                         return false;
@@ -993,7 +1094,7 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                composedClose(sources, 0);
+                composedClose(sources.iterator());
             }
             
             @Override
@@ -1011,6 +1112,8 @@ public class Conduits {
         class Merge implements Conduit.Source<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
+                // TODO: State check?
+                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sources.stream()
                         .map(source -> scope.fork(() -> source.drainToSink(sink)))
@@ -1022,7 +1125,7 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                composedClose(sources, 0);
+                composedClose(sources.iterator());
             }
             
             @Override
@@ -1040,11 +1143,17 @@ public class Conduits {
                                                         Comparator<? super T> comparator) {
         class MergeSorted implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
-            int lastIndex = -1;
+            int lastIndex = NEW;
+            
+            static final int NEW       = -1;
+            static final int COMPLETED = -2;
             
             @Override
             public T poll() throws Exception {
-                if (lastIndex == -1) {
+                if (lastIndex <= NEW) {
+                    if (lastIndex == COMPLETED) {
+                        return null;
+                    }
                     // First poll - poll all sources to bootstrap the queue
                     for (int i = 0; i < sources.size(); i++) {
                         var t = sources.get(i).poll();
@@ -1064,12 +1173,13 @@ public class Conduits {
                     lastIndex = min.index;
                     return min.element;
                 }
+                lastIndex = COMPLETED;
                 return null;
             }
             
             @Override
             public void close() throws Exception {
-                composedClose(sources, 0);
+                composedClose(sources.iterator());
             }
             
             @Override
@@ -1090,49 +1200,34 @@ public class Conduits {
         Objects.requireNonNull(source2);
         Objects.requireNonNull(merger);
         
-        class StepZip implements Conduit.StepSource<T> {
-            final ReentrantLock lock = new ReentrantLock();
+        class Zip implements Conduit.StepSource<T> {
             int state = RUNNING;
             
-            static final int RUNNING    = 0;
-            static final int COMPLETING = 1;
-            static final int CLOSED     = 2;
+            static final int RUNNING   = 0;
+            static final int COMPLETED = 1;
+            static final int CLOSED    = 2;
             
             @Override
             public T poll() throws Exception {
-                lock.lockInterruptibly();
-                try {
-                    if (state >= COMPLETING) {
-                        return null;
-                    }
-                    var e1 = source1.poll();
-                    if (e1 == null) {
-                        state = COMPLETING;
-                        return null;
-                    }
-                    var e2 = source2.poll();
-                    if (e2 == null) {
-                        state = COMPLETING;
-                        return null;
-                    }
-                    return Objects.requireNonNull(merger.apply(e1, e2));
-                } finally {
-                    lock.unlock();
+                if (state >= COMPLETED) {
+                    return null;
                 }
+                T1 e1;
+                T2 e2;
+                if ((e1 = source1.poll()) == null || (e2 = source2.poll()) == null) {
+                    state = COMPLETED;
+                    return null;
+                }
+                return Objects.requireNonNull(merger.apply(e1, e2));
             }
             
             @Override
             public void close() throws Exception {
-                lock.lockInterruptibly();
-                try {
-                    if (state == CLOSED) {
-                        return;
-                    }
-                    state = CLOSED;
-                    try (source1; source2) { }
-                } finally {
-                    lock.unlock();
+                if (state == CLOSED) {
+                    return;
                 }
+                state = CLOSED;
+                try (source1; source2) { }
             }
             
             @Override
@@ -1142,7 +1237,7 @@ public class Conduits {
             }
         }
         
-        return new StepZip();
+        return new Zip();
     }
     
     public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
@@ -1159,10 +1254,10 @@ public class Conduits {
             T2 latest2 = null;
             int state = NEW;
             
-            static final int NEW        = 0;
-            static final int RUNNING    = 1;
-            static final int COMPLETING = 2;
-            static final int CLOSED     = 3;
+            static final int NEW       = 0;
+            static final int STARTED   = 1;
+            static final int CANCELLED = 2;
+            static final int CLOSED    = 4;
             
             static final VarHandle STATE;
             static {
@@ -1175,45 +1270,35 @@ public class Conduits {
             
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
-                if (!STATE.compareAndSet(this, NEW, RUNNING)) {
+                if (!STATE.compareAndSet(this, NEW, STARTED)) {
                     throw new IllegalStateException("source already consumed or closed");
                 }
                 
                 abstract class HelperSink<X, Y> implements Conduit.StepSink<X> {
-                    boolean first = true;
-                    
                     @Override
                     public boolean offer(X e) throws Exception {
+                        Objects.requireNonNull(e);
                         lock.lockInterruptibly();
                         try {
-                            if (state >= COMPLETING) {
+                            if (state >= CANCELLED) {
                                 return false;
                             }
-                            if (first) {
-                                first = false;
-                                if (e == null) {
-                                    // If either source is empty, we will never emit
-                                    state = COMPLETING;
-                                    ready.signal();
-                                    return false;
-                                }
-                                setLatest1(e);
-                                if (latest2() == null) {
+                            if (setLatest1(e) == null) {
+                                if (getLatest2() == null) {
                                     // Wait until we have the first element from both sources
                                     do {
                                         ready.await();
-                                        if (state >= COMPLETING) {
+                                        if (state >= CANCELLED) {
                                             return false;
                                         }
-                                    } while (latest2() == null);
+                                    } while (getLatest2() == null);
                                     return true; // First emission handled by other thread
                                 }
                                 ready.signal();
                             }
-                            setLatest1(e);
-                            T t = Objects.requireNonNull(merger.apply(latest1, latest2));
+                            T t = merger.apply(latest1, latest2);
                             if (!sink.offer(t)) {
-                                state = COMPLETING;
+                                state = CANCELLED;
                                 return false;
                             }
                             return true;
@@ -1222,21 +1307,23 @@ public class Conduits {
                         }
                     }
                     
-                    abstract void setLatest1(X x);
-                    abstract Y latest2();
+                    abstract X setLatest1(X x);
+                    abstract Y getLatest2();
+                }
+                class HelperSink1 extends HelperSink<T1, T2> {
+                    @Override T1 setLatest1(T1 t) { var r = latest1; latest1 = t; return r; }
+                    @Override T2 getLatest2() { return latest2; }
+                }
+                class HelperSink2 extends HelperSink<T2, T1> {
+                    @Override T2 setLatest1(T2 t) { var r = latest2; latest2 = t; return r; }
+                    @Override T1 getLatest2() { return latest1; }
                 }
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("zipLatest-drainToSink", Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var task1 = scope.fork(() -> source1.drainToSink(new HelperSink<>() {
-                        @Override void setLatest1(T1 t) { latest1 = t; }
-                        @Override T2 latest2() { return latest2; }
-                    }));
-                    var task2 = scope.fork(() -> source2.drainToSink(new HelperSink<>() {
-                        @Override void setLatest1(T2 t) { latest2 = t; }
-                        @Override T1 latest2() { return latest1; }
-                    }));
+                    scope.fork(() -> source1.drainToSink(new HelperSink1()));
+                    scope.fork(() -> source2.drainToSink(new HelperSink2()));
                     scope.join().throwIfFailed();
-                    return task1.get() && task2.get();
+                    return (state & CANCELLED) == 0;
                 }
             }
             
@@ -1244,10 +1331,10 @@ public class Conduits {
             public void close() throws Exception {
                 lock.lockInterruptibly();
                 try {
-                    if (state == CLOSED) {
+                    if ((state & CLOSED) != 0) {
                         return;
                     }
-                    state = CLOSED;
+                    state |= CLOSED;
                     try (source1; source2) { }
                 } finally {
                     lock.unlock();
@@ -1658,34 +1745,35 @@ public class Conduits {
         return sink;
     }
     
-    private static void composedClose(List<? extends Conduit.Source<?>> sources, int i) throws Exception {
-        if (i == sources.size()) {
+    private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
+        if (!sources.hasNext()) {
             return;
         }
-        try (var ignored = sources.get(i)) {
-            composedClose(sources, i+1);
+        try (var ignored = sources.next()) {
+            composedClose(sources);
         }
     }
     
-    private static void composedComplete(List<? extends Conduit.Sink<?>> sinks, int i, Throwable e) throws Exception {
-        if (i == sinks.size()) {
+    private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks, Throwable e) throws Exception {
+        if (!sinks.hasNext()) {
             return;
         }
+        var sink = sinks.next();
         Throwable primaryEx = null;
         try {
-            composedComplete(sinks, i+1, e);
+            composedComplete(sinks, e);
         } catch (Error | Exception ex) {
             primaryEx = ex;
             throw ex;
         } finally {
             if (primaryEx != null) {
                 try {
-                    sinks.get(i).complete(e);
+                    sink.complete(e);
                 } catch (Throwable suppressedEx) {
                     primaryEx.addSuppressed(suppressedEx);
                 }
             } else {
-                sinks.get(i).complete(e);
+                sink.complete(e);
             }
         }
     }
@@ -1756,6 +1844,10 @@ public class Conduits {
         
         @Override
         public void run(StructuredTaskScope<?> scope) {
+            // TODO: Called again with a different scope?
+            // TODO: Arbitrary STS is concerning:
+            //  - ShutdownOnSuccess is definitely not okay; that would skip most of the pipeline and yield a meaningless (null) result
+            //  - ShutdownOnFailure would interrupt downstreams even if they recover, and not report subsequent failures
             if (!RAN.compareAndSet(this, false, true)) {
                 return;
             }
