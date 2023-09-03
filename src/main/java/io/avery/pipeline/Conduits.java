@@ -272,6 +272,56 @@ public class Conduits {
     
     // --- Sinks ---
     
+    public static <T, U> Conduit.Sink<U> invert(Function<? super Conduit.StepSource<? extends U>, ? extends Conduit.StepSource<? extends T>> wrapper,
+                                                Conduit.Sink<T> sink) {
+        class InvertSink implements Conduit.Sink<U> {
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
+                // We can use a middle wrapper just to record return value of drainFromSource, but we have a problem:
+                // Aside from more wrapping overhead, we also need locking overhead to retain ordering *just in case*
+                // the source is ordered. EDIT: No, if new source is polling concurrently without locking, it already
+                // gave up on ordering.
+                var newSource = wrapper.apply(source); // TODO: Run the new source
+                return sink.drainFromSource(newSource); // TODO: Return value is for new source, not original source
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                sink.complete(error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                sink.run(scope);
+            }
+        }
+        
+        return new InvertSink();
+    }
+    
+    public static <T, U> Conduit.Source<U> invert(Conduit.Source<T> source,
+                                                  Function<? super Conduit.StepSink<? super U>, ? extends Conduit.StepSink<? super T>> wrapper) {
+        class InvertSource implements Conduit.Source<U> {
+            @Override
+            public boolean drainToSink(Conduit.StepSink<? super U> sink) throws Exception {
+                var newSink = wrapper.apply(sink); // TODO: Run the new sink
+                return source.drainToSink(newSink); // TODO: Return value is for new sink, not original sink
+            }
+            
+            @Override
+            public void close() throws Exception {
+                source.close();
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                source.run(scope);
+            }
+        }
+        
+        return new InvertSource();
+    }
+    
     public static <In, T, A> Conduit.StepSink<In> fuse(Gatherer<In, A, T> gatherer, Conduit.StepSink<? super T> sink) {
         Objects.requireNonNull(gatherer);
         Objects.requireNonNull(sink);
@@ -830,94 +880,95 @@ public class Conduits {
         return new MapAsync();
     }
     
-    public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
-                                                 BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory,
-                                                 boolean recreateCompletedSinks) {
-        // TODO: Consider capturing the scope in run(), and blocking createdSinks' run() until scope is available.
-        //  There is already the risk that drainFromSource blocks if run() is not called -- downstreams are not polling.
-        //  So no loss there. But then we can put downstream completions in complete() - ie where they would normally go
-        //  if the downstreams were passed in rather than created internally. And, then we can be a StepSink rather than
-        //  a plain Sink.
-        
-        class GroupBy implements Conduit.Sink<T> {
+    public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
+                                                     BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
+        class GroupBy implements Conduit.StepSink<T> {
+            final ReentrantLock scopeLock = new ReentrantLock();
+            final Condition scopeReady = scopeLock.newCondition();
             final Map<K, Object> sinkByKey = new HashMap<>();
+            volatile StructuredTaskScope<?> scope = null;
+            int state = RUNNING;
+            
+            static final int RUNNING   = 0;
+            static final int COMPLETED = 1;
             
             static final Object TOMBSTONE = new Object();
             
-            @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                try (var scope = new SlowFailScope("groupBy-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var task = scope.fork(() -> {
-                        Throwable err = null;
-                        try {
-                            for (T val; (val = source.poll()) != null; ) {
-                                K key = classifier.apply(val);
-                                var s = sinkByKey.get(key);
-                                if (s == TOMBSTONE) {
-                                    continue;
-                                }
-                                @SuppressWarnings("unchecked")
-                                var sink = (Conduit.StepSink<? super T>) s;
-                                if (sink == null) {
-                                    sink = sinkFactory.apply(key, val);
-                                    if (sink == null) {
-                                        continue;
-                                    }
-                                    // Note that running a sink per key could produce unbounded threads.
-                                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
-                                    // incomplete sinks and returning null if maxed (thus dropping elements).
-                                    sinkByKey.put(key, sink);
-                                    sink.run(scope);
-                                }
-                                if (!sink.offer(val)) {
-                                    sink.complete(null);
-                                    if (recreateCompletedSinks) {
-                                        sinkByKey.remove(key);
-                                    } else {
-                                        sinkByKey.put(key, TOMBSTONE);
-                                    }
-                                }
-                            }
-                            return true; // Source finished
-                        } catch (Error | Exception e) {
-                            err = e;
-                            return false; // Let the downstream(s) handle in the finally-block
-                        } finally {
-                            sinkByKey.values().removeIf(TOMBSTONE::equals);
-                            @SuppressWarnings({"rawtypes", "unchecked"})
-                            var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                            composedComplete(iter, err); // TODO: Stack?
-                        }
-                    });
-                    throwIfFailed(scope.join().exception().orElse(null));
-                    return task.get();
+            StructuredTaskScope<?> scope() throws InterruptedException {
+                var s = scope;
+                if (s != null) {
+                    return s;
+                }
+                scopeLock.lockInterruptibly();
+                try {
+                    while (scope == null) {
+                        scopeReady.await();
+                    }
+                    return scope;
+                } finally {
+                    scopeLock.unlock();
                 }
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                throwIfFailed(error);
-                // We can't complete the sinks in here, because they are run() and joined in drainFromSource().
-                // If we tried to join before completing, we might deadlock on downstreams that are blocked waiting for us to offer.
-                // Other options:
-                //  - Pass a scope to this operator
-                //    - We would be able to make this a StepSink, ie implement offer() instead of drainFromSource()
-                //    - Without managed ShutdownOnFailure, we couldn't interrupt the main thread when any downstreams throw.
-                //      - Do we want to interrupt the main thread when any downstreams throw? Not normally how propagation works...
-                //    - Passed scope could be different from the 'main' scope, even enclosing it
-                //
-                // TODO: Interesting only if called concurrently
-                //  ... Which only happens if this sink is being shared
-                //  ... Which is not kosher for plain Sinks
-                //  ... Do something, or no?
+            public boolean offer(T input) throws Exception {
+                if (state == COMPLETED) {
+                    return false;
+                }
+                
+                K key = classifier.apply(input);
+                var s = sinkByKey.get(key);
+                if (s == TOMBSTONE) {
+                    return true;
+                }
+                @SuppressWarnings("unchecked")
+                var sink = (Conduit.StepSink<? super T>) s;
+                if (sink == null) {
+                    sink = sinkFactory.apply(key, input);
+                    if (sink == null) {
+                        return true;
+                    }
+                    sinkByKey.put(key, sink);
+                    // Note that running a sink per key could produce unbounded threads.
+                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
+                    // incomplete sinks and returning null if maxed (thus dropping elements).
+                    sink.run(scope());
+                }
+                if (!sink.offer(input)) {
+                    sink.complete(null);
+                    sinkByKey.put(key, TOMBSTONE);
+                }
+                return true; // Source finished
             }
             
-            void throwIfFailed(Throwable error) throws Exception {
-                if (error != null) {
-                    if (error instanceof Exception e) {
-                        throw e;
+            @Override
+            public void complete(Throwable error) throws Exception {
+                if (state == COMPLETED) {
+                    return;
+                }
+                state = COMPLETED;
+                sinkByKey.values().removeIf(TOMBSTONE::equals);
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
+                try {
+                    composedComplete(iter, error); // TODO: Stack?
+                } finally {
+                    sinkByKey.clear();
+                }
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                if (this.scope != null) {
+                    return;
+                }
+                scopeLock.lock();
+                try {
+                    if (this.scope != null) {
+                        this.scope = scope;
                     }
-                    throw (Error) error;
+                } finally {
+                    scopeLock.unlock();
                 }
             }
         }

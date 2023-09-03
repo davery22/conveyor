@@ -33,9 +33,19 @@ class ConduitsTest {
 //        }
     }
     
+    static void testGroupBy() throws Exception {
+        try (var scope = new SlowFailScope()) {
+            Conduits.invert(lineSource(), sink -> Conduits.fuse(ConduitsTest.flatMap((String line) -> Stream.of(line.length())), sink))
+                .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
+                .run(scope);
+            
+            scope.join().throwIfFailed();
+        }
+    }
+    
     static void testMapAsyncVsMapBalanced() throws Exception {
         var start = Instant.now();
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new SlowFailScope()) {
             long[] a = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
@@ -60,7 +70,7 @@ class ConduitsTest {
     
     static void testNostepVsBuffer() throws Exception {
         var start = Instant.now();
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new SlowFailScope()) {
             long[] a = { 0 }, b = { 0 }, c = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
@@ -100,7 +110,7 @@ class ConduitsTest {
     
     static void testSpeed() throws Exception {
         var start = Instant.now();
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new SlowFailScope()) {
             long[] res = { 0 };
             
             Conduits
@@ -123,13 +133,8 @@ class ConduitsTest {
     }
     
     static void test1() throws Exception {
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
-            var lines = Stream.generate(new Scanner(System.in)::nextLine)
-                .takeWhile(line -> !"stop".equalsIgnoreCase(line))
-                .iterator();
-
-            Conduits
-                .stepSource(() -> lines.hasNext() ? lines.next() : null)
+        try (var scope = new SlowFailScope()) {
+            lineSource()
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
@@ -140,17 +145,7 @@ class ConduitsTest {
             
             scope.join().throwIfFailed();
 
-//            Conduits
-//                .<String>source(sink -> {
-//                    try (var in = new Scanner(System.in)) {
-//                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
-//                            if (!sink.offer(line)) {
-//                                return false;
-//                            }
-//                        }
-//                        return true;
-//                    }
-//                })
+//            lineSource()
 //                .andThen(ConduitsTest.buffer(4))
 //                .andThen(Conduits.balance(
 //                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
@@ -162,7 +157,7 @@ class ConduitsTest {
     }
     
     static void test2() throws Exception {
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new SlowFailScope()) {
 //            var segue = Conduits.stepFuse(
 //                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
 //                Conduits.tokenBucket(
@@ -199,17 +194,7 @@ class ConduitsTest {
                     100
                 );
             
-            Conduits
-                .<String>source(sink -> {
-                    try (var in = new Scanner(System.in)) {
-                        for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
-                            if (!sink.offer(line)) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    }
-                })
+            lineSource()
                 .andThen(Conduits.fuse(
                     ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
                     seg.sink()
@@ -226,7 +211,7 @@ class ConduitsTest {
     }
     
     static void testBidi() throws InterruptedException, ExecutionException {
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        try (var scope = new SlowFailScope()) {
             var buffer = Conduits.extrapolate(0, e -> Collections.emptyIterator(), 256);
             var iter = Stream.generate(new Scanner(System.in)::nextLine)
                 .takeWhile(line -> !"stop".equalsIgnoreCase(line))
@@ -243,6 +228,13 @@ class ConduitsTest {
             
             scope.join().throwIfFailed();
         }
+    }
+    
+    private static Conduit.StepSource<String> lineSource() {
+        var iter = Stream.generate(new Scanner(System.in)::nextLine)
+            .takeWhile(line -> !"stop".equalsIgnoreCase(line))
+            .iterator();
+        return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
     }
     
     private static <T> Conduit.Segue<T, T> buffer(int bufferLimit) {
