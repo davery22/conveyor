@@ -11,6 +11,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public class Conduits {
     private Conduits() {} // Utility
@@ -269,20 +270,60 @@ public class Conduits {
     //   - counter-ex: Many sinks/sources that poll from the same source
     //   - haven't really seen an example of this one - currently no reusing source-side of buffers ('custom balance')
     
+    // flatMapMerge():
+    // Conduits.gather(...).apply(buffer)
+    //  - StepSink; gather can 'flatMap' or 'mapMulti' incoming elements
+    // Conduits.balance(IntStream.range(0, 10).mapToObj(i -> Conduits.gather(...).apply(buffer)).toList())
+    //  - Sink;
+    //
+    // flatMapMerge():
+    //  - Conduits.balance(IntStream.range(0, 10).mapToObj(i -> Conduits.flapMapSink(..).apply(sink)).toList())
+    // flatMapConcat():
+    //  - Conduits.flatMapSink(..).apply(sink)
+    
+    // complete(null) MAY throw before completing downstreams
+    // complete(ex) MUST complete downstreams before throwing
+    // "complete downstreams" may be: calling complete(-) on a known set of downstreams
+    // "complete downstreams" may be: setting state that will cause downstreams to halt on next poll() / pass of drainToSink()
+    
+    // danger of running provided stages in a local scope:
+    // can be forced to wait until everything completes, even though outcome of interest is known quickly
+    // eg offering to an intermediary sink, interested if a downstream sink cancelled or completed exceptionally
+    // if the sink is completed we can wake up,
+    
     
     // --- Sinks ---
     
-    public static <T, U> Conduit.Sink<U> invert(Function<? super Conduit.StepSource<? extends U>, ? extends Conduit.StepSource<? extends T>> wrapper,
-                                                Conduit.Sink<T> sink) {
-        class InvertSink implements Conduit.Sink<U> {
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapSink(Function<? super U, ? extends Conduit.Source<T>> mapper) {
+        class FlatMapSink implements Conduit.StepSink<U> {
+            final Conduit.StepSink<T> sink;
+            boolean draining = true;
+            
+            FlatMapSink(Conduit.StepSink<T> sink) {
+                this.sink = sink;
+            }
+            
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
-                // We can use a middle wrapper just to record return value of drainFromSource, but we have a problem:
-                // Aside from more wrapping overhead, we also need locking overhead to retain ordering *just in case*
-                // the source is ordered. EDIT: No, if new source is polling concurrently without locking, it already
-                // gave up on ordering.
-                var newSource = wrapper.apply(source); // TODO: Run the new source
-                return sink.drainFromSource(newSource); // TODO: Return value is for new source, not original source
+            public boolean offer(U input) throws Exception {
+                Objects.requireNonNull(input);
+                if (!draining) {
+                    return false;
+                }
+                var next = mapper.apply(input);
+                if (next == null) {
+                    return true;
+                }
+                // TODO: Options...
+                //  - Could run in local scope
+                //    - shortest lifetime (and op owns exceptions)
+                //  - Could grab the scope asynchronously from run()
+                //    - longest lifetime
+                //  - Could put all this inside a Source#drainToSink, to get access to a long-lived scope
+                //    - medium lifetime (and op owns exceptions)
+                next.run(???);
+                try (next) {
+                    return draining = next.drainToSink(sink);
+                }
             }
             
             @Override
@@ -296,16 +337,230 @@ public class Conduits {
             }
         }
         
-        return new InvertSink();
+        return FlatMapSink::new;
     }
     
-    public static <T, U> Conduit.Source<U> invert(Conduit.Source<T> source,
-                                                  Function<? super Conduit.StepSink<? super U>, ? extends Conduit.StepSink<? super T>> wrapper) {
-        class InvertSource implements Conduit.Source<U> {
+    public static <T, U> Conduit.StepSourceOperator<T, U> flatMapSource(Function<? super T, ? extends Conduit.StepSource<U>> mapper) {
+        class FlatMapSource implements Conduit.StepSource<U> {
+            final Conduit.StepSource<T> source;
+            Conduit.StepSource<U> inner = Conduits.stepSource(Collections.emptyIterator());
+            
+            FlatMapSource(Conduit.StepSource<T> source) {
+                this.source = source;
+            }
+            
+            @Override
+            public U poll() throws Exception {
+                if (inner == null) {
+                    return null;
+                }
+                for (;;) {
+                    U val = inner.poll();
+                    if (val != null) {
+                        return val;
+                    }
+                    inner.close();
+                    for (;;) {
+                        T in = source.poll();
+                        if (in == null) {
+                            inner = null;
+                            return null;
+                        }
+                        var next = mapper.apply(in);
+                        if (next != null) {
+                            inner = next;
+                            // TODO: Options...
+                            //  - Could put all this inside a Sink#drainFromSource, to get access to a long-lived scope
+                            //    - medium lifetime (and op owns exceptions)
+                            //  - Could use the 'StepSink' variant with a plain Sink, by buffering in front of Sink
+                            //    -
+                            //  - Could grab the scope asynchronously from run()
+                            //    - longest lifetime
+                            inner.run(???);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                try (source; var s = inner) { }
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                source.run(scope);
+            }
+        }
+        
+        return FlatMapSource::new;
+    }
+    
+    private static class AsyncInit<T> {
+        final ReentrantLock lock = new ReentrantLock();
+        final Condition ready = lock.newCondition();
+        volatile T value = null;
+        
+        T get() throws InterruptedException {
+            T val = value;
+            if (val != null) {
+                return val;
+            }
+            lock.lockInterruptibly();
+            try {
+                while (value == null) {
+                    ready.await();
+                }
+                return value;
+            } finally {
+                lock.unlock();
+            }
+        }
+        
+        void init(T val) {
+            if (value != null) {
+                return;
+            }
+            lock.lock();
+            try {
+                if (value != null) {
+                    value = val;
+                    ready.signalAll();
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+    
+    // TODO: This is ONLY for linking WITHOUT an async boundary
+    //  If we were comfortable adding async boundaries, then we could chain our transforms onto a buffer and call it good.
+    //  Limitation: Fan-in/out where other inputs have async boundaries, eg:
+    //   - balance(..., sink.mapSink(adaptSourceOfSink(source -> zip(source, sourceWithAsyncBounds)))  // danger: zip is not run()
+    //  Workaround: Call run() yourself on whatever needs ran. Bonus points if you do it inside the sourceMapper.
+    
+    public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
+        class SourceAdaptedSink implements Conduit.Sink<U> {
+            final Conduit.Sink<T> sink;
+            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            
+            SourceAdaptedSink(Conduit.Sink<T> sink) {
+                this.sink = sink;
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
+                // TODO: Check state?
+                
+                class SignalSource implements Conduit.StepSource<U> {
+                    volatile boolean drained = false;
+                    
+                    @Override
+                    public U poll() throws Exception {
+                        var result = source.poll();
+                        if (result == null) {
+                            drained = true;
+                        }
+                        return result;
+                    }
+                }
+                
+                // TODO: Should treat 'newSource-up-to-source' as part of the sink
+                //  - We need to wait for finish in order to get a definitive return value - run in a local Scope
+                //  - Any exceptions from the scope are thrown and ultimately use to complete the sink, even if they happened across a boundary :/
+                //  - Ideally:
+                //    - Original scope would capture all errors across a boundary (remember them but don't pass to sink)
+                //    - Local scope would wait until original source is definitely finished
+                var signalSource = new SignalSource();
+                var newSource = sourceMapper.apply(signalSource);
+                newSource.run(scope.get());
+                try (newSource) {
+                    sink.drainFromSource(newSource);
+                }
+                return signalSource.drained; // TODO: May not be done
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                sink.complete(error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                this.scope.init(scope);
+                sink.run(scope);
+            }
+        }
+        
+        return SourceAdaptedSink::new;
+    }
+    
+    // TODO: What about adapting the (non-step)Sink-side of a StepSource?
+    //  You can do it... but then the StepSource becomes a Source - ie it is destructive
+    //  There's no way non-destructive to do this - the method called by run() (drainFromSource) is on the Sink.
+    //  But is there a use case?
+    
+    public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<U, T> sinkMapper) {
+        class SinkAdaptedSource implements Conduit.Source<U> {
+            final Conduit.Source<T> source;
+            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            
+            SinkAdaptedSource(Conduit.Source<T> source) {
+                this.source = source;
+            }
+            
             @Override
             public boolean drainToSink(Conduit.StepSink<? super U> sink) throws Exception {
-                var newSink = wrapper.apply(sink); // TODO: Run the new sink
-                return source.drainToSink(newSink); // TODO: Return value is for new sink, not original sink
+                // TODO: Check state?
+                
+                // TODO: No point in this if there are async boundaries - would be too late
+                class SignalSink implements Conduit.StepSink<U> {
+                    volatile boolean drained = true;
+                    volatile Throwable error;
+                    
+                    static final VarHandle ERROR;
+                    static {
+                        try {
+                            ERROR = MethodHandles.lookup().findVarHandle(SignalSink.class, "error", Throwable.class);
+                        } catch (ReflectiveOperationException e) {
+                            throw new ExceptionInInitializerError(e);
+                        }
+                    }
+                    
+                    @Override
+                    public boolean offer(U input) throws Exception {
+                        if (!sink.offer(input)) {
+                            return drained = false;
+                        }
+                        return true;
+                    }
+                    
+                    @Override
+                    public void complete(Throwable error) {
+                        ERROR.compareAndSet(this, null, error);
+                    }
+                }
+                
+                // TODO: Should treat 'newSink-up-to-sink' as part of the source
+                //  - We need to wait for finish in order to get a definitive return value - run in a local Scope
+                //  - Any exceptions from the scope are thrown and ultimately use to complete the sink, even if they happened across a boundary :/
+                var signalSink = new SignalSink();
+                var newSink = sinkMapper.apply(signalSink);
+                newSink.run(scope.get());
+                try {
+                    source.drainToSink(newSink);
+                    newSink.complete(null);
+                } catch (Throwable e) {
+                    // TODO: Throws before completing downstream vs throws after
+                    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
+                    // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
+                    // TODO: We should ONLY throw an exception if the SignalSink received one
+                    //  - In that case, we're just giving it back to Sink#complete(error)
+                    //  Otherwise, throw the exception in a fork off the original scope, so scope sees it
+                    newSink.complete(e);
+                }
+                return signalSink.drained;
             }
             
             @Override
@@ -315,43 +570,49 @@ public class Conduits {
             
             @Override
             public void run(StructuredTaskScope<?> scope) {
+                this.scope.init(scope);
                 source.run(scope);
             }
         }
         
-        return new InvertSource();
+        return SinkAdaptedSource::new;
     }
     
-    public static <In, T, A> Conduit.StepSink<In> fuse(Gatherer<In, A, T> gatherer, Conduit.StepSink<? super T> sink) {
+    public static <In, T, A> Conduit.StepSinkOperator<T, In> gather(Gatherer<In, A, T> gatherer) {
         Objects.requireNonNull(gatherer);
-        Objects.requireNonNull(sink);
         
         var supplier = gatherer.supplier();
         var integrator = gatherer.integrator();
         var finisher = gatherer.finisher();
-        Gatherer.Sink<T> gsink = el -> {
-            try {
-                return sink.offer(el);
-            } catch (Error | RuntimeException e) {
-                throw e;
-            } catch (Exception e) {
-                // We are not allowed to throw checked exceptions in this context;
-                // wrap them so that we might rediscover them farther up the stack.
-                // (They might still be dropped or re-wrapped between here and there.)
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                throw new WrappingException(e);
-            }
-        };
         
-        class Fuse implements Conduit.StepSink<In> {
+        class Gather implements Conduit.StepSink<In> {
+            final Conduit.StepSink<T> sink;
+            final Gatherer.Sink<T> gsink;
             A acc = null;
             int state = NEW;
             
             static final int NEW       = 0;
             static final int RUNNING   = 1;
             static final int COMPLETED = 2;
+            
+            Gather(Conduit.StepSink<T> sink) {
+                this.sink = sink;
+                this.gsink = el -> {
+                    try {
+                        return sink.offer(el);
+                    } catch (Error | RuntimeException e) {
+                        throw e;
+                    } catch (Exception e) {
+                        // We are not allowed to throw checked exceptions in this context;
+                        // wrap them so that we might rediscover them farther up the stack.
+                        // (They might still be dropped or re-wrapped between here and there.)
+                        if (e instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
+                        throw new WrappingException(e);
+                    }
+                };
+            }
             
             void initIfNew() {
                 if (state == NEW) {
@@ -406,7 +667,7 @@ public class Conduits {
             }
         }
         
-        return new Fuse();
+        return Gather::new;
     }
     
     public static <T, K, U> Conduit.SinkStepSource<T, U> mapAsyncPartitioned(int parallelism,
@@ -824,11 +1085,15 @@ public class Conduits {
         return new MapAsyncOrdered();
     }
     
-    public static <T, U> Conduit.Sink<T> mapAsync(int parallelism,
-                                                  Function<? super T, ? extends Callable<U>> mapper,
-                                                  Conduit.StepSink<U> sink) {
+    public static <T, U> Conduit.StepToSinkOperator<U, T> mapAsync(int parallelism,
+                                                                   Function<? super T, ? extends Callable<U>> mapper) {
         class MapAsync implements Conduit.Sink<T> {
+            final Conduit.StepSink<U> sink;
             final ReentrantLock lock = new ReentrantLock();
+            
+            MapAsync(Conduit.StepSink<U> sink) {
+                this.sink = sink;
+            }
             
             class Worker implements Conduit.Sink<T> {
                 @Override
@@ -877,38 +1142,20 @@ public class Conduits {
             }
         }
         
-        return new MapAsync();
+        return MapAsync::new;
     }
     
     public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
                                                      BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
         class GroupBy implements Conduit.StepSink<T> {
-            final ReentrantLock scopeLock = new ReentrantLock();
-            final Condition scopeReady = scopeLock.newCondition();
+            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
             final Map<K, Object> sinkByKey = new HashMap<>();
-            volatile StructuredTaskScope<?> scope = null;
             int state = RUNNING;
             
             static final int RUNNING   = 0;
             static final int COMPLETED = 1;
             
             static final Object TOMBSTONE = new Object();
-            
-            StructuredTaskScope<?> scope() throws InterruptedException {
-                var s = scope;
-                if (s != null) {
-                    return s;
-                }
-                scopeLock.lockInterruptibly();
-                try {
-                    while (scope == null) {
-                        scopeReady.await();
-                    }
-                    return scope;
-                } finally {
-                    scopeLock.unlock();
-                }
-            }
             
             @Override
             public boolean offer(T input) throws Exception {
@@ -932,7 +1179,7 @@ public class Conduits {
                     // Note that running a sink per key could produce unbounded threads.
                     // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                     // incomplete sinks and returning null if maxed (thus dropping elements).
-                    sink.run(scope());
+                    sink.run(scope.get());
                 }
                 if (!sink.offer(input)) {
                     sink.complete(null);
@@ -959,17 +1206,7 @@ public class Conduits {
             
             @Override
             public void run(StructuredTaskScope<?> scope) {
-                if (this.scope != null) {
-                    return;
-                }
-                scopeLock.lock();
-                try {
-                    if (this.scope != null) {
-                        this.scope = scope;
-                    }
-                } finally {
-                    scopeLock.unlock();
-                }
+                this.scope.init(scope);
             }
         }
         
@@ -1778,6 +2015,34 @@ public class Conduits {
         
         var core = new Extrapolate();
         return new TimedSegue<>(core);
+    }
+    
+    public static <T> Conduit.Source<T> source(Stream<T> stream) {
+        return sink -> {
+            try {
+                return stream.allMatch(el -> {
+                    try {
+                        return sink.offer(el);
+                    } catch (Error | RuntimeException ex) {
+                        throw ex;
+                    } catch (Exception ex) {
+                        if (ex instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
+                        throw new WrappingException(ex);
+                    }
+                });
+            } catch (WrappingException e) {
+                if (e.getCause() instanceof InterruptedException) {
+                    Thread.interrupted();
+                }
+                throw e.getCause();
+            }
+        };
+    }
+    
+    public static <T> Conduit.StepSource<T> stepSource(Iterator<T> iterator) {
+        return () -> iterator.hasNext() ? iterator.next() : null;
     }
     
     public static <T> Conduit.Source<T> source(Conduit.Source<T> source) {

@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -35,7 +34,9 @@ class ConduitsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new SlowFailScope()) {
-            Conduits.invert(lineSource(), sink -> Conduits.fuse(ConduitsTest.flatMap((String line) -> Stream.of(line.length())), sink))
+//            Conduits.invert(lineSource(), sink -> Conduits.fuse(ConduitsTest.flatMap((String line) -> Stream.of(line.length())), sink))
+            lineSource()
+                .mapSource(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
                 .run(scope);
             
@@ -186,24 +187,22 @@ class ConduitsTest {
 //                }
 //                return null;
 //            });
-            var seg = Conduits
-                .tokenBucket(
-                    Duration.ofSeconds(1),
-                    String::length,
-                    10,
-                    100
-                );
             
             lineSource()
-                .andThen(Conduits.fuse(
-                    ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-                    seg.sink()
-                ))
-                .andThen(seg.source())
-                .andThen(Conduits.fuse(
-                    ConduitsTest.flatMap((String s) -> Stream.of(s+"22")),
-                    ConduitsTest.buffer(16).andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                ))
+                .andThen(Conduits
+                    .gather(ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)))
+                    .apply(Conduits.tokenBucket(
+                        Duration.ofSeconds(1),
+                        String::length,
+                        10,
+                        100
+                    ))
+                )
+                .andThen(Conduits
+                    .gather(ConduitsTest.flatMap((String s) -> Stream.of(s+"22")))
+                    .apply(ConduitsTest.buffer(16))
+                )
+                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(scope);
             
             scope.join().throwIfFailed();
