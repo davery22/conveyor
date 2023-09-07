@@ -236,7 +236,7 @@ class ConduitsTest {
         return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
     }
     
-    private static <T> Conduit.Segue<T, T> buffer(int bufferLimit) {
+    private static <T> Conduit.StepSegue<T, T> buffer(int bufferLimit) {
         return Conduits.extrapolate(null, e -> Collections.emptyIterator(), bufferLimit);
     }
     

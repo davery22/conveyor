@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedSegue<In, Out> implements Conduit.Segue<In, Out> {
+public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         void onInit(SinkController ctl) throws Exception;

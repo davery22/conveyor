@@ -1641,9 +1641,9 @@ public class Conduits {
     
     // --- Segues ---
     
-    public static <T, A> Conduit.Segue<T, A> batch(Supplier<? extends A> batchSupplier,
-                                                   BiConsumer<? super A, ? super T> accumulator,
-                                                   Function<? super A, Optional<Instant>> deadlineMapper) {
+    public static <T, A> Conduit.StepSegue<T, A> batch(Supplier<? extends A> batchSupplier,
+                                                       BiConsumer<? super A, ? super T> accumulator,
+                                                       Function<? super A, Optional<Instant>> deadlineMapper) {
         Objects.requireNonNull(batchSupplier);
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
@@ -1703,10 +1703,10 @@ public class Conduits {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Segue<T, T> tokenBucket(Duration tokenInterval,
-                                                      ToLongFunction<T> costMapper,
-                                                      long tokenLimit,
-                                                      long costLimit) { // TODO: Obviate costLimit?
+    public static <T> Conduit.StepSegue<T, T> tokenBucket(Duration tokenInterval,
+                                                          ToLongFunction<T> costMapper,
+                                                          long tokenLimit,
+                                                          long costLimit) { // TODO: Obviate costLimit?
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
         if ((tokenLimit | costLimit) < 0) {
@@ -1817,8 +1817,8 @@ public class Conduits {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Segue<T, T> delay(Function<? super T, Instant> deadlineMapper,
-                                                int bufferLimit) {
+    public static <T> Conduit.StepSegue<T, T> delay(Function<? super T, Instant> deadlineMapper,
+                                                    int bufferLimit) {
         Objects.requireNonNull(deadlineMapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
@@ -1883,9 +1883,9 @@ public class Conduits {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Conduit.Segue<T, T> keepAlive(Duration timeout,
-                                                    Supplier<? extends T> extraSupplier,
-                                                    int bufferLimit) {
+    public static <T> Conduit.StepSegue<T, T> keepAlive(Duration timeout,
+                                                        Supplier<? extends T> extraSupplier,
+                                                        int bufferLimit) {
         Objects.requireNonNull(timeout);
         Objects.requireNonNull(extraSupplier);
         if (bufferLimit < 1) {
@@ -1945,9 +1945,9 @@ public class Conduits {
         return new TimedSegue<>(core);
     }
 
-    public static <T> Conduit.Segue<T, T> extrapolate(T initial,
-                                                      Function<? super T, ? extends Iterator<? extends T>> mapper,
-                                                      int bufferLimit) {
+    public static <T> Conduit.StepSegue<T, T> extrapolate(T initial,
+                                                          Function<? super T, ? extends Iterator<? extends T>> mapper,
+                                                          int bufferLimit) {
         Objects.requireNonNull(mapper);
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
@@ -2269,8 +2269,8 @@ public class Conduits {
         }
     }
     
-    record ChainSinkSource<In, Out>(Conduit.Sink<In> sink, Conduit.Source<Out> source) implements Conduit.SinkSource<In, Out> { }
+    record ChainSegue<In, Out>(Conduit.Sink<In> sink, Conduit.Source<Out> source) implements Conduit.Segue<In, Out> { }
     record ChainStepSinkSource<In, Out>(Conduit.StepSink<In> sink, Conduit.Source<Out> source) implements Conduit.StepSinkSource<In, Out> { }
     record ChainSinkStepSource<In, Out>(Conduit.Sink<In> sink, Conduit.StepSource<Out> source) implements Conduit.SinkStepSource<In, Out> { }
-    record ChainSegue<In, Out>(Conduit.StepSink<In> sink, Conduit.StepSource<Out> source) implements Conduit.Segue<In, Out> { }
+    record ChainStepSegue<In, Out>(Conduit.StepSink<In> sink, Conduit.StepSource<Out> source) implements Conduit.StepSegue<In, Out> { }
 }
