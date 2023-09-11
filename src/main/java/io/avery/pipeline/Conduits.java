@@ -288,11 +288,81 @@ public class Conduits {
     
     // danger of running provided stages in a local scope:
     // can be forced to wait until everything completes, even though outcome of interest is known quickly
-    // eg offering to an intermediary sink, interested if a downstream sink cancelled or completed exceptionally
+    // eg offering to an intermediary sink, interested if a downstream sink cancelled (!offer) or completed exceptionally
     // if the sink is completed we can wake up,
     
+    // multiple sinks that all offer to the same buffer - like a merge, but on the sink-side
+    // multiple sources that all poll from the same buffer - like a balance, but on the source-side
     
     // --- Sinks ---
+    
+    public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
+                                                     BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
+        class GroupBy implements Conduit.StepSink<T> {
+            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            final Map<K, Object> sinkByKey = new HashMap<>();
+            int state = RUNNING;
+            
+            static final int RUNNING   = 0;
+            static final int COMPLETED = 1;
+            
+            static final Object TOMBSTONE = new Object();
+            
+            @Override
+            public boolean offer(T input) throws Exception {
+                if (state == COMPLETED) {
+                    return false;
+                }
+                
+                K key = classifier.apply(input);
+                var s = sinkByKey.get(key);
+                if (s == TOMBSTONE) {
+                    return true;
+                }
+                @SuppressWarnings("unchecked")
+                var sink = (Conduit.StepSink<? super T>) s;
+                if (sink == null) {
+                    sink = sinkFactory.apply(key, input);
+                    if (sink == null) {
+                        return true;
+                    }
+                    sinkByKey.put(key, sink);
+                    // Note that running a sink per key could produce unbounded threads.
+                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
+                    // incomplete sinks and returning null if maxed (thus dropping elements).
+                    sink.run(scope.get());
+                }
+                if (!sink.offer(input)) {
+                    sink.complete(null);
+                    sinkByKey.put(key, TOMBSTONE);
+                }
+                return true; // Source finished
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                if (state == COMPLETED) {
+                    return;
+                }
+                state = COMPLETED;
+                sinkByKey.values().removeIf(TOMBSTONE::equals);
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
+                try {
+                    composedComplete(iter, error); // TODO: Stack?
+                } finally {
+                    sinkByKey.clear();
+                }
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                this.scope.init(scope);
+            }
+        }
+        
+        return new GroupBy();
+    }
     
     public static <T, U> Conduit.StepSinkOperator<T, U> flatMapSink(Function<? super U, ? extends Conduit.Source<T>> mapper) {
         class FlatMapSink implements Conduit.StepSink<U> {
@@ -317,7 +387,7 @@ public class Conduits {
                 //  - Could run in local scope
                 //    - shortest lifetime (and op owns exceptions)
                 //  - Could grab the scope asynchronously from run()
-                //    - longest lifetime
+                //    - longest lifetime (and op DOES NOT own exceptions)
                 //  - Could put all this inside a Source#drainToSink, to get access to a long-lived scope
                 //    - medium lifetime (and op owns exceptions)
                 next.run(???);
@@ -434,12 +504,6 @@ public class Conduits {
         }
     }
     
-    // TODO: This is ONLY for linking WITHOUT an async boundary
-    //  If we were comfortable adding async boundaries, then we could chain our transforms onto a buffer and call it good.
-    //  Limitation: Fan-in/out where other inputs have async boundaries, eg:
-    //   - balance(..., sink.mapSink(adaptSourceOfSink(source -> zip(source, sourceWithAsyncBounds)))  // danger: zip is not run()
-    //  Workaround: Call run() yourself on whatever needs ran. Bonus points if you do it inside the sourceMapper.
-    
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
         class SourceAdaptedSink implements Conduit.Sink<U> {
             final Conduit.Sink<T> sink;
@@ -466,19 +530,26 @@ public class Conduits {
                     }
                 }
                 
-                // TODO: Should treat 'newSource-up-to-source' as part of the sink
-                //  - We need to wait for finish in order to get a definitive return value - run in a local Scope
-                //  - Any exceptions from the scope are thrown and ultimately use to complete the sink, even if they happened across a boundary :/
-                //  - Ideally:
-                //    - Original scope would capture all errors across a boundary (remember them but don't pass to sink)
-                //    - Local scope would wait until original source is definitely finished
+                // 1. We run all upstream Silos of newSource in an inner scope and wait for them to finish, in case they
+                //    try to poll the signalSource, and to ensure we don't leak threads.
+                // 2. We submit any errors thrown from tasks in the inner scope to the outer scope for re-throw.
+                //    This ensures the errors are not lost. It would be wrong to capture/throw those locally, as their
+                //    downstream(s) might yet recover. If no recovery occurs, either an error propagates to the
+                //    newSource, and we throw that locally (via poll), or it doesn't, meaning it's not relevant.
+                // 3. We close newSource, to ensure upstream threads don't deadlock. If that throws, we let it throw
+                //    locally. We also throw locally if sink#drainFromSource throws (or if we're interrupted).
+                
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.apply(signalSource);
-                newSource.run(scope.get());
-                try (newSource) {
-                    sink.drainFromSource(newSource);
+                
+                try (var innerScope = new DelegateFailScope<>("adaptSourceOfSink-drainFromSource", scope.get())) {
+                    try (newSource) {
+                        newSource.run(innerScope);
+                        sink.drainFromSource(newSource);
+                    }
+                    innerScope.join();
+                    return signalSource.drained;
                 }
-                return signalSource.drained; // TODO: May not be done
             }
             
             @Override
@@ -496,10 +567,32 @@ public class Conduits {
         return SourceAdaptedSink::new;
     }
     
-    // TODO: What about adapting the (non-step)Sink-side of a StepSource?
-    //  You can do it... but then the StepSource becomes a Source - ie it is destructive
-    //  There's no way non-destructive to do this - the method called by run() (drainFromSource) is on the Sink.
-    //  But is there a use case?
+    static class DelegateFailScope<T> extends StructuredTaskScope<T> {
+        final StructuredTaskScope<T> scope;
+        
+        DelegateFailScope(String name, StructuredTaskScope<T> scope) {
+            super(name, Thread.ofVirtual().factory());
+            this.scope = scope;
+        }
+        
+        @Override
+        protected void handleComplete(Subtask<? extends T> subtask) {
+            if (subtask.state() == Subtask.State.FAILED) {
+                Throwable e = subtask.exception();
+                scope.fork(() -> { throw asException(e); });
+            }
+        }
+    }
+    
+    // TODO: Do these compose well? eg, for A:a->t and B:b->a, does
+    //    .mapSource(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)))
+    //  behave like
+    //    .mapSource(adaptSinkOfSource(A.compose(B)))
+    //  ?
+    //  (going backwards is going forwards in the opposite direction)
+    //  in the first version, A(Sink<a>) = Sink<t> [source<a> now]; B(Sink<b>) = Sink<a> [source<b> now]
+    //    but the actual execution will be: [source<b>] B<Sink<b> = Sink<a>; [into source<a>] A(Sink<a>) = Sink<t> [into source<t>]
+    //  in the second version, B(Sink<b>) = Sink<a>; A(Sink<a>) = Sink<t>
     
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<U, T> sinkMapper) {
         class SinkAdaptedSource implements Conduit.Source<U> {
@@ -514,7 +607,6 @@ public class Conduits {
             public boolean drainToSink(Conduit.StepSink<? super U> sink) throws Exception {
                 // TODO: Check state?
                 
-                // TODO: No point in this if there are async boundaries - would be too late
                 class SignalSink implements Conduit.StepSink<U> {
                     volatile boolean drained = true;
                     volatile Throwable error;
@@ -542,25 +634,47 @@ public class Conduits {
                     }
                 }
                 
-                // TODO: Should treat 'newSink-up-to-sink' as part of the source
-                //  - We need to wait for finish in order to get a definitive return value - run in a local Scope
-                //  - Any exceptions from the scope are thrown and ultimately use to complete the sink, even if they happened across a boundary :/
+                // 1. We run all downstream Silos of newSink in an inner scope and wait for them to finish, in case they
+                //    try to offer to or complete the signalSink, and to ensure we don't leak threads.
+                // 2. We submit any errors thrown from tasks in the inner scope to the outer scope for re-throw.
+                //    This ensures the errors are not lost. It would be wrong to capture/throw those locally, as their
+                //    downstream(s) might yet recover. If no recovery occurs, either an error propagates to the
+                //    signalSink (via complete), and we throw that locally, or it doesn't, meaning it's not relevant.
+                // 3. We complete newSink, to ensure downstream threads don't deadlock, and in case that causes it to
+                //    emit additional values downstream. If draining or completing throws, we catch and complete newSink
+                //    exceptionally. If that throws (which can happen eg if newSink is a fan-out and one of the
+                //    downstreams is synchronous), it didn't do it for a reason the original sink would care about, so
+                //    we submit to the outer scope for re-throw.
+                // 4. We only throw an exception locally if it arrived at the signalSink (or if we're interrupted).
+                
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.apply(signalSink);
-                newSink.run(scope.get());
-                try {
-                    source.drainToSink(newSink);
-                    newSink.complete(null);
-                } catch (Throwable e) {
-                    // TODO: Throws before completing downstream vs throws after
-                    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
-                    // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
-                    // TODO: We should ONLY throw an exception if the SignalSink received one
-                    //  - In that case, we're just giving it back to Sink#complete(error)
-                    //  Otherwise, throw the exception in a fork off the original scope, so scope sees it
-                    newSink.complete(e);
+                var outerScope = scope.get();
+                
+                try (var innerScope = new DelegateFailScope<>("adaptSinkOfSource-drainToSink", outerScope)) {
+                    try {
+                        newSink.run(innerScope);
+                        source.drainToSink(newSink);
+                        newSink.complete(null);
+                    } catch (Throwable e1) {
+                        try {
+                            newSink.complete(e1);
+                        } catch (Error | Exception e2) {
+                            outerScope.fork(() -> { throw e2; });
+                            if (e2 instanceof InterruptedException) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                        if (e1 instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    innerScope.join();
+                    if (signalSink.error != null) {
+                        throw asException(signalSink.error);
+                    }
+                    return signalSink.drained;
                 }
-                return signalSink.drained;
             }
             
             @Override
@@ -577,6 +691,59 @@ public class Conduits {
         
         return SinkAdaptedSource::new;
     }
+    
+    // Maybe complete(x) should set exception even if complete(null) returned normally?
+    
+    // We should never complete the sink internally, as it is not safe to assume the sink is ready-to-complete when this
+    // source is done with it. For example: concat(). If Source#drainToSink completed the sink, the StepSink passed to
+    // concat#drainToSink would be completed by the first Source, and the StepSink would be unable to receive from
+    // subsequent Sources.
+    
+    // TODO: What about adapting the (non-step)Sink-side of a StepSource?
+    //  You can do it... but then the StepSource becomes a Source - ie it is destructive
+    //  There's no way non-destructive to do this - the method called by run() (drainFromSource) is on the Sink.
+    //  But is there a use case?
+    
+    // TODO: Throws before completing downstream vs throws after
+    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
+    // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
+    // TODO: We should ONLY throw an exception if the SignalSink received one
+    //  - In that case, we're just giving it back to Sink#complete(error)
+    //  Otherwise, throw the exception in a fork off the original scope, so scope sees it
+    
+    // Could we just do completion internally, and let external completion no-op?
+    //  - This would be unable to handle external causes for completion
+    //    - ...Which don't occur / aren't safe for a plain Sink/Source...?
+    //      - But these are StepSinks/Sources, darn
+    //    - Does this really matter?
+    //      - In Silo'd usage, if newSink.complete(ex) throws, we may race to complete the Sink with that exception instead of ex (or a downstream ex, or nothing if recovered downstream)
+    //        - TODO: Okay so... always swallow newSink throws then?
+    //          - But if newSink has no async bound, newSink throws may be original Sink throws
+    //      - In ad-hoc usage, we could:
+    //        a) call complete() before calling drainToSink TODO
+    //        b) call complete() concurrently with drainToSink TODO
+    //        c) call complete() after calling drainToSink
+    //  - We generally don't want to complete the sink internally, in case it is shared with others (eg shared buffer)
+    //    - TODO: But then, what DOES complete the shared buffer?? Currently (eg balance) we actually would have each sink completing it...
+    //      - Can maybe do some shenanigans like balanceMerge(List<StepSinkOperator>) -> StepToSinkOperator
+    //        - Pass buffer to result, internally wraps in a StepSink that tracks completions, passes Sinks to balance
+    //        - This is pretty limited, eg 'balance' comes from needing a single StepSink in the end, rather than multiple discreet
+    //        - This is like a more powerful mapAsync
+    //      - balanceMerge(List<StepSourceOperator>) -> StepToSourceOperator
+    //        - Pass buffer to result, internally wraps in a StepSource that tracks closes, passes Sources to merge
+    //        - Again like mapAsync, but as a Source
+    //      - Or expose the 'buffer-wrapper' types directly:
+    //        - MergeSink - completes the underlying StepSink upon normal completions reaching count, or upon any abrupt completion
+    //        - BalanceSource - closes the underlying StepSource upon closes reaching count
+    //        - counting completions/closes would be thrown off if they happen both internally and externally
+    // Could we delegate the completion to be handled correctly externally?
+    //  - Sink should complete normally or abruptly if it would complete that way as a result of completing newSink normally or abruptly
+    //  - If complete(null) reaches the SignalSink, don't throw; as the Sink itself may throw on complete(null), but we won't know til later
+    //    - For that matter, maybe just don't throw after source.drainToSink(newSink)?
+    //      - No... Due to possible async bounds, completion only makes sense coming from newSink
+    //      - And we can't do anything about what the original Sink is on the outside (no wrapping)
+    //  - Not completing the Sink when we normally would can mean that it accepts more offers than it normally would
+    
     
     public static <In, T, A> Conduit.StepSinkOperator<T, In> gather(Gatherer<In, A, T> gatherer) {
         Objects.requireNonNull(gatherer);
@@ -1145,74 +1312,6 @@ public class Conduits {
         return MapAsync::new;
     }
     
-    public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
-                                                     BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
-        class GroupBy implements Conduit.StepSink<T> {
-            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
-            final Map<K, Object> sinkByKey = new HashMap<>();
-            int state = RUNNING;
-            
-            static final int RUNNING   = 0;
-            static final int COMPLETED = 1;
-            
-            static final Object TOMBSTONE = new Object();
-            
-            @Override
-            public boolean offer(T input) throws Exception {
-                if (state == COMPLETED) {
-                    return false;
-                }
-                
-                K key = classifier.apply(input);
-                var s = sinkByKey.get(key);
-                if (s == TOMBSTONE) {
-                    return true;
-                }
-                @SuppressWarnings("unchecked")
-                var sink = (Conduit.StepSink<? super T>) s;
-                if (sink == null) {
-                    sink = sinkFactory.apply(key, input);
-                    if (sink == null) {
-                        return true;
-                    }
-                    sinkByKey.put(key, sink);
-                    // Note that running a sink per key could produce unbounded threads.
-                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
-                    // incomplete sinks and returning null if maxed (thus dropping elements).
-                    sink.run(scope.get());
-                }
-                if (!sink.offer(input)) {
-                    sink.complete(null);
-                    sinkByKey.put(key, TOMBSTONE);
-                }
-                return true; // Source finished
-            }
-            
-            @Override
-            public void complete(Throwable error) throws Exception {
-                if (state == COMPLETED) {
-                    return;
-                }
-                state = COMPLETED;
-                sinkByKey.values().removeIf(TOMBSTONE::equals);
-                @SuppressWarnings({"rawtypes", "unchecked"})
-                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                try {
-                    composedComplete(iter, error); // TODO: Stack?
-                } finally {
-                    sinkByKey.clear();
-                }
-            }
-            
-            @Override
-            public void run(StructuredTaskScope<?> scope) {
-                this.scope.init(scope);
-            }
-        }
-        
-        return new GroupBy();
-    }
-    
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
         class Balance implements Conduit.Sink<T> {
             @Override
@@ -1559,7 +1658,7 @@ public class Conduits {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 if (!STATE.compareAndSet(this, NEW, STARTED)) {
-                    throw new IllegalStateException("source already consumed or closed");
+                    return true; // ie sink did not cancel
                 }
                 
                 abstract class HelperSink<X, Y> implements Conduit.StepSink<X> {
@@ -2061,6 +2160,13 @@ public class Conduits {
         return sink;
     }
     
+    private static Exception asException(Throwable t) {
+        if (t instanceof Exception x) {
+            return x;
+        }
+        throw (Error) t;
+    }
+    
     private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
         if (!sources.hasNext()) {
             return;
@@ -2169,6 +2275,7 @@ public class Conduits {
             }
             
             source.run(scope);
+            sink.run(scope);
             scope.fork(() -> {
                 try (source) {
                     if (sink instanceof Conduit.StepSink<? super T> ss) {
@@ -2184,7 +2291,6 @@ public class Conduits {
                 }
                 return null;
             });
-            sink.run(scope);
         }
     }
     
