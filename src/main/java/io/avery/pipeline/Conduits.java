@@ -283,16 +283,19 @@ public class Conduits {
     
     // complete(null) MAY throw before completing downstreams
     // complete(ex) MUST complete downstreams before throwing
-    // "complete downstreams" may be: calling complete(-) on a known set of downstreams
+    // "complete downstreams" may be: calling complete(*) on a known set of downstreams
     // "complete downstreams" may be: setting state that will cause downstreams to halt on next poll() / pass of drainToSink()
     
     // danger of running provided stages in a local scope:
     // can be forced to wait until everything completes, even though outcome of interest is known quickly
     // eg offering to an intermediary sink, interested if a downstream sink cancelled (!offer) or completed exceptionally
-    // if the sink is completed we can wake up,
+    // (X) if the sink is completed we can wake up - nope
+    //  - the sink may be completed exceptionally after being completed normally
+    //  - if we wake up we leak threads
     
     // multiple sinks that all offer to the same buffer - like a merge, but on the sink-side
     // multiple sources that all poll from the same buffer - like a balance, but on the source-side
+    // TODO: Ref-counted Sink and Source (for sharing), plus onComplete / onClose
     
     // --- Sinks ---
     
@@ -344,15 +347,12 @@ public class Conduits {
                 if (state == COMPLETED) {
                     return;
                 }
-                state = COMPLETED;
                 sinkByKey.values().removeIf(TOMBSTONE::equals);
                 @SuppressWarnings({"rawtypes", "unchecked"})
                 var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                try {
-                    composedComplete(iter, error); // TODO: Stack?
-                } finally {
-                    sinkByKey.clear();
-                }
+                composedComplete(iter, error); // TODO: Stack?
+                sinkByKey.clear();
+                state = COMPLETED;
             }
             
             @Override
@@ -1430,6 +1430,66 @@ public class Conduits {
         }
         
         return new Route();
+    }
+    
+    public static <T> Conduit.StepSink<T> stepSpill(List<? extends Conduit.StepSink<T>> sinks) {
+        class StepSpill implements Conduit.StepSink<T> {
+            int i = 0;
+            
+            @Override
+            public boolean offer(T input) throws Exception {
+                for (; i < sinks.size(); i++) {
+                    if (sinks.get(i).offer(input)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                composedComplete(sinks.iterator(), error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var sink : sinks) {
+                    sink.run(scope);
+                }
+            }
+        }
+        
+        return new StepSpill();
+    }
+    
+    public static <T> Conduit.Sink<T> spill(List<? extends Conduit.Sink<T>> sinks) {
+        class Spill implements Conduit.Sink<T> {
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                // TODO: State check?
+                
+                for (var sink : sinks) {
+                    if (sink.drainFromSource(source)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            
+            @Override
+            public void complete(Throwable error) throws Exception {
+                composedComplete(sinks.iterator(), error);
+            }
+            
+            @Override
+            public void run(StructuredTaskScope<?> scope) {
+                for (var sink : sinks) {
+                    sink.run(scope);
+                }
+            }
+        }
+        
+        return new Spill();
     }
     
     // --- Sources ---
