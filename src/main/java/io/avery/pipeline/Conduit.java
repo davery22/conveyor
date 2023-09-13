@@ -1,6 +1,5 @@
 package io.avery.pipeline;
 
-import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -10,7 +9,7 @@ public class Conduit {
     private Conduit() {}
     
     public sealed interface Stage {
-        default void run(Consumer<Callable<?>> fork) { }
+        default void run(Forker forker) { }
     }
     
     public sealed interface Silo extends Stage permits Conduits.ClosedSilo, Conduits.ChainSilo {
