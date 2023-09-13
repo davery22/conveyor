@@ -297,12 +297,54 @@ public class Conduits {
     // multiple sources that all poll from the same buffer - like a balance, but on the source-side
     // TODO: Ref-counted Sink and Source (for sharing), plus onComplete / onClose
     
+    // Some rules:
+    //  - drainFromSource/drainToSink (+poll/offer) must never call close/complete on arguments or 'this'
+    //    - for the passed-in sources/sinks, they may be reused externally, eg by concat/spill
+    //    - for this source/sink, it may be reused externally, eg if it's a StepSink/Source
+    //    - fine to call close/complete on internally-created sources/sinks
+    //  - complete(null) may throw for any reason
+    //    - it should not return normally if it failed to complete a downstream
+    //    - it should not short subsequent complete(x) if it failed to complete a downstream
+    //  - complete(x) MUST complete each downstream before returning (normally or abruptly)
+    //  - close() MUST close each upstream before returning (normally or abruptly)
+    //  - errors from an inner run() should always be captured on outer scope, never inner scope
+    //    - if we don't need to control thread leaks / bound lifetime (eg groupBy?), capture+pass outer scope to inner run
+    //    - if we do need to control thread leaks / bound lifetime (eg flatMap/adapt*), capture+pass outer scope to inner scope, so we can re-throw errors in outer scope
+    //    - maybe we can devise a more efficient STS that only forks one thread (per join) that waits on threads it forks to outer scope
+    //      - that would more strongly control thread leaking, but would lose the inner scope name for threads
+    //  - after close(), poll() / drainToSink() should return null / false
+    //  - after complete(), offer() / drainFromSource() should return false
+    //  - no violating structured concurrency - if a method forks threads, it must wait for them to finish
+    
+    // Some non-rules:
+    //  - it's fine to wait for run() to be called inside drainFromSource/drainToSink
+    //    - since we should assume things may deadlock otherwise, eg if either side is a buffer that is not being polled/offered
+    
+    // Why not run(STS)?
+    //  - This would allow run() far too permissive access to the STS - close, shutdown, join...
+    //  - STS is overly-restrictive
+    //    - an ExecutorService should also work
+    //    - makes it harder to 'wrap' behavior in sub-scope situations
+    //      - need a whole new (well-behaved?) STS when all we should really need to worry about is fork(task)
+    
+    // On waiting for inner runs to finish - if there is a situation where an inner Source/Sink runs a Silo that other
+    // inner Sources/Sinks depend on, we deadlock. To trigger that, the Silo would have to NOT already be running
+    // when the Source/Sink is run().
+    //
+    // This is only an issue for Silos that are internally connected to multiple Sources, ie the
+    // Sources are 'polling from the same buffer' (or Sinks are 'offering to the same buffer'), AND not
+    // all Sources can be scheduled. We generally shouldn't run into this in flatMap, since a new
+    // Source is not created until the last one closes. We may run into this in groupBy, since multiple
+    // Sinks are running concurrently. Except, we should not run into this via nesting, where the outer Stage
+    // and inner Stage(s) run the shared piece, because the outer should run it first, and not wait
+    // until all inners are finished (if it waits at all).
+    
     // --- Sinks ---
     
     public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
                                                      BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
         class GroupBy implements Conduit.StepSink<T> {
-            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            final AsyncInit<Consumer<Callable<?>>> fork = new AsyncInit<>();
             final Map<K, Object> sinkByKey = new HashMap<>();
             int state = RUNNING;
             
@@ -333,10 +375,11 @@ public class Conduits {
                     // Note that running a sink per key could produce unbounded threads.
                     // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                     // incomplete sinks and returning null if maxed (thus dropping elements).
-                    sink.run(scope.get());
+                    sink.run(fork.get());
                 }
                 if (!sink.offer(input)) {
                     sink.complete(null);
+                    // TODO: Wait for Silos to finish?
                     sinkByKey.put(key, TOMBSTONE);
                 }
                 return true; // Source finished
@@ -347,7 +390,7 @@ public class Conduits {
                 if (state == COMPLETED) {
                     return;
                 }
-                sinkByKey.values().removeIf(TOMBSTONE::equals);
+                sinkByKey.values().removeIf(e -> !(e instanceof Conduit.Sink));
                 @SuppressWarnings({"rawtypes", "unchecked"})
                 var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
                 composedComplete(iter, error); // TODO: Stack?
@@ -356,17 +399,38 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                this.scope.init(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                this.fork.init(fork);
             }
         }
         
         return new GroupBy();
     }
     
+    // TODO: flatMapSink options...
+    //  - Could run in local scope
+    //    - shortest lifetime (and op owns exceptions)
+    //  - Could put all this inside a Source#drainToSink, to get access to a longer-lived scope
+    //    - medium lifetime (and op owns exceptions)
+    //    - thread leaking (unless we join at intervals...)
+    //  - Could grab the scope asynchronously from run()
+    //    - longest lifetime (and op DOES NOT own exceptions)
+    //    - thread leaking
+    
+    // TODO: flatMapSource options...
+    //  - Could use the 'StepSink' variant with a plain Sink, by buffering in front of Sink
+    //    -
+    //  - Could put all this inside a Sink#drainFromSource, to get access to a longer-lived scope
+    //    - medium lifetime (and op owns exceptions)
+    //    - thread leaking (unless we join at intervals...)
+    //  - Could grab the scope asynchronously from run()
+    //    - longest lifetime
+    //    - thread leaking
+    
     public static <T, U> Conduit.StepSinkOperator<T, U> flatMapSink(Function<? super U, ? extends Conduit.Source<T>> mapper) {
         class FlatMapSink implements Conduit.StepSink<U> {
             final Conduit.StepSink<T> sink;
+            final AsyncInit<Consumer<Callable<?>>> fork = new AsyncInit<>();
             boolean draining = true;
             
             FlatMapSink(Conduit.StepSink<T> sink) {
@@ -383,27 +447,26 @@ public class Conduits {
                 if (next == null) {
                     return true;
                 }
-                // TODO: Options...
-                //  - Could run in local scope
-                //    - shortest lifetime (and op owns exceptions)
-                //  - Could grab the scope asynchronously from run()
-                //    - longest lifetime (and op DOES NOT own exceptions)
-                //  - Could put all this inside a Source#drainToSink, to get access to a long-lived scope
-                //    - medium lifetime (and op owns exceptions)
-                next.run(???);
-                try (next) {
-                    return draining = next.drainToSink(sink);
-                }
+                try (var subScope = new SubScope(fork.get())) {
+                    next.run(subScope::fork);
+                    try (next) {
+                        draining = next.drainToSink(sink);
+                    }
+                    subScope.join();
+                    return draining;
+                } // TODO: SubScope.close() does not interrupt threads
             }
             
             @Override
             public void complete(Throwable error) throws Exception {
+                draining = false;
                 sink.complete(error);
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                sink.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                this.fork.init(fork);
+                sink.run(fork);
             }
         }
         
@@ -413,7 +476,8 @@ public class Conduits {
     public static <T, U> Conduit.StepSourceOperator<T, U> flatMapSource(Function<? super T, ? extends Conduit.StepSource<U>> mapper) {
         class FlatMapSource implements Conduit.StepSource<U> {
             final Conduit.StepSource<T> source;
-            Conduit.StepSource<U> inner = Conduits.stepSource(Collections.emptyIterator());
+            final AsyncInit<SubScope> subScope = new AsyncInit<>();
+            Conduit.StepSource<U> subSource = Conduits.stepSource(Collections.emptyIterator());
             
             FlatMapSource(Conduit.StepSource<T> source) {
                 this.source = source;
@@ -421,32 +485,29 @@ public class Conduits {
             
             @Override
             public U poll() throws Exception {
-                if (inner == null) {
+                // TODO: Generally, nothing is enforcing that we definitely close the scope
+                //  If we get interrupted, or just stop polling and don't call close(), we leak threads
+                //  We fundamentally are not structured concurrency here; we return after launching threads!
+                if (subSource == null) {
                     return null;
                 }
                 for (;;) {
-                    U val = inner.poll();
+                    U val = subSource.poll();
                     if (val != null) {
                         return val;
                     }
-                    inner.close();
+                    subSource.close();
+                    subScope.get().join();
                     for (;;) {
                         T in = source.poll();
                         if (in == null) {
-                            inner = null;
+                            subSource = null;
                             return null;
                         }
                         var next = mapper.apply(in);
                         if (next != null) {
-                            inner = next;
-                            // TODO: Options...
-                            //  - Could put all this inside a Sink#drainFromSource, to get access to a long-lived scope
-                            //    - medium lifetime (and op owns exceptions)
-                            //  - Could use the 'StepSink' variant with a plain Sink, by buffering in front of Sink
-                            //    -
-                            //  - Could grab the scope asynchronously from run()
-                            //    - longest lifetime
-                            inner.run(???);
+                            subSource = next;
+                            subSource.run(subScope.get()::fork);
                             break;
                         }
                     }
@@ -455,59 +516,25 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                try (source; var s = inner) { }
+                try (source; var sc = subScope.orNull(); var s = subSource) {
+                    subSource = null;
+                }
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                source.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                this.subScope.init(new SubScope(fork));
+                source.run(fork);
             }
         }
         
         return FlatMapSource::new;
     }
     
-    private static class AsyncInit<T> {
-        final ReentrantLock lock = new ReentrantLock();
-        final Condition ready = lock.newCondition();
-        volatile T value = null;
-        
-        T get() throws InterruptedException {
-            T val = value;
-            if (val != null) {
-                return val;
-            }
-            lock.lockInterruptibly();
-            try {
-                while (value == null) {
-                    ready.await();
-                }
-                return value;
-            } finally {
-                lock.unlock();
-            }
-        }
-        
-        void init(T val) {
-            if (value != null) {
-                return;
-            }
-            lock.lock();
-            try {
-                if (value != null) {
-                    value = val;
-                    ready.signalAll();
-                }
-            } finally {
-                lock.unlock();
-            }
-        }
-    }
-    
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
         class SourceAdaptedSink implements Conduit.Sink<U> {
             final Conduit.Sink<T> sink;
-            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            final AsyncInit<Consumer<Callable<?>>> fork = new AsyncInit<>();
             
             SourceAdaptedSink(Conduit.Sink<T> sink) {
                 this.sink = sink;
@@ -542,14 +569,14 @@ public class Conduits {
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.apply(signalSource);
                 
-                try (var innerScope = new DelegateFailScope<>("adaptSourceOfSink-drainFromSource", scope.get())) {
+                try (var innerScope = new SubScope(fork.get())) {
+                    newSource.run(innerScope::fork);
                     try (newSource) {
-                        newSource.run(innerScope);
                         sink.drainFromSource(newSource);
                     }
                     innerScope.join();
                     return signalSource.drained;
-                }
+                } // TODO: SubScope.close() does not interrupt threads
             }
             
             @Override
@@ -558,30 +585,13 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                this.scope.init(scope);
-                sink.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                this.fork.init(fork);
+                sink.run(fork);
             }
         }
         
         return SourceAdaptedSink::new;
-    }
-    
-    static class DelegateFailScope<T> extends StructuredTaskScope<T> {
-        final StructuredTaskScope<T> scope;
-        
-        DelegateFailScope(String name, StructuredTaskScope<T> scope) {
-            super(name, Thread.ofVirtual().factory());
-            this.scope = scope;
-        }
-        
-        @Override
-        protected void handleComplete(Subtask<? extends T> subtask) {
-            if (subtask.state() == Subtask.State.FAILED) {
-                Throwable e = subtask.exception();
-                scope.fork(() -> { throw asException(e); });
-            }
-        }
     }
     
     // TODO: Do these compose well? eg, for A:a->t and B:b->a, does
@@ -597,7 +607,7 @@ public class Conduits {
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<U, T> sinkMapper) {
         class SinkAdaptedSource implements Conduit.Source<U> {
             final Conduit.Source<T> source;
-            final AsyncInit<StructuredTaskScope<?>> scope = new AsyncInit<>();
+            final AsyncInit<Consumer<Callable<?>>> fork = new AsyncInit<>();
             
             SinkAdaptedSource(Conduit.Source<T> source) {
                 this.source = source;
@@ -649,18 +659,19 @@ public class Conduits {
                 
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.apply(signalSink);
-                var outerScope = scope.get();
                 
-                try (var innerScope = new DelegateFailScope<>("adaptSinkOfSource-drainToSink", outerScope)) {
+                try (var subScope = new SubScope(fork.get())) {
+                    newSink.run(subScope::fork);
+                    // As an optimization, we drain in the same thread instead of forking - otherwise this would look
+                    // more like ClosedSilo.run(). We have to take more care to delegate throws and handle interrupts.
                     try {
-                        newSink.run(innerScope);
                         source.drainToSink(newSink);
                         newSink.complete(null);
                     } catch (Throwable e1) {
                         try {
                             newSink.complete(e1);
                         } catch (Error | Exception e2) {
-                            outerScope.fork(() -> { throw e2; });
+                            subScope.fork(() -> { throw e2; });
                             if (e2 instanceof InterruptedException) {
                                 Thread.currentThread().interrupt();
                             }
@@ -669,12 +680,12 @@ public class Conduits {
                             Thread.currentThread().interrupt();
                         }
                     }
-                    innerScope.join();
+                    subScope.join();
                     if (signalSink.error != null) {
                         throw asException(signalSink.error);
                     }
                     return signalSink.drained;
-                }
+                } // TODO: SubScope.close() does not interrupt threads
             }
             
             @Override
@@ -683,9 +694,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                this.scope.init(scope);
-                source.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                this.fork.init(fork);
+                source.run(fork);
             }
         }
         
@@ -829,8 +840,8 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                sink.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                sink.run(fork);
             }
         }
         
@@ -1252,22 +1263,22 @@ public class Conduits {
         return new MapAsyncOrdered();
     }
     
-    public static <T, U> Conduit.StepToSinkOperator<U, T> mapAsync(int parallelism,
-                                                                   Function<? super T, ? extends Callable<U>> mapper) {
-        class MapAsync implements Conduit.Sink<T> {
-            final Conduit.StepSink<U> sink;
+    public static <T, U> Conduit.StepToSinkOperator<T, U> mapAsync(int parallelism,
+                                                                   Function<? super U, ? extends Callable<T>> mapper) {
+        class MapAsync implements Conduit.Sink<U> {
+            final Conduit.StepSink<T> sink;
             final ReentrantLock lock = new ReentrantLock();
             
-            MapAsync(Conduit.StepSink<U> sink) {
+            MapAsync(Conduit.StepSink<T> sink) {
                 this.sink = sink;
             }
             
-            class Worker implements Conduit.Sink<T> {
+            class Worker implements Conduit.Sink<U> {
                 @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
                     for (;;) {
-                        T in;
-                        Callable<U> callable;
+                        U in;
+                        Callable<T> callable;
                         
                         lock.lockInterruptibly();
                         try {
@@ -1278,7 +1289,7 @@ public class Conduits {
                         } finally {
                             lock.unlock();
                         }
-                        U out = callable.call();
+                        T out = callable.call();
                         if (out != null && !sink.offer(out)) {
                             return false;
                         }
@@ -1287,7 +1298,7 @@ public class Conduits {
             }
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsync-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = IntStream.range(0, parallelism)
                         .mapToObj(i -> new Worker())
@@ -1304,8 +1315,8 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                sink.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                sink.run(fork);
             }
         }
         
@@ -1333,9 +1344,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var sink : sinks) {
-                    sink.run(scope);
+                    sink.run(fork);
                 }
             }
         }
@@ -1361,9 +1372,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var sink : sinks) {
-                    sink.run(scope);
+                    sink.run(fork);
                 }
             }
         }
@@ -1422,9 +1433,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var sink : sinks) {
-                    sink.run(scope);
+                    sink.run(fork);
                 }
             }
         }
@@ -1452,9 +1463,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var sink : sinks) {
-                    sink.run(scope);
+                    sink.run(fork);
                 }
             }
         }
@@ -1482,9 +1493,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var sink : sinks) {
-                    sink.run(scope);
+                    sink.run(fork);
                 }
             }
         }
@@ -1515,9 +1526,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var source : sources) {
-                    source.run(scope);
+                    source.run(fork);
                 }
             }
         }
@@ -1545,9 +1556,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var source : sources) {
-                    source.run(scope);
+                    source.run(fork);
                 }
             }
         }
@@ -1576,9 +1587,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var source : sources) {
-                    source.run(scope);
+                    source.run(fork);
                 }
             }
         }
@@ -1630,9 +1641,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
+            public void run(Consumer<Callable<?>> fork) {
                 for (var source : sources) {
-                    source.run(scope);
+                    source.run(fork);
                 }
             }
         }
@@ -1678,9 +1689,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                source1.run(scope);
-                source2.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                source1.run(fork);
+                source2.run(fork);
             }
         }
         
@@ -1789,9 +1800,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(StructuredTaskScope<?> scope) {
-                source1.run(scope);
-                source2.run(scope);
+            public void run(Consumer<Callable<?>> fork) {
+                source1.run(fork);
+                source2.run(fork);
             }
         }
         
@@ -2260,6 +2271,99 @@ public class Conduits {
         }
     }
     
+    /**
+     * A 'StructuredTaskScope-lite', whose only job is to join after (rounds of) forking. The actual forking will
+     * delegate to something else (eg a real STS that knows how to handle the completions).
+     *
+     * <p>This class is basically a thin wrapper around a Phaser.
+     */
+    private static class SubScope implements AutoCloseable {
+        final Consumer<Callable<?>> fork;
+        final Phaser phaser;
+        
+        public SubScope(Consumer<Callable<?>> fork) {
+            this.fork = fork;
+            this.phaser = new Phaser(1);
+        }
+        
+        public void fork(Callable<?> task) {
+            if (phaser.register() < 0) {
+                throw new IllegalStateException("SubScope is closed");
+            }
+            try {
+                fork.accept(() -> {
+                    try {
+                        return task.call();
+                    } finally {
+                        phaser.arriveAndDeregister();
+                    }
+                });
+            } catch (Error | RuntimeException e) {
+                // Task was not forked
+                phaser.arriveAndDeregister();
+                throw e;
+            }
+        }
+        
+        public void join() throws InterruptedException {
+            int phase = phaser.arrive();
+            if (phase < 0) {
+                throw new IllegalStateException("SubScope is closed");
+            }
+            phaser.awaitAdvanceInterruptibly(phase);
+        }
+        
+        @Override
+        public void close() {
+            int phase = phaser.arriveAndDeregister();
+            if (phase < 0) {
+                return;
+            }
+            phaser.awaitAdvance(phase);
+        }
+    }
+    
+    private static class AsyncInit<T> {
+        final ReentrantLock lock = new ReentrantLock();
+        final Condition ready = lock.newCondition();
+        volatile T value = null;
+        
+        T orNull() {
+            return value;
+        }
+        
+        T get() throws InterruptedException {
+            T val = value;
+            if (val != null) {
+                return val;
+            }
+            lock.lockInterruptibly();
+            try {
+                while (value == null) {
+                    ready.await();
+                }
+                return value;
+            } finally {
+                lock.unlock();
+            }
+        }
+        
+        void init(T val) {
+            if (value != null) {
+                return;
+            }
+            lock.lock();
+            try {
+                if (value != null) {
+                    value = val;
+                    ready.signalAll();
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+    
     private static class Indexed<T> {
         final T element;
         final int index;
@@ -2325,8 +2429,8 @@ public class Conduits {
         }
         
         @Override
-        public void run(StructuredTaskScope<?> scope) {
-            // TODO: Called again with a different scope?
+        public void run(Consumer<Callable<?>> fork) {
+            // TODO: Called again with a different argument?
             // TODO: Arbitrary STS is concerning:
             //  - ShutdownOnSuccess is definitely not okay; that would skip most of the pipeline and yield a meaningless (null) result
             //  - ShutdownOnFailure would interrupt downstreams even if they recover, and not report subsequent failures
@@ -2334,9 +2438,9 @@ public class Conduits {
                 return;
             }
             
-            source.run(scope);
-            sink.run(scope);
-            scope.fork(() -> {
+            source.run(fork);
+            sink.run(fork);
+            fork.accept(() -> {
                 try (source) {
                     if (sink instanceof Conduit.StepSink<? super T> ss) {
                         source.drainToSink(ss);
@@ -2363,9 +2467,9 @@ public class Conduits {
             this.right = right;
         }
         
-        public void run(StructuredTaskScope<?> scope) {
-            left.run(scope);
-            right.run(scope);
+        public void run(Consumer<Callable<?>> fork) {
+            left.run(fork);
+            right.run(fork);
         }
     }
     
