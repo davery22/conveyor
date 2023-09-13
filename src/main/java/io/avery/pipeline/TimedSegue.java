@@ -13,7 +13,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
         void onInit(SinkController ctl) throws Exception;
         void onOffer(SinkController ctl, In input) throws Exception;
         void onPoll(SourceController<Out> ctl) throws Exception;
-        void onComplete(SinkController ctl, Throwable error) throws Exception;
+        void onComplete(SinkController ctl) throws Exception;
     }
     
     public sealed interface SinkController {
@@ -38,6 +38,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
     Instant latchedSinkDeadline = null;
     Instant latchedSourceDeadline = null;
     Out latchedOutput = null;
+    Throwable exception = null;
     int ctl = 0; // We encode the remaining properties in 5 bits
     
     //int state = NEW;
@@ -237,7 +238,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
         }
         
         @Override
-        public void complete(Throwable error) throws Exception {
+        public void complete() throws Exception {
             lock.lockInterruptibly();
             try {
                 if (state() >= COMPLETING) {
@@ -246,7 +247,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 initIfNew();
                 setAccess(SINK);
                 
-                core.onComplete(controller, error);
+                core.onComplete(controller);
                 
                 updateSourceDeadline();
                 setState(COMPLETING);
@@ -255,6 +256,23 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 latchedSinkDeadline = null;
                 latchedSourceDeadline = null;
                 setAccess(NONE);
+                lock.unlock();
+            }
+        }
+        
+        @Override
+        public void completeExceptionally(Throwable ex) {
+            Objects.requireNonNull(ex);
+            lock.lock();
+            try {
+                if (state() == CLOSED) {
+                    return;
+                }
+                setState(CLOSED);
+                exception = ex;
+                readyForSink.signalAll();
+                readyForSource.signalAll();
+            } finally {
                 lock.unlock();
             }
         }
@@ -267,10 +285,16 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 lock.lockInterruptibly();
                 try {
                     if (state() == CLOSED) {
+                        if (exception != null) {
+                            throw new UpstreamException(exception);
+                        }
                         return null;
                     }
                     initIfNew();
                     if (!awaitSourceDeadline()) {
+                        if (exception != null) {
+                            throw new UpstreamException(exception);
+                        }
                         return null;
                     }
                     setAccess(SOURCE);

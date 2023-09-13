@@ -350,12 +350,13 @@ public class Conduits {
             
             static final int RUNNING   = 0;
             static final int COMPLETED = 1;
+            static final int CLOSED    = 2;
             
             static final Object TOMBSTONE = new Object();
             
             @Override
             public boolean offer(T input) throws Exception {
-                if (state == COMPLETED) {
+                if (state >= COMPLETED) {
                     return false;
                 }
                 
@@ -378,7 +379,7 @@ public class Conduits {
                     sink.run(executor.get());
                 }
                 if (!sink.offer(input)) {
-                    sink.complete(null);
+                    sink.completeExceptionally(null);
                     // TODO: Wait for Silos to finish?
                     sinkByKey.put(key, TOMBSTONE);
                 }
@@ -386,16 +387,29 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                if (state == COMPLETED) {
+            public void complete() throws Exception {
+                if (state >= COMPLETED) {
                     return;
                 }
                 sinkByKey.values().removeIf(e -> !(e instanceof Conduit.Sink));
                 @SuppressWarnings({"rawtypes", "unchecked"})
                 var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                composedComplete(iter, error); // TODO: Stack?
+                composedComplete(iter); // TODO: Stack?
                 sinkByKey.clear();
                 state = COMPLETED;
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                if (state == CLOSED) {
+                    return;
+                }
+                state = CLOSED;
+                sinkByKey.values().removeIf(e -> !(e instanceof Conduit.Sink));
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
+                composedCompleteExceptionally(iter, ex); // TODO: Stack?
+                sinkByKey.clear();
             }
             
             @Override
@@ -458,9 +472,15 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
+            public void complete() throws Exception {
                 draining = false;
-                sink.complete(error);
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                draining = false;
+                sink.completeExceptionally(ex);
             }
             
             @Override
@@ -580,8 +600,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                sink.complete(error);
+            public void complete() throws Exception {
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
             @Override
@@ -639,8 +664,8 @@ public class Conduits {
                     }
                     
                     @Override
-                    public void complete(Throwable error) {
-                        ERROR.compareAndSet(this, null, error);
+                    public void completeExceptionally(Throwable ex) {
+                        ERROR.compareAndSet(this, null, Objects.requireNonNull(ex));
                     }
                 }
                 
@@ -666,15 +691,12 @@ public class Conduits {
                     // more like ClosedSilo.run(). We have to take more care to delegate throws and handle interrupts.
                     try {
                         source.drainToSink(newSink);
-                        newSink.complete(null);
+                        newSink.complete();
                     } catch (Throwable e1) {
                         try {
-                            newSink.complete(e1);
-                        } catch (Throwable e2) {
-                            subScope.fork(() -> { throw new CompletionException(e2); });
-                            if (e2 instanceof InterruptedException) {
-                                Thread.currentThread().interrupt();
-                            }
+                            newSink.completeExceptionally(e1);
+                        } catch (Error | RuntimeException e2) {
+                            subScope.fork(() -> { throw e2; });
                         }
                         if (e1 instanceof InterruptedException) {
                             Thread.currentThread().interrupt();
@@ -772,6 +794,7 @@ public class Conduits {
             static final int NEW       = 0;
             static final int RUNNING   = 1;
             static final int COMPLETED = 2;
+            static final int CLOSED    = 3;
             
             Gather(Conduit.StepSink<T> sink) {
                 this.sink = sink;
@@ -802,7 +825,7 @@ public class Conduits {
             @Override
             public boolean offer(In input) throws Exception {
                 try {
-                    if (state == COMPLETED) {
+                    if (state >= COMPLETED) {
                         return false;
                     }
                     initIfNew();
@@ -820,16 +843,14 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
+            public void complete() throws Exception {
                 try {
-                    if (state == COMPLETED) {
+                    if (state >= COMPLETED) {
                         return;
                     }
                     initIfNew();
-                    if (error == null) {
-                        finisher.accept(acc, gsink);
-                    }
-                    sink.complete(error);
+                    finisher.accept(acc, gsink);
+                    sink.complete();
                     state = COMPLETED;
                 } catch (WrappingException e) {
                     if (e.getCause() instanceof InterruptedException) {
@@ -837,6 +858,15 @@ public class Conduits {
                     }
                     throw e.getCause();
                 }
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                if (state == CLOSED) {
+                    return;
+                }
+                state = CLOSED;
+                sink.completeExceptionally(ex);
             }
             
             @Override
@@ -904,7 +934,7 @@ public class Conduits {
             final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
             final Map<K, Partition> partitionByKey = new HashMap<>();
             int state = RUNNING;
-            Throwable err = null;
+            Throwable exception = null;
             
             static final int RUNNING    = 0;
             static final int COMPLETING = 1;
@@ -1016,16 +1046,33 @@ public class Conduits {
                 }
                 
                 @Override
-                public void complete(Throwable error) throws Exception {
+                public void complete() throws Exception {
                     lock.lockInterruptibly();
                     try {
                         if (state >= COMPLETING) {
                             return;
                         }
                         state = COMPLETING;
-                        if ((err = error) != null || completionBuffer.isEmpty()) {
+                        if (completionBuffer.isEmpty()) {
                             outputReady.signalAll();
                         }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void completeExceptionally(Throwable ex) {
+                    Objects.requireNonNull(ex);
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        exception = ex;
+                        completionNotFull.signalAll();
+                        outputReady.signalAll();
                     } finally {
                         lock.unlock();
                     }
@@ -1042,8 +1089,8 @@ public class Conduits {
                             for (;;) {
                                 item = completionBuffer.peek();
                                 if (state >= COMPLETING) {
-                                    if (err != null) {
-                                        throw new UpstreamException(err);
+                                    if (exception != null) {
+                                        throw new UpstreamException(exception);
                                     } else if (state == CLOSED || item == null) {
                                         return null;
                                     }
@@ -1075,6 +1122,9 @@ public class Conduits {
                 public void close() {
                     lock.lock();
                     try {
+                        if (state == CLOSED) {
+                            return;
+                        }
                         state = CLOSED;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
@@ -1117,7 +1167,7 @@ public class Conduits {
             final Condition outputReady = lock.newCondition();
             final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
             int state = RUNNING;
-            Throwable err = null;
+            Throwable exception = null;
             
             static final int RUNNING    = 0;
             static final int COMPLETING = 1;
@@ -1190,16 +1240,33 @@ public class Conduits {
                 }
                 
                 @Override
-                public void complete(Throwable error) throws Exception {
+                public void complete() throws Exception {
                     lock.lockInterruptibly();
                     try {
                         if (state >= COMPLETING) {
                             return;
                         }
                         state = COMPLETING;
-                        if ((err = error) != null || completionBuffer.isEmpty()) {
+                        if (completionBuffer.isEmpty()) {
                             outputReady.signalAll();
                         }
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void completeExceptionally(Throwable ex) {
+                    Objects.requireNonNull(ex);
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        exception = ex;
+                        completionNotFull.signalAll();
+                        outputReady.signalAll();
                     } finally {
                         lock.unlock();
                     }
@@ -1216,8 +1283,8 @@ public class Conduits {
                             for (;;) {
                                 item = completionBuffer.peek();
                                 if (state >= COMPLETING) {
-                                    if (err != null) {
-                                        throw new UpstreamException(err);
+                                    if (exception != null) {
+                                        throw new UpstreamException(exception);
                                     } else if (state == CLOSED || item == null) {
                                         return null;
                                     }
@@ -1247,6 +1314,9 @@ public class Conduits {
                 public void close() {
                     lock.lock();
                     try {
+                        if (state == CLOSED) {
+                            return;
+                        }
                         state = CLOSED;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
@@ -1310,8 +1380,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                sink.complete(error);
+            public void complete() throws Exception {
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1339,8 +1414,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                composedComplete(sinks.iterator(), error);
+            public void complete() throws Exception {
+                composedComplete(sinks.iterator());
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1367,8 +1447,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                composedComplete(sinks.iterator(), error);
+            public void complete() throws Exception {
+                composedComplete(sinks.iterator());
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1428,8 +1513,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                composedComplete(sinks.iterator(), error);
+            public void complete() throws Exception {
+                composedComplete(sinks.iterator());
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1458,8 +1548,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                composedComplete(sinks.iterator(), error);
+            public void complete() throws Exception {
+                composedComplete(sinks.iterator());
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1488,8 +1583,13 @@ public class Conduits {
             }
             
             @Override
-            public void complete(Throwable error) throws Exception {
-                composedComplete(sinks.iterator(), error);
+            public void complete() throws Exception {
+                composedComplete(sinks.iterator());
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
+                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1821,7 +1921,6 @@ public class Conduits {
         class Batch implements TimedSegue.Core<T, A> {
             A batch = null;
             boolean done = false;
-            Throwable err = null;
             
             @Override
             public void onInit(TimedSegue.SinkController ctl) { }
@@ -1845,11 +1944,8 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<A> ctl) throws UpstreamException {
+            public void onPoll(TimedSegue.SourceController<A> ctl) {
                 if (done) {
-                    if (err != null) {
-                        throw new UpstreamException(err);
-                    }
                     ctl.latchClose();
                     if (batch == null) {
                         return;
@@ -1862,8 +1958,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
-                err = error;
+            public void onComplete(TimedSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
@@ -1901,7 +1996,6 @@ public class Conduits {
             long cost = 0;
             Instant lastObservedAccrual;
             boolean done = false;
-            Throwable err = null;
             
             @Override
             public void onInit(TimedSegue.SinkController ctl) {
@@ -1927,10 +2021,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
-                if (err != null) {
-                    throw new UpstreamException(err);
-                }
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
                 Weighted<T> head = queue.peek();
                 if (head == null) {
                     ctl.latchClose();
@@ -1974,10 +2065,9 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
-                err = error;
+            public void onComplete(TimedSegue.SinkController ctl) {
                 done = true;
-                if (error != null || queue.isEmpty()) {
+                if (queue.isEmpty()) {
                     ctl.latchSourceDeadline(Instant.MIN);
                 }
             }
@@ -1997,7 +2087,6 @@ public class Conduits {
         class Delay implements TimedSegue.Core<T, T> {
             PriorityQueue<Expiring<T>> pq = null;
             boolean done = false;
-            Throwable err = null;
             
             @Override
             public void onInit(TimedSegue.SinkController ctl) {
@@ -2018,10 +2107,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
-                if (err != null) {
-                    throw new UpstreamException(err);
-                }
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
                 Expiring<T> head = pq.poll();
                 if (head == null) {
                     ctl.latchClose();
@@ -2037,13 +2123,12 @@ public class Conduits {
                 } else {
                     ctl.latchClose();
                 }
-           }
+            }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
-                err = error;
+            public void onComplete(TimedSegue.SinkController ctl) {
                 done = true;
-                if (error != null || pq.isEmpty()) {
+                if (pq.isEmpty()) {
                     ctl.latchSourceDeadline(Instant.MIN);
                 }
             }
@@ -2068,7 +2153,6 @@ public class Conduits {
         class KeepAlive implements TimedSegue.Core<T, T> {
             Deque<T> queue = null;
             boolean done = false;
-            Throwable err = null;
             
             @Override
             public void onInit(TimedSegue.SinkController ctl) {
@@ -2086,10 +2170,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
-                if (err != null) {
-                    throw new UpstreamException(err);
-                }
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
@@ -2104,8 +2185,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
-                err = error;
+            public void onComplete(TimedSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
@@ -2127,7 +2207,6 @@ public class Conduits {
             Deque<T> queue = null;
             Iterator<? extends T> iter = null;
             boolean done = false;
-            Throwable err = null;
             
             @Override
             public void onInit(TimedSegue.SinkController ctl) {
@@ -2151,10 +2230,7 @@ public class Conduits {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) throws UpstreamException {
-                if (err != null) {
-                    throw new UpstreamException(err);
-                }
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
@@ -2176,8 +2252,7 @@ public class Conduits {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl, Throwable error) {
-                err = error;
+            public void onComplete(TimedSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
@@ -2251,26 +2326,50 @@ public class Conduits {
         }
     }
     
-    private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks, Throwable e) throws Exception {
+    private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks) throws Exception {
         if (!sinks.hasNext()) {
             return;
         }
         var sink = sinks.next();
         Throwable primaryEx = null;
         try {
-            composedComplete(sinks, e);
+            composedComplete(sinks);
         } catch (Error | Exception ex) {
             primaryEx = ex;
             throw ex;
         } finally {
             if (primaryEx != null) {
                 try {
-                    sink.complete(e);
+                    sink.complete();
                 } catch (Throwable suppressedEx) {
                     primaryEx.addSuppressed(suppressedEx);
                 }
             } else {
-                sink.complete(e);
+                sink.complete();
+            }
+        }
+    }
+    
+    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable e) {
+        if (!sinks.hasNext()) {
+            return;
+        }
+        var sink = sinks.next();
+        Throwable primaryEx = null;
+        try {
+            composedCompleteExceptionally(sinks, e);
+        } catch (Error | RuntimeException ex) {
+            primaryEx = ex;
+            throw ex;
+        } finally {
+            if (primaryEx != null) {
+                try {
+                    sink.completeExceptionally(e);
+                } catch (Throwable suppressedEx) {
+                    primaryEx.addSuppressed(suppressedEx);
+                }
+            } else {
+                sink.completeExceptionally(e);
             }
         }
     }
@@ -2353,12 +2452,13 @@ public class Conduits {
         }
         
         void init(T val) {
+            Objects.requireNonNull(val);
             if (value != null) {
                 return;
             }
             lock.lock();
             try {
-                if (value != null) {
+                if (value == null) {
                     value = val;
                     ready.signalAll();
                 }
@@ -2453,13 +2553,9 @@ public class Conduits {
                     } else {
                         throw new AssertionError("source must be StepSource or sink must be StepSink");
                     }
-                    sink.complete(null);
-                } catch (Throwable e1) {
-                    try {
-                        sink.complete(e1);
-                    } catch (Throwable e2) {
-                        throw new CompletionException(e2);
-                    }
+                    sink.complete();
+                } catch (Throwable ex) {
+                    sink.completeExceptionally(ex);
                 }
             });
         }
@@ -2500,8 +2596,13 @@ public class Conduits {
         }
         
         @Override
-        public void complete(Throwable error) throws Exception {
-            sink.complete(error);
+        public void complete() throws Exception {
+            sink.complete();
+        }
+        
+        @Override
+        public void completeExceptionally(Throwable ex) {
+            sink.completeExceptionally(ex);
         }
     }
     

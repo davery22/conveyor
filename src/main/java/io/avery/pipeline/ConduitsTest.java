@@ -18,6 +18,7 @@ class ConduitsTest {
     
     // TODO: Remove
     public static void main(String[] args) throws Exception {
+        testGroupBy();
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
 //        testSpeed();
@@ -34,7 +35,6 @@ class ConduitsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new SlowFailScope()) {
-//            Conduits.invert(lineSource(), sink -> Conduits.fuse(ConduitsTest.flatMap((String line) -> Stream.of(line.length())), sink))
             lineSource()
                 .mapSource(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
@@ -51,10 +51,6 @@ class ConduitsTest {
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
             Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null)
-//                .andThen(Conduits.mapBalanceOrdered(
-//                    i -> () -> i * 2,
-//                    IntStream.range(0, 4).mapToObj(i -> Conduits.<Long>stepSink(e -> { a[0] += e; return true; })).toList()
-//                ))
                 .andThen(Conduits.mapAsyncOrdered(
                     4, 400,
                     i -> () -> i * 2
@@ -234,6 +230,10 @@ class ConduitsTest {
             .takeWhile(line -> !"stop".equalsIgnoreCase(line))
             .iterator();
         return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
+//        return Conduits.stepSource(() -> {
+//            if (iter.hasNext()) return iter.next();
+//            throw new IllegalStateException("TRIP");
+//        });
     }
     
     private static <T> Conduit.StepSegue<T, T> buffer(int bufferLimit) {

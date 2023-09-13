@@ -1,5 +1,6 @@
 package io.avery.pipeline;
 
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -27,13 +28,12 @@ public class Conduit {
     public non-sealed interface Sink<In> extends Stage {
         boolean drainFromSource(StepSource<? extends In> source) throws Exception;
         
-        default void complete(Throwable error) throws Exception {
+        default void complete() throws Exception { }
+        
+        default void completeExceptionally(Throwable ex) {
             // Default impl handles the case where the Sink has no async downstream.
             // Implementations that have an async downstream should override this method to propagate error downstream.
-            if (error != null) {
-                // TODO: This is odd; usually UpstreamException would be thrown from Source.poll, not Sink.complete
-                throw new UpstreamException(error);
-            }
+            throw new CompletionException(ex);
         }
         
         // Chaining
