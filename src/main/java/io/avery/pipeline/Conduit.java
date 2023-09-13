@@ -1,5 +1,6 @@
 package io.avery.pipeline;
 
+import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -9,7 +10,7 @@ public class Conduit {
     private Conduit() {}
     
     public sealed interface Stage {
-        default void run(Forker forker) { }
+        default void run(Executor executor) { }
     }
     
     public sealed interface Silo extends Stage permits Conduits.ClosedSilo, Conduits.ChainSilo {
@@ -30,6 +31,7 @@ public class Conduit {
             // Default impl handles the case where the Sink has no async downstream.
             // Implementations that have an async downstream should override this method to propagate error downstream.
             if (error != null) {
+                // TODO: This is odd; usually UpstreamException would be thrown from Source.poll, not Sink.complete
                 throw new UpstreamException(error);
             }
         }

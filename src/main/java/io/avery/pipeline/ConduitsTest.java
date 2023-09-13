@@ -38,7 +38,7 @@ class ConduitsTest {
             lineSource()
                 .mapSource(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
         }
@@ -60,7 +60,7 @@ class ConduitsTest {
                     i -> () -> i * 2
                 ))
                 .andThen(Conduits.stepSink(e -> { a[0] += e; return true; }))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
             System.out.println(a[0]);
@@ -100,7 +100,7 @@ class ConduitsTest {
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
                 )))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
             System.out.println(a[0] + b[0] + c[0]);
@@ -124,7 +124,7 @@ class ConduitsTest {
                     return true;
                 })
                 .andThen(Conduits.stepSink(e -> { res[0] += e; return true; }))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
             System.out.println(res[0]);
@@ -142,7 +142,7 @@ class ConduitsTest {
                     (s, c) -> () -> c + ":" + s
                 ))
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
 
@@ -203,7 +203,7 @@ class ConduitsTest {
                     .apply(ConduitsTest.buffer(16))
                 )
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
         }
@@ -223,7 +223,7 @@ class ConduitsTest {
                     buffer.sink(),
                     Conduits.stepSink(e -> { System.out.println(e); return true; })
                 )))
-                .run(scope::fork);
+                .run(Conduits.scopedExecutor(scope));
             
             scope.join().throwIfFailed();
         }

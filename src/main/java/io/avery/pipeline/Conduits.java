@@ -344,7 +344,7 @@ public class Conduits {
     public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
                                                      BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
         class GroupBy implements Conduit.StepSink<T> {
-            final AsyncInit<Forker> forker = new AsyncInit<>();
+            final AsyncInit<Executor> executor = new AsyncInit<>();
             final Map<K, Object> sinkByKey = new HashMap<>();
             int state = RUNNING;
             
@@ -375,7 +375,7 @@ public class Conduits {
                     // Note that running a sink per key could produce unbounded threads.
                     // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                     // incomplete sinks and returning null if maxed (thus dropping elements).
-                    sink.run(forker.get());
+                    sink.run(executor.get());
                 }
                 if (!sink.offer(input)) {
                     sink.complete(null);
@@ -399,8 +399,8 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                this.forker.init(forker);
+            public void run(Executor executor) {
+                this.executor.init(executor);
             }
         }
         
@@ -430,7 +430,7 @@ public class Conduits {
     public static <T, U> Conduit.StepSinkOperator<T, U> flatMapSink(Function<? super U, ? extends Conduit.Source<T>> mapper) {
         class FlatMapSink implements Conduit.StepSink<U> {
             final Conduit.StepSink<T> sink;
-            final AsyncInit<Forker> forker = new AsyncInit<>();
+            final AsyncInit<Executor> executor = new AsyncInit<>();
             boolean draining = true;
             
             FlatMapSink(Conduit.StepSink<T> sink) {
@@ -447,7 +447,7 @@ public class Conduits {
                 if (next == null) {
                     return true;
                 }
-                try (var subScope = new SubScope(forker.get())) {
+                try (var subScope = new Subscope(executor.get())) {
                     next.run(subScope::fork);
                     try (next) {
                         draining = next.drainToSink(sink);
@@ -464,9 +464,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                this.forker.init(forker);
-                sink.run(forker);
+            public void run(Executor executor) {
+                this.executor.init(executor);
+                sink.run(executor);
             }
         }
         
@@ -476,7 +476,7 @@ public class Conduits {
     public static <T, U> Conduit.StepSourceOperator<T, U> flatMapSource(Function<? super T, ? extends Conduit.StepSource<U>> mapper) {
         class FlatMapSource implements Conduit.StepSource<U> {
             final Conduit.StepSource<T> source;
-            final AsyncInit<SubScope> subScope = new AsyncInit<>();
+            final AsyncInit<Subscope> subScope = new AsyncInit<>();
             Conduit.StepSource<U> subSource = Conduits.stepSource(Collections.emptyIterator());
             
             FlatMapSource(Conduit.StepSource<T> source) {
@@ -522,9 +522,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                this.subScope.init(new SubScope(forker));
-                source.run(forker);
+            public void run(Executor executor) {
+                this.subScope.init(new Subscope(executor));
+                source.run(executor);
             }
         }
         
@@ -534,7 +534,7 @@ public class Conduits {
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
         class SourceAdaptedSink implements Conduit.Sink<U> {
             final Conduit.Sink<T> sink;
-            final AsyncInit<Forker> forker = new AsyncInit<>();
+            final AsyncInit<Executor> executor = new AsyncInit<>();
             
             SourceAdaptedSink(Conduit.Sink<T> sink) {
                 this.sink = sink;
@@ -569,7 +569,7 @@ public class Conduits {
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.apply(signalSource);
                 
-                try (var innerScope = new SubScope(forker.get())) {
+                try (var innerScope = new Subscope(executor.get())) {
                     newSource.run(innerScope::fork);
                     try (newSource) {
                         sink.drainFromSource(newSource);
@@ -585,9 +585,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                this.forker.init(forker);
-                sink.run(forker);
+            public void run(Executor executor) {
+                this.executor.init(executor);
+                sink.run(executor);
             }
         }
         
@@ -607,7 +607,7 @@ public class Conduits {
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<U, T> sinkMapper) {
         class SinkAdaptedSource implements Conduit.Source<U> {
             final Conduit.Source<T> source;
-            final AsyncInit<Forker> forker = new AsyncInit<>();
+            final AsyncInit<Executor> executor = new AsyncInit<>();
             
             SinkAdaptedSource(Conduit.Source<T> source) {
                 this.source = source;
@@ -660,7 +660,7 @@ public class Conduits {
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.apply(signalSink);
                 
-                try (var subScope = new SubScope(forker.get())) {
+                try (var subScope = new Subscope(executor.get())) {
                     newSink.run(subScope::fork);
                     // As an optimization, we drain in the same thread instead of forking - otherwise this would look
                     // more like ClosedSilo.run(). We have to take more care to delegate throws and handle interrupts.
@@ -670,8 +670,8 @@ public class Conduits {
                     } catch (Throwable e1) {
                         try {
                             newSink.complete(e1);
-                        } catch (Error | Exception e2) {
-                            subScope.fork(() -> { throw e2; });
+                        } catch (Throwable e2) {
+                            subScope.fork(() -> { throw new CompletionException(e2); });
                             if (e2 instanceof InterruptedException) {
                                 Thread.currentThread().interrupt();
                             }
@@ -694,9 +694,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                this.forker.init(forker);
-                source.run(forker);
+            public void run(Executor executor) {
+                this.executor.init(executor);
+                source.run(executor);
             }
         }
         
@@ -840,8 +840,8 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                sink.run(forker);
+            public void run(Executor executor) {
+                sink.run(executor);
             }
         }
         
@@ -1315,8 +1315,8 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                sink.run(forker);
+            public void run(Executor executor) {
+                sink.run(executor);
             }
         }
         
@@ -1344,9 +1344,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var sink : sinks) {
-                    sink.run(forker);
+                    sink.run(executor);
                 }
             }
         }
@@ -1372,9 +1372,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var sink : sinks) {
-                    sink.run(forker);
+                    sink.run(executor);
                 }
             }
         }
@@ -1433,9 +1433,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var sink : sinks) {
-                    sink.run(forker);
+                    sink.run(executor);
                 }
             }
         }
@@ -1463,9 +1463,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var sink : sinks) {
-                    sink.run(forker);
+                    sink.run(executor);
                 }
             }
         }
@@ -1493,9 +1493,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var sink : sinks) {
-                    sink.run(forker);
+                    sink.run(executor);
                 }
             }
         }
@@ -1526,9 +1526,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var source : sources) {
-                    source.run(forker);
+                    source.run(executor);
                 }
             }
         }
@@ -1556,9 +1556,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var source : sources) {
-                    source.run(forker);
+                    source.run(executor);
                 }
             }
         }
@@ -1587,9 +1587,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var source : sources) {
-                    source.run(forker);
+                    source.run(executor);
                 }
             }
         }
@@ -1641,9 +1641,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
+            public void run(Executor executor) {
                 for (var source : sources) {
-                    source.run(forker);
+                    source.run(executor);
                 }
             }
         }
@@ -1689,9 +1689,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                source1.run(forker);
-                source2.run(forker);
+            public void run(Executor executor) {
+                source1.run(executor);
+                source2.run(executor);
             }
         }
         
@@ -1800,9 +1800,9 @@ public class Conduits {
             }
             
             @Override
-            public void run(Forker forker) {
-                source1.run(forker);
-                source2.run(forker);
+            public void run(Executor executor) {
+                source1.run(executor);
+                source2.run(executor);
             }
         }
         
@@ -2231,6 +2231,10 @@ public class Conduits {
         return sink;
     }
     
+    public static Executor scopedExecutor(StructuredTaskScope<?> scope) {
+        return runnable -> scope.fork(Executors.callable(runnable, null));
+    }
+    
     private static Exception asException(Throwable t) {
         if (t instanceof Exception x) {
             return x;
@@ -2277,23 +2281,23 @@ public class Conduits {
      *
      * <p>This class is basically a thin wrapper around a Phaser.
      */
-    private static class SubScope implements AutoCloseable {
-        final Forker forker;
+    private static class Subscope implements AutoCloseable {
+        final Executor executor;
         final Phaser phaser;
         
-        public SubScope(Forker forker) {
-            this.forker = forker;
+        public Subscope(Executor executor) {
+            this.executor = executor;
             this.phaser = new Phaser(1);
         }
         
-        public void fork(Callable<?> task) {
+        public void fork(Runnable task) {
             if (phaser.register() < 0) {
                 throw new IllegalStateException("SubScope is closed");
             }
             try {
-                forker.fork(() -> {
+                executor.execute(() -> {
                     try {
-                        return task.call();
+                        task.run();
                     } finally {
                         phaser.arriveAndDeregister();
                     }
@@ -2429,7 +2433,7 @@ public class Conduits {
         }
         
         @Override
-        public void run(Forker forker) {
+        public void run(Executor executor) {
             // TODO: Called again with a different argument?
             // TODO: Arbitrary STS is concerning:
             //  - ShutdownOnSuccess is definitely not okay; that would skip most of the pipeline and yield a meaningless (null) result
@@ -2438,9 +2442,9 @@ public class Conduits {
                 return;
             }
             
-            source.run(forker);
-            sink.run(forker);
-            forker.fork(() -> {
+            source.run(executor);
+            sink.run(executor);
+            executor.execute(() -> {
                 try (source) {
                     if (sink instanceof Conduit.StepSink<? super T> ss) {
                         source.drainToSink(ss);
@@ -2450,10 +2454,13 @@ public class Conduits {
                         throw new AssertionError("source must be StepSource or sink must be StepSink");
                     }
                     sink.complete(null);
-                } catch (Throwable error) {
-                    sink.complete(error);
+                } catch (Throwable e1) {
+                    try {
+                        sink.complete(e1);
+                    } catch (Throwable e2) {
+                        throw new CompletionException(e2);
+                    }
                 }
-                return null;
             });
         }
     }
@@ -2467,9 +2474,9 @@ public class Conduits {
             this.right = right;
         }
         
-        public void run(Forker forker) {
-            left.run(forker);
-            right.run(forker);
+        public void run(Executor executor) {
+            left.run(executor);
+            right.run(executor);
         }
     }
     
