@@ -250,6 +250,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 core.onComplete(controller);
                 
                 updateSourceDeadline();
+                // TODO: Always set state? to ensure onComplete() is called at most once
                 setState(COMPLETING);
                 readyForSink.signalAll();
             } finally {

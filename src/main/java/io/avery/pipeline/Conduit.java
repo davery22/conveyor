@@ -11,6 +11,10 @@ public class Conduit {
     private Conduit() {}
     
     public sealed interface Stage {
+        /**
+         *
+         * @param executor
+         */
         default void run(Executor executor) { }
     }
     
@@ -26,10 +30,24 @@ public class Conduit {
     
     @FunctionalInterface
     public non-sealed interface Sink<In> extends Stage {
+        /**
+         *
+         * @param source
+         * @return {@code true} if the source drained, meaning a call to {@link StepSource#poll() poll} returned {@code null}.
+         * @throws Exception
+         */
         boolean drainFromSource(StepSource<? extends In> source) throws Exception;
         
+        /**
+         *
+         * @throws Exception
+         */
         default void complete() throws Exception { }
         
+        /**
+         *
+         * @param ex
+         */
         default void completeExceptionally(Throwable ex) {
             // Default impl handles the case where the Sink has no async downstream.
             // Implementations that have an async downstream should override this method to propagate error downstream.
@@ -51,8 +69,18 @@ public class Conduit {
     
     @FunctionalInterface
     public non-sealed interface Source<Out> extends Stage, AutoCloseable {
+        /**
+         *
+         * @param sink
+         * @return {@code false} if the sink cancelled, meaning a call to {@link StepSink#offer(Object) offer} returned {@code false}.
+         * @throws Exception
+         */
         boolean drainToSink(StepSink<? super Out> sink) throws Exception;
         
+        /**
+         *
+         * @throws Exception
+         */
         default void close() throws Exception { }
         
         default void forEach(Consumer<? super Out> action) throws Exception {
@@ -99,6 +127,12 @@ public class Conduit {
     
     @FunctionalInterface
     public interface StepSink<In> extends Sink<In> {
+        /**
+         *
+         * @param input
+         * @return
+         * @throws Exception
+         */
         boolean offer(In input) throws Exception;
         
         @Override
@@ -126,6 +160,11 @@ public class Conduit {
     
     @FunctionalInterface
     public interface StepSource<Out> extends Source<Out> {
+        /**
+         *
+         * @return
+         * @throws Exception
+         */
         Out poll() throws Exception;
         
         @Override

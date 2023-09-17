@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
@@ -339,77 +340,102 @@ public class Conduits {
     // and inner Stage(s) run the shared piece, because the outer should run it first, and not wait
     // until all inners are finished (if it waits at all).
     
+    // TODO:
+    //  Does plain Sink need complete()/completeExceptionally()? (Can they be implicit in drainFromSource()?)
+    //  Does plain Source need close()? (Can it be implicit in drainToSink()?)
+    //  If plain Sink's drainFromSource() implicitly completes downstreams, so should StepSink...
+    //  If plain Source's drainToSink() implicitly closes upstreams, so should StepSource...
+    
+    // TODO: default close() / complete() do not prevent further poll() / offer()...
+    
     // --- Sinks ---
     
-    public static <T, K> Conduit.StepSink<T> groupBy(Function<T, K> classifier,
-                                                     BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
-        class GroupBy implements Conduit.StepSink<T> {
+    public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
+                                                 BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
+        record ScopedSink<T>(Subscope scope, Conduit.StepSink<? super T> sink) { }
+        
+        class GroupBy implements Conduit.Sink<T> {
             final AsyncInit<Executor> executor = new AsyncInit<>();
-            final Map<K, Object> sinkByKey = new HashMap<>();
-            int state = RUNNING;
-            
-            static final int RUNNING   = 0;
-            static final int COMPLETED = 1;
-            static final int CLOSED    = 2;
+            final AtomicBoolean called = new AtomicBoolean(false);
             
             static final Object TOMBSTONE = new Object();
             
-            @Override
-            public boolean offer(T input) throws Exception {
-                if (state >= COMPLETED) {
-                    return false;
-                }
-                
-                K key = classifier.apply(input);
-                var s = sinkByKey.get(key);
-                if (s == TOMBSTONE) {
-                    return true;
-                }
-                @SuppressWarnings("unchecked")
-                var sink = (Conduit.StepSink<? super T>) s;
-                if (sink == null) {
-                    sink = sinkFactory.apply(key, input);
-                    if (sink == null) {
-                        return true;
-                    }
-                    sinkByKey.put(key, sink);
-                    // Note that running a sink per key could produce unbounded threads.
-                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
-                    // incomplete sinks and returning null if maxed (thus dropping elements).
-                    sink.run(executor.get());
-                }
-                if (!sink.offer(input)) {
-                    sink.completeExceptionally(null);
-                    // TODO: Wait for Silos to finish?
-                    sinkByKey.put(key, TOMBSTONE);
-                }
-                return true; // Source finished
+            private static Stream<Conduit.Sink<?>> sinks(Map<?, Object> scopedSinkByKey) {
+                return scopedSinkByKey.values().stream()
+                    .mapMulti((o, downstream) -> {
+                        if (o instanceof ScopedSink<?> ss) {
+                            downstream.accept(ss.sink);
+                        }
+                    });
             }
             
             @Override
-            public void complete() throws Exception {
-                if (state >= COMPLETED) {
-                    return;
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                if (!called.compareAndSet(false, true)) {
+                    return false; // Not drained
                 }
-                sinkByKey.values().removeIf(e -> !(e instanceof Conduit.Sink));
-                @SuppressWarnings({"rawtypes", "unchecked"})
-                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                composedComplete(iter); // TODO: Stack?
-                sinkByKey.clear();
-                state = COMPLETED;
+                
+                Map<K, Object> scopedSinkByKey = new HashMap<>();
+                try (var scope = new Subscope(executor.get())) {
+                    try {
+                        for (T val; (val = source.poll()) != null; ) {
+                            K key = classifier.apply(val);
+                            var s = scopedSinkByKey.get(key);
+                            if (s == TOMBSTONE) {
+                                continue;
+                            }
+                            @SuppressWarnings("unchecked")
+                            var scopedSink = (ScopedSink<T>) s;
+                            if (s == null) {
+                                var sink = Objects.requireNonNull(sinkFactory.apply(key, val));
+                                var subScope = new Subscope(scope::fork);
+                                scopedSink = new ScopedSink<>(subScope, sink);
+                                scopedSinkByKey.put(key, scopedSink);
+                                // Note that running a sink per key could produce unbounded threads.
+                                // We leave this to the sinkFactory to resolve if necessary, eg by tracking
+                                // incomplete sinks and returning null if maxed (thus dropping elements).
+                                sink.run(subScope::fork);
+                            }
+                            if (!scopedSink.sink.offer(val)) {
+                                scopedSink.sink.complete();
+                                scopedSink.scope.join();
+                                scopedSinkByKey.put(key, TOMBSTONE);
+                            }
+                        }
+                        composedComplete(sinks(scopedSinkByKey).iterator()); // TODO: Stack?
+                        return true; // Source finished
+                    } catch (Error | Exception t1) {
+                        try {
+                            composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), t1); // TODO: Stack?
+                        } catch (Throwable t2) {
+                            t1.addSuppressed(t2);
+                        }
+                        // Re-throw, so that if we are part of a fan-out, sibling sinks may see
+                        throw t1;
+                    }
+                } // TODO: SubScope.close() does not interrupt threads
+            }
+            
+            @Override
+            public void complete() {
+                // Nothing to do
             }
             
             @Override
             public void completeExceptionally(Throwable ex) {
-                if (state == CLOSED) {
-                    return;
-                }
-                state = CLOSED;
-                sinkByKey.values().removeIf(e -> !(e instanceof Conduit.Sink));
-                @SuppressWarnings({"rawtypes", "unchecked"})
-                var iter = (Iterator<? extends Conduit.Sink<?>>) (Iterator) sinkByKey.values().iterator();
-                composedCompleteExceptionally(iter, ex); // TODO: Stack?
-                sinkByKey.clear();
+                // Nothing to do?
+                // To respect structured concurrency, internal sinks must be completed in drainFromSource.
+                // If we originated the exception, it would have been passed to internal sinks then.
+                // If we did not originate the exception (eg we are part of a fan-out, like balance, and a sibling sink
+                // threw), we probably received an interrupt and threw / passed InterruptedException to internal sinks.
+                // Either way, at this point the internal sinks are done and gone, so there is nothing to do here.
+                // TODO: Should we always throw in completeExceptionally?
+                //  - This would ensure we never 'lose' the exception
+                //  - It would also mean that internal completions would throw...
+                //    - which would cause fan-out to interrupt siblings...
+                //    - so we could reconsider removing complete[Exceptionally] from Sink / close from Source
+                //      - if we're comfortable treating downstream sinks just like internal sinks
+                //        - ie in fan-out, pass InterruptedException downstream, rather than sibling exception
             }
             
             @Override
@@ -421,33 +447,13 @@ public class Conduits {
         return new GroupBy();
     }
     
-    // TODO: flatMapSink options...
-    //  - Could run in local scope
-    //    - shortest lifetime (and op owns exceptions)
-    //  - Could put all this inside a Source#drainToSink, to get access to a longer-lived scope
-    //    - medium lifetime (and op owns exceptions)
-    //    - thread leaking (unless we join at intervals...)
-    //  - Could grab the scope asynchronously from run()
-    //    - longest lifetime (and op DOES NOT own exceptions)
-    //    - thread leaking
-    
-    // TODO: flatMapSource options...
-    //  - Could use the 'StepSink' variant with a plain Sink, by buffering in front of Sink
-    //    -
-    //  - Could put all this inside a Sink#drainFromSource, to get access to a longer-lived scope
-    //    - medium lifetime (and op owns exceptions)
-    //    - thread leaking (unless we join at intervals...)
-    //  - Could grab the scope asynchronously from run()
-    //    - longest lifetime
-    //    - thread leaking
-    
-    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapSink(Function<? super U, ? extends Conduit.Source<T>> mapper) {
-        class FlatMapSink implements Conduit.StepSink<U> {
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super U, ? extends Conduit.Source<T>> mapper) {
+        class FlatMap implements Conduit.StepSink<U> {
             final Conduit.StepSink<T> sink;
             final AsyncInit<Executor> executor = new AsyncInit<>();
             boolean draining = true;
             
-            FlatMapSink(Conduit.StepSink<T> sink) {
+            FlatMap(Conduit.StepSink<T> sink) {
                 this.sink = sink;
             }
             
@@ -490,65 +496,7 @@ public class Conduits {
             }
         }
         
-        return FlatMapSink::new;
-    }
-    
-    public static <T, U> Conduit.StepSourceOperator<T, U> flatMapSource(Function<? super T, ? extends Conduit.StepSource<U>> mapper) {
-        class FlatMapSource implements Conduit.StepSource<U> {
-            final Conduit.StepSource<T> source;
-            final AsyncInit<Subscope> subScope = new AsyncInit<>();
-            Conduit.StepSource<U> subSource = Conduits.stepSource(Collections.emptyIterator());
-            
-            FlatMapSource(Conduit.StepSource<T> source) {
-                this.source = source;
-            }
-            
-            @Override
-            public U poll() throws Exception {
-                // TODO: Generally, nothing is enforcing that we definitely close the scope
-                //  If we get interrupted, or just stop polling and don't call close(), we leak threads
-                //  We fundamentally are not structured concurrency here; we return after launching threads!
-                if (subSource == null) {
-                    return null;
-                }
-                for (;;) {
-                    U val = subSource.poll();
-                    if (val != null) {
-                        return val;
-                    }
-                    subSource.close();
-                    subScope.get().join();
-                    for (;;) {
-                        T in = source.poll();
-                        if (in == null) {
-                            subSource = null;
-                            return null;
-                        }
-                        var next = mapper.apply(in);
-                        if (next != null) {
-                            subSource = next;
-                            subSource.run(subScope.get()::fork);
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            @Override
-            public void close() throws Exception {
-                try (source; var sc = subScope.orNull(); var s = subSource) {
-                    subSource = null;
-                }
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                this.subScope.init(new Subscope(executor));
-                source.run(executor);
-            }
-        }
-        
-        return FlatMapSource::new;
+        return FlatMap::new;
     }
     
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
@@ -704,7 +652,7 @@ public class Conduits {
                     }
                     subScope.join();
                     if (signalSink.error != null) {
-                        throw asException(signalSink.error);
+                        throw new ExecutionException(signalSink.error); // TODO: adaptSinkOfSource(A.compose(B)) would wrap once, chaining would wrap twice
                     }
                     return signalSink.drained;
                 } // TODO: SubScope.close() does not interrupt threads
@@ -2263,31 +2211,65 @@ public class Conduits {
     }
     
     public static <T> Conduit.Source<T> source(Stream<T> stream) {
-        return sink -> {
-            try {
-                return stream.allMatch(el -> {
-                    try {
-                        return sink.offer(el);
-                    } catch (Error | RuntimeException ex) {
-                        throw ex;
-                    } catch (Exception ex) {
-                        if (ex instanceof InterruptedException) {
-                            Thread.currentThread().interrupt();
-                        }
-                        throw new WrappingException(ex);
-                    }
-                });
-            } catch (WrappingException e) {
-                if (e.getCause() instanceof InterruptedException) {
-                    Thread.interrupted();
+        class StreamSource implements Conduit.Source<T> {
+            boolean called = false;
+            
+            @Override
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+                if (called) {
+                    return true;
                 }
-                throw e.getCause();
+                called = true;
+                
+                try {
+                    return stream.allMatch(el -> {
+                        Objects.requireNonNull(el);
+                        try {
+                            return sink.offer(el);
+                        } catch (Error | RuntimeException ex) {
+                            throw ex;
+                        } catch (Exception ex) {
+                            if (ex instanceof InterruptedException) {
+                                Thread.currentThread().interrupt();
+                            }
+                            throw new WrappingException(ex);
+                        }
+                    });
+                } catch (WrappingException e) {
+                    if (e.getCause() instanceof InterruptedException) {
+                        Thread.interrupted();
+                    }
+                    throw e.getCause();
+                }
             }
-        };
+            
+            @Override
+            public void close() {
+                stream.close();
+            }
+        }
+        
+        return new StreamSource();
     }
     
     public static <T> Conduit.StepSource<T> stepSource(Iterator<T> iterator) {
-        return () -> iterator.hasNext() ? iterator.next() : null;
+        return stepSource(iterator, () -> { });
+    }
+    
+    public static <T> Conduit.StepSource<T> stepSource(Iterator<T> iterator, AutoCloseable onClose) {
+        class IteratorSource implements Conduit.StepSource<T> {
+            @Override
+            public T poll() {
+                return iterator.hasNext() ? Objects.requireNonNull(iterator.next()) : null;
+            }
+            
+            @Override
+            public void close() throws Exception {
+                onClose.close();
+            }
+        }
+        
+        return new IteratorSource();
     }
     
     public static <T> Conduit.Source<T> source(Conduit.Source<T> source) {
@@ -2308,13 +2290,6 @@ public class Conduits {
     
     public static Executor scopedExecutor(StructuredTaskScope<?> scope) {
         return runnable -> scope.fork(Executors.callable(runnable, null));
-    }
-    
-    private static Exception asException(Throwable t) {
-        if (t instanceof Exception x) {
-            return x;
-        }
-        throw (Error) t;
     }
     
     private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
