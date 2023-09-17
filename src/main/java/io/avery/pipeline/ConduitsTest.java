@@ -36,7 +36,7 @@ class ConduitsTest {
     static void testGroupBy() throws Exception {
         try (var scope = new SlowFailScope()) {
             lineSource()
-                .mapSource(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
+                .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
                 .run(Conduits.scopedExecutor(scope));
             
@@ -187,7 +187,7 @@ class ConduitsTest {
             lineSource()
                 .andThen(Conduits
                     .gather(ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)))
-                    .apply(Conduits.tokenBucket(
+                    .andThen(Conduits.tokenBucket(
                         Duration.ofSeconds(1),
                         String::length,
                         10,
@@ -196,7 +196,7 @@ class ConduitsTest {
                 )
                 .andThen(Conduits
                     .gather(ConduitsTest.flatMap((String s) -> Stream.of(s+"22")))
-                    .apply(ConduitsTest.buffer(16))
+                    .andThen(ConduitsTest.buffer(16))
                 )
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(Conduits.scopedExecutor(scope));

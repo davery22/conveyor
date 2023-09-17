@@ -447,18 +447,18 @@ public class Conduits {
         return new GroupBy();
     }
     
-    public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super U, ? extends Conduit.Source<T>> mapper) {
-        class FlatMap implements Conduit.StepSink<U> {
-            final Conduit.StepSink<T> sink;
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.Source<U>> mapper) {
+        class FlatMap implements Conduit.StepSink<T> {
+            final Conduit.StepSink<U> sink;
             final AsyncInit<Executor> executor = new AsyncInit<>();
             boolean draining = true;
             
-            FlatMap(Conduit.StepSink<T> sink) {
+            FlatMap(Conduit.StepSink<U> sink) {
                 this.sink = sink;
             }
             
             @Override
-            public boolean offer(U input) throws Exception {
+            public boolean offer(T input) throws Exception {
                 Objects.requireNonNull(input);
                 if (!draining) {
                     return false;
@@ -499,24 +499,24 @@ public class Conduits {
         return FlatMap::new;
     }
     
-    public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<U, T> sourceMapper) {
-        class SourceAdaptedSink implements Conduit.Sink<U> {
-            final Conduit.Sink<T> sink;
+    public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<T, U> sourceMapper) {
+        class SourceAdaptedSink implements Conduit.Sink<T> {
+            final Conduit.Sink<U> sink;
             final AsyncInit<Executor> executor = new AsyncInit<>();
             
-            SourceAdaptedSink(Conduit.Sink<T> sink) {
+            SourceAdaptedSink(Conduit.Sink<U> sink) {
                 this.sink = sink;
             }
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 // TODO: Check state?
                 
-                class SignalSource implements Conduit.StepSource<U> {
+                class SignalSource implements Conduit.StepSource<T> {
                     volatile boolean drained = false;
                     
                     @Override
-                    public U poll() throws Exception {
+                    public T poll() throws Exception {
                         var result = source.poll();
                         if (result == null) {
                             drained = true;
@@ -535,7 +535,7 @@ public class Conduits {
                 //    locally. We also throw locally if sink#drainFromSource throws (or if we're interrupted).
                 
                 var signalSource = new SignalSource();
-                var newSource = sourceMapper.apply(signalSource);
+                var newSource = sourceMapper.compose(signalSource);
                 
                 try (var innerScope = new Subscope(executor.get())) {
                     newSource.run(innerScope::fork);
@@ -577,7 +577,7 @@ public class Conduits {
     //    but the actual execution will be: [source<b>] B<Sink<b> = Sink<a>; [into source<a>] A(Sink<a>) = Sink<t> [into source<t>]
     //  in the second version, B(Sink<b>) = Sink<a>; A(Sink<a>) = Sink<t>
     
-    public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<U, T> sinkMapper) {
+    public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<T, U> sinkMapper) {
         class SinkAdaptedSource implements Conduit.Source<U> {
             final Conduit.Source<T> source;
             final AsyncInit<Executor> executor = new AsyncInit<>();
@@ -631,7 +631,7 @@ public class Conduits {
                 // 4. We only throw an exception locally if it arrived at the signalSink (or if we're interrupted).
                 
                 var signalSink = new SignalSink();
-                var newSink = sinkMapper.apply(signalSink);
+                var newSink = sinkMapper.andThen(signalSink);
                 
                 try (var subScope = new Subscope(executor.get())) {
                     newSink.run(subScope::fork);
@@ -726,7 +726,7 @@ public class Conduits {
     //  - Not completing the Sink when we normally would can mean that it accepts more offers than it normally would
     
     
-    public static <In, T, A> Conduit.StepSinkOperator<T, In> gather(Gatherer<In, A, T> gatherer) {
+    public static <In, T, A> Conduit.StepSinkOperator<In, T> gather(Gatherer<In, A, T> gatherer) {
         Objects.requireNonNull(gatherer);
         
         var supplier = gatherer.supplier();
@@ -1281,22 +1281,22 @@ public class Conduits {
         return new MapAsyncOrdered();
     }
     
-    public static <T, U> Conduit.StepToSinkOperator<T, U> mapAsync(int parallelism,
-                                                                   Function<? super U, ? extends Callable<T>> mapper) {
-        class MapAsync implements Conduit.Sink<U> {
-            final Conduit.StepSink<T> sink;
+    public static <T, U> Conduit.SinkToStepOperator<T, U> mapAsync(int parallelism,
+                                                                   Function<? super T, ? extends Callable<U>> mapper) {
+        class MapAsync implements Conduit.Sink<T> {
+            final Conduit.StepSink<U> sink;
             final ReentrantLock lock = new ReentrantLock();
             
-            MapAsync(Conduit.StepSink<T> sink) {
+            MapAsync(Conduit.StepSink<U> sink) {
                 this.sink = sink;
             }
             
-            class Worker implements Conduit.Sink<U> {
+            class Worker implements Conduit.Sink<T> {
                 @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
+                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                     for (;;) {
-                        U in;
-                        Callable<T> callable;
+                        T in;
+                        Callable<U> callable;
                         
                         lock.lockInterruptibly();
                         try {
@@ -1307,7 +1307,7 @@ public class Conduits {
                         } finally {
                             lock.unlock();
                         }
-                        T out = callable.call();
+                        U out = callable.call();
                         if (out != null && !sink.offer(out)) {
                             return false;
                         }
@@ -1316,7 +1316,7 @@ public class Conduits {
             }
             
             @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends U> source) throws Exception {
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsync-drainFromSource", Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = IntStream.range(0, parallelism)
                         .mapToObj(i -> new Worker())

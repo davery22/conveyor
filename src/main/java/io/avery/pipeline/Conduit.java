@@ -10,6 +10,8 @@ import java.util.stream.Collector;
 public class Conduit {
     private Conduit() {}
     
+    // --- Stages ---
+    
     public sealed interface Stage {
         /**
          *
@@ -19,7 +21,7 @@ public class Conduit {
     }
     
     public sealed interface Silo extends Stage permits Conduits.ClosedSilo, Conduits.ChainSilo {
-        // Chaining
+        // Stage/Segue chaining
         default Silo compose(Silo before) { return new Conduits.ChainSilo(before, this); }
         default <T> Sink<T> compose(Sink<T> before) { return new Conduits.ChainSink<>(before, this); }
         default <T> StepSink<T> compose(StepSink<T> before) { return new Conduits.ChainStepSink<>(before, this); }
@@ -54,7 +56,7 @@ public class Conduit {
             throw new CompletionException(ex);
         }
         
-        // Chaining
+        // Stage/Segue chaining
         default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
         default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
         default <T> StepSink<T> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
@@ -62,9 +64,9 @@ public class Conduit {
         default <T> Segue<In, T> andThen(Source<T> after) { return new Conduits.ChainSegue<>(this, after); }
         default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { return new Conduits.ChainSinkStepSource<>(this, after); }
         
-        // Mapping
-        default <T> Sink<T> mapSink(SinkOperator<In, T> mapper) { return mapper.apply(this); }
-        default <T> StepSink<T> mapSink(SinkToStepOperator<In, T> mapper) { return mapper.apply(this); }
+        // Operator chaining
+        default <T> Sink<T> compose(SinkOperator<T, In> mapper) { return mapper.andThen(this); }
+        default <T> StepSink<T> compose(StepToSinkOperator<T, In> mapper) { return mapper.andThen(this); }
     }
     
     @FunctionalInterface
@@ -112,7 +114,7 @@ public class Conduit {
             return finisher.apply(acc);
         }
         
-        // Chaining
+        // Stage/Segue chaining
         default Source<Out> compose(Silo before) { return new Conduits.ChainSource<>(before, this); }
         default <T> Segue<T, Out> compose(Sink<T> before) { return new Conduits.ChainSegue<>(before, this); }
         default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { return new Conduits.ChainStepSinkSource<>(before, this); }
@@ -120,9 +122,9 @@ public class Conduit {
         default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
         default <T> StepSource<T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
         
-        // Mapping
-        default <T> Source<T> mapSource(SourceOperator<Out, T> mapper) { return mapper.apply(this); }
-        default <T> StepSource<T> mapSource(SourceToStepOperator<Out, T> mapper) { return mapper.apply(this); }
+        // Operator chaining
+        default <T> Source<T> andThen(SourceOperator<Out, T> mapper) { return mapper.compose(this); }
+        default <T> StepSource<T> andThen(SourceToStepOperator<Out, T> mapper) { return mapper.compose(this); }
     }
     
     @FunctionalInterface
@@ -145,7 +147,7 @@ public class Conduit {
             return true;
         }
         
-        // Chaining
+        // Stage/Segue chaining
         default Silo compose(Source<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
         default <T> Sink<T> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
         default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
@@ -153,9 +155,9 @@ public class Conduit {
         @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { return new Conduits.ChainStepSinkSource<>(this, after); }
         @Override default <T> StepSegue<In, T> andThen(StepSource<T> after) { return new Conduits.ChainStepSegue<>(this, after); }
         
-        // Mapping
-        default <T> Sink<T> mapSink(StepToSinkOperator<In, T> mapper) { return mapper.apply(this); }
-        default <T> StepSink<T> mapSink(StepSinkOperator<In, T> mapper) { return mapper.apply(this); }
+        // Operator chaining
+        default <T> Sink<T> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(this); }
+        default <T> StepSink<T> compose(StepSinkOperator<T, In> mapper) { return mapper.andThen(this); }
     }
     
     @FunctionalInterface
@@ -177,7 +179,7 @@ public class Conduit {
             return true;
         }
         
-        // Chaining
+        // Stage/Segue chaining
         @Override default StepSource<Out> compose(Silo before) { return new Conduits.ChainStepSource<>(before, this); }
         @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { return new Conduits.ChainSinkStepSource<>(before, this); }
         @Override default <T> StepSegue<T, Out> compose(StepSink<T> before) { return new Conduits.ChainStepSegue<>(before, this); }
@@ -185,16 +187,18 @@ public class Conduit {
         default <T> Source<T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
         default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
         
-        // Mapping
-        default <T> Source<T> mapSource(StepToSourceOperator<Out, T> mapper) { return mapper.apply(this); }
-        default <T> StepSource<T> mapSource(StepSourceOperator<Out, T> mapper) { return mapper.apply(this); }
+        // Operator chaining
+        default <T> Source<T> andThen(StepToSourceOperator<Out, T> mapper) { return mapper.compose(this); }
+        default <T> StepSource<T> andThen(StepSourceOperator<Out, T> mapper) { return mapper.compose(this); }
     }
+    
+    // --- Segues ---
     
     public interface Segue<In, Out> {
         Sink<In> sink();
         Source<Out> source();
         
-        // Chaining
+        // Stage/Segue chaining
         default Source<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
         default <T> Segue<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
         default <T> StepSinkSource<T, Out> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
@@ -202,17 +206,17 @@ public class Conduit {
         default <T> Segue<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         
-        // Mapping
-        default <T> Segue<T, Out> mapSink(SinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        default <T> StepSinkSource<T, Out> mapSink(SinkToStepOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        default <T> Segue<In, T> mapSource(SourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
-        default <T> SinkStepSource<In, T> mapSource(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
+        // Operator chaining
+        default <T> Segue<T, Out> compose(SinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        default <T> StepSinkSource<T, Out> compose(StepToSinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        default <T> Segue<In, T> andThen(SourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
+        default <T> SinkStepSource<In, T> andThen(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
     public interface StepSinkSource<In, Out> extends Segue<In, Out> {
         @Override StepSink<In> sink();
         
-        // Chaining
+        // Stage/Segue chaining
         default Source<Out> compose(Source<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
         default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
         default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
@@ -220,17 +224,17 @@ public class Conduit {
         @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         @Override default <T> StepSegue<In, T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainStepSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         
-        // Mapping
-        default <T> Segue<T, Out> mapSink(StepToSinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        default <T> StepSinkSource<T, Out> mapSink(StepSinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        @Override default <T> StepSinkSource<In, T> mapSource(SourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
-        @Override default <T> StepSegue<In, T> mapSource(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
+        // Operator chaining
+        default <T> Segue<T, Out> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        default <T> StepSinkSource<T, Out> compose(StepSinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        @Override default <T> StepSinkSource<In, T> andThen(SourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
+        @Override default <T> StepSegue<In, T> andThen(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
     public interface SinkStepSource<In, Out> extends Segue<In, Out> {
         @Override StepSource<Out> source();
         
-        // Chaining
+        // Stage/Segue chaining
         @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
         @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
         @Override default <T> StepSegue<T, Out> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
@@ -238,15 +242,15 @@ public class Conduit {
         default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         
-        // Mapping
-        @Override default <T> SinkStepSource<T, Out> mapSink(SinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        @Override default <T> StepSegue<T, Out> mapSink(SinkToStepOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        default <T> Segue<In, T> mapSource(StepToSourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
-        default <T> SinkStepSource<In, T> mapSource(StepSourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
+        // Operator chaining
+        @Override default <T> SinkStepSource<T, Out> compose(SinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        @Override default <T> StepSegue<T, Out> compose(StepToSinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        default <T> Segue<In, T> andThen(StepToSourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
+        default <T> SinkStepSource<In, T> andThen(StepSourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
     public interface StepSegue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
-        // Chaining
+        // Stage/Segue chaining
         @Override default StepSource<Out> compose(Source<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
         @Override default <T> SinkStepSource<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
         @Override default <T> StepSegue<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
@@ -254,114 +258,130 @@ public class Conduit {
         @Override default <T> StepSinkSource<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         @Override default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
         
-        // Mapping
-        @Override default <T> SinkStepSource<T, Out> mapSink(StepToSinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        @Override default <T> StepSegue<T, Out> mapSink(StepSinkOperator<In, T> mapper) { return mapper.apply(sink()).andThen(source()); }
-        @Override default <T> StepSinkSource<In, T> mapSource(StepToSourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
-        @Override default <T> StepSegue<In, T> mapSource(StepSourceOperator<Out, T> mapper) { return sink().andThen(mapper.apply(source())); }
+        // Operator chaining
+        @Override default <T> SinkStepSource<T, Out> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        @Override default <T> StepSegue<T, Out> compose(StepSinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
+        @Override default <T> StepSinkSource<In, T> andThen(StepToSourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
+        @Override default <T> StepSegue<In, T> andThen(StepSourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
+    
+    // --- Sink Operators ---
+    // Sink<T> = SinkOperator<T, U> andThen Sink<U>
+    //         = Sink<U> compose SinkOperator<T, U>
     
     @FunctionalInterface
     public interface SinkOperator<T, U> {
-        Sink<U> apply(Sink<T> sink);
-        default <Out> Segue<U, Out> apply(Segue<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
-        default <Out> SinkStepSource<U, Out> apply(SinkStepSource<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
+        // Stage/Segue chaining
+        Sink<T> andThen(Sink<U> sink);
+        default <Out> Segue<T, Out> andThen(Segue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        default <Out> SinkStepSource<T, Out> andThen(SinkStepSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
-        // Chaining
-        default <V> SinkOperator<V, U> compose(SinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> StepToSinkOperator<V, U> compose(StepToSinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> SinkOperator<T, V> andThen(SinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
-        default <V> SinkToStepOperator<T, V> andThen(SinkToStepOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
+        // Operator chaining
+        default <V> SinkOperator<T, V> compose(SinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkToStepOperator<T, V> compose(SinkToStepOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkOperator<V, U> andThen(SinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> StepToSinkOperator<V, U> andThen(StepToSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
     }
     
     @FunctionalInterface
-    public interface StepToSinkOperator<T, U> {
-        Sink<U> apply(StepSink<T> sink);
-        default <Out> Segue<U, Out> apply(StepSinkSource<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
-        default <Out> SinkStepSource<U, Out> apply(StepSegue<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
+    public interface SinkToStepOperator<T, U> {
+        // Stage/Segue chaining
+        Sink<T> andThen(StepSink<U> sink);
+        default <Out> Segue<T, Out> andThen(StepSinkSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        default <Out> SinkStepSource<T, Out> andThen(StepSegue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
-        // Chaining
-        default <V> SinkOperator<V, U> compose(SinkToStepOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> StepToSinkOperator<V, U> compose(StepSinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> StepToSinkOperator<T, V> andThen(SinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
-        default <V> StepSinkOperator<T, V> andThen(SinkToStepOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
+        // Operator chaining
+        default <V> SinkOperator<T, V> compose(StepToSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkToStepOperator<T, V> compose(StepSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkToStepOperator<V, U> andThen(SinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> StepSinkOperator<V, U> andThen(StepToSinkOperator<V, T> after) { return sink -> after.andThen(this.andThen(sink)); }
     }
     
     @FunctionalInterface
-    public interface SinkToStepOperator<T, U> extends SinkOperator<T, U> {
-        @Override StepSink<U> apply(Sink<T> sink);
-        @Override default <Out> StepSinkSource<U, Out> apply(Segue<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
-        @Override default <Out> StepSegue<U, Out> apply(SinkStepSource<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
+    public interface StepToSinkOperator<T, U> extends SinkOperator<T, U> {
+        // Stage/Segue chaining
+        @Override StepSink<T> andThen(Sink<U> sink);
+        @Override default <Out> StepSinkSource<T, Out> andThen(Segue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        @Override default <Out> StepSegue<T, Out> andThen(SinkStepSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
-        // Chaining
-        @Override default <V> SinkToStepOperator<V, U> compose(SinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        @Override default <V> StepSinkOperator<V, U> compose(StepToSinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> SinkOperator<T, V> andThen(StepToSinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
-        default <V> SinkToStepOperator<T, V> andThen(StepSinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
+        // Operator chaining
+        @Override default <V> StepToSinkOperator<T, V> compose(SinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        @Override default <V> StepSinkOperator<T, V> compose(SinkToStepOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkOperator<V, U> andThen(SinkToStepOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> StepToSinkOperator<V, U> andThen(StepSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
     }
     
     @FunctionalInterface
-    public interface StepSinkOperator<T, U> extends StepToSinkOperator<T, U> {
-        @Override StepSink<U> apply(StepSink<T> sink);
-        @Override default <Out> StepSinkSource<U, Out> apply(StepSinkSource<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
-        @Override default <Out> StepSegue<U, Out> apply(StepSegue<T, Out> ss) { return apply(ss.sink()).andThen(ss.source()); }
+    public interface StepSinkOperator<T, U> extends SinkToStepOperator<T, U> {
+        // Stage/Segue chaining
+        @Override StepSink<T> andThen(StepSink<U> sink);
+        @Override default <Out> StepSinkSource<T, Out> andThen(StepSinkSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        @Override default <Out> StepSegue<T, Out> andThen(StepSegue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
-        // Chaining
-        @Override default <V> SinkToStepOperator<V, U> compose(SinkToStepOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        @Override default <V> StepSinkOperator<V, U> compose(StepSinkOperator<V, T> before) { return sink -> apply(before.apply(sink)); }
-        default <V> StepToSinkOperator<T, V> andThen(StepToSinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
-        default <V> StepSinkOperator<T, V> andThen(StepSinkOperator<U, V> after) { return sink -> after.apply(apply(sink)); }
+        // Operator chaining
+        @Override default <V> StepToSinkOperator<T, V> compose(StepToSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        @Override default <V> StepSinkOperator<T, V> compose(StepSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
+        default <V> SinkToStepOperator<V, U> andThen(SinkToStepOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> StepSinkOperator<V, U> andThen(StepSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
     }
 
+    // --- Source Operators ---
+    // Source<U> = SourceOperator<T, U> compose Source<T>
+    //           = Source<T> andThen SourceOperator<T, U>
+    
     @FunctionalInterface
     public interface SourceOperator<T, U> {
-        Source<U> apply(Source<T> source);
-        default <In> Segue<In, U> apply(Segue<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
-        default <In> StepSinkSource<In, U> apply(StepSinkSource<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
+        // Stage/Segue chaining
+        Source<U> compose(Source<T> source);
+        default <In> Segue<In, U> compose(Segue<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
+        default <In> StepSinkSource<In, U> compose(StepSinkSource<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
         
-        // Chaining
-        default <V> StepToSourceOperator<V, U> compose(StepToSourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> SourceOperator<V, U> compose(SourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> SourceOperator<T, V> andThen(SourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
-        default <V> SourceToStepOperator<T, V> andThen(SourceToStepOperator<U, V> after) { return source -> after.apply(apply(source)); }
+        // Operator chaining
+        default <V> StepToSourceOperator<V, U> compose(StepToSourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> SourceOperator<V, U> compose(SourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> SourceOperator<T, V> andThen(SourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
+        default <V> SourceToStepOperator<T, V> andThen(SourceToStepOperator<U, V> after) { return source -> after.compose(compose(source)); }
     }
     
     @FunctionalInterface
     public interface StepToSourceOperator<T, U> {
-        Source<U> apply(StepSource<T> source);
-        default <In> Segue<In, U> apply(SinkStepSource<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
-        default <In> StepSinkSource<In, U> apply(StepSegue<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
+        // Stage/Segue chaining
+        Source<U> compose(StepSource<T> source);
+        default <In> Segue<In, U> compose(SinkStepSource<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
+        default <In> StepSinkSource<In, U> compose(StepSegue<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
         
-        // Chaining
-        default <V> SourceOperator<V, U> compose(SourceToStepOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> StepToSourceOperator<V, U> compose(StepSourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> StepToSourceOperator<T, V> andThen(SourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
-        default <V> StepSourceOperator<T, V> andThen(SourceToStepOperator<U, V> after) { return source -> after.apply(apply(source)); }
+        // Operator chaining
+        default <V> SourceOperator<V, U> compose(SourceToStepOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> StepToSourceOperator<V, U> compose(StepSourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> StepToSourceOperator<T, V> andThen(SourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
+        default <V> StepSourceOperator<T, V> andThen(SourceToStepOperator<U, V> after) { return source -> after.compose(compose(source)); }
     }
     
     @FunctionalInterface
     public interface SourceToStepOperator<T, U> extends SourceOperator<T, U> {
-        @Override StepSource<U> apply(Source<T> source);
-        @Override default <In> SinkStepSource<In, U> apply(Segue<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
-        @Override default <In> StepSegue<In, U> apply(StepSinkSource<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
+        // Stage/Segue chaining
+        @Override StepSource<U> compose(Source<T> source);
+        @Override default <In> SinkStepSource<In, U> compose(Segue<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
+        @Override default <In> StepSegue<In, U> compose(StepSinkSource<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
         
-        // Chaining
-        @Override default <V> SourceToStepOperator<V, U> compose(SourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        @Override default <V> StepSourceOperator<V, U> compose(StepToSourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> SourceOperator<T, V> andThen(StepToSourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
-        default <V> SourceToStepOperator<T, V> andThen(StepSourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
+        // Operator chaining
+        @Override default <V> SourceToStepOperator<V, U> compose(SourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        @Override default <V> StepSourceOperator<V, U> compose(StepToSourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> SourceOperator<T, V> andThen(StepToSourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
+        default <V> SourceToStepOperator<T, V> andThen(StepSourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
     }
     
     @FunctionalInterface
     public interface StepSourceOperator<T, U> extends StepToSourceOperator<T, U> {
-        @Override StepSource<U> apply(StepSource<T> source);
-        @Override default <In> SinkStepSource<In, U> apply(SinkStepSource<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
-        @Override default <In> StepSegue<In, U> apply(StepSegue<In, T> ss) { return ss.sink().andThen(apply(ss.source())); }
+        // Stage/Segue chaining
+        @Override StepSource<U> compose(StepSource<T> source);
+        @Override default <In> SinkStepSource<In, U> compose(SinkStepSource<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
+        @Override default <In> StepSegue<In, U> compose(StepSegue<In, T> ss) { return ss.sink().andThen(compose(ss.source())); }
         
-        // Chaining
-        @Override default <V> SourceToStepOperator<V, U> compose(SourceToStepOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        @Override default <V> StepSourceOperator<V, U> compose(StepSourceOperator<V, T> before) { return source -> apply(before.apply(source)); }
-        default <V> StepToSourceOperator<T, V> andThen(StepToSourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
-        default <V> StepSourceOperator<T, V> andThen(StepSourceOperator<U, V> after) { return source -> after.apply(apply(source)); }
+        // Operator chaining
+        @Override default <V> SourceToStepOperator<V, U> compose(SourceToStepOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        @Override default <V> StepSourceOperator<V, U> compose(StepSourceOperator<V, T> before) { return source -> compose(before.compose(source)); }
+        default <V> StepToSourceOperator<T, V> andThen(StepToSourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
+        default <V> StepSourceOperator<T, V> andThen(StepSourceOperator<U, V> after) { return source -> after.compose(compose(source)); }
     }
 }
