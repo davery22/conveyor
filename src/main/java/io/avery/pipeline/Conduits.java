@@ -403,6 +403,7 @@ public class Conduits {
                             }
                         }
                         composedComplete(sinks(scopedSinkByKey).iterator()); // TODO: Stack?
+                        scope.join();
                         return true; // Source finished
                     } catch (Error | Exception t1) {
                         try {
@@ -447,7 +448,7 @@ public class Conduits {
         return new GroupBy();
     }
     
-    public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.Source<U>> mapper) {
+    public static <T, U> Conduit.StepSinkOperator<T, U> stepFlatMap(Function<? super T, ? extends Conduit.Source<U>> mapper) {
         class FlatMap implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
             final AsyncInit<Executor> executor = new AsyncInit<>();
@@ -463,16 +464,16 @@ public class Conduits {
                 if (!draining) {
                     return false;
                 }
-                var next = mapper.apply(input);
-                if (next == null) {
+                var subSource = mapper.apply(input);
+                if (subSource == null) {
                     return true;
                 }
-                try (var subScope = new Subscope(executor.get())) {
-                    next.run(subScope::fork);
-                    try (next) {
-                        draining = next.drainToSink(sink);
+                try (var scope = new Subscope(executor.get())) {
+                    subSource.run(scope::fork);
+                    try (subSource) {
+                        draining = subSource.drainToSink(sink);
                     }
-                    subScope.join();
+                    scope.join();
                     return draining;
                 } // TODO: SubScope.close() does not interrupt threads
             }
@@ -486,6 +487,61 @@ public class Conduits {
             @Override
             public void completeExceptionally(Throwable ex) {
                 draining = false;
+                sink.completeExceptionally(ex);
+            }
+            
+            @Override
+            public void run(Executor executor) {
+                this.executor.init(executor);
+                sink.run(executor);
+            }
+        }
+        
+        return FlatMap::new;
+    }
+    
+    public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<U>> mapper) {
+        class FlatMap implements Conduit.Sink<T> {
+            final Conduit.Sink<U> sink;
+            final AsyncInit<Executor> executor = new AsyncInit<>();
+            final AtomicBoolean called = new AtomicBoolean(false);
+            
+            FlatMap(Conduit.Sink<U> sink) {
+                this.sink = sink;
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                if (!called.compareAndSet(false, true)) {
+                    return false; // Not drained
+                }
+                
+                try (var scope = new Subscope(executor.get())) {
+                    for (T e; (e = source.poll()) != null; ) {
+                        Conduit.StepSource<U> subSource = mapper.apply(e);
+                        if (subSource == null) {
+                            continue;
+                        }
+                        subSource.run(scope::fork);
+                        try (subSource) {
+                            if (!sink.drainFromSource(subSource)) {
+                                scope.join();
+                                return false;
+                            }
+                        }
+                        scope.join();
+                    }
+                    return true;
+                } // TODO: SubScope.close() does not interrupt threads
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) {
                 sink.completeExceptionally(ex);
             }
             
@@ -537,12 +593,12 @@ public class Conduits {
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.compose(signalSource);
                 
-                try (var innerScope = new Subscope(executor.get())) {
-                    newSource.run(innerScope::fork);
+                try (var scope = new Subscope(executor.get())) {
+                    newSource.run(scope::fork);
                     try (newSource) {
                         sink.drainFromSource(newSource);
                     }
-                    innerScope.join();
+                    scope.join(); // TODO: Ensure join-before-close, else we lose the exception
                     return signalSource.drained;
                 } // TODO: SubScope.close() does not interrupt threads
             }
@@ -567,15 +623,23 @@ public class Conduits {
         return SourceAdaptedSink::new;
     }
     
-    // TODO: Do these compose well? eg, for A:a->t and B:b->a, does
-    //    .mapSource(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)))
-    //  behave like
-    //    .mapSource(adaptSinkOfSource(A.compose(B)))
-    //  ?
-    //  (going backwards is going forwards in the opposite direction)
-    //  in the first version, A(Sink<a>) = Sink<t> [source<a> now]; B(Sink<b>) = Sink<a> [source<b> now]
-    //    but the actual execution will be: [source<b>] B<Sink<b> = Sink<a>; [into source<a>] A(Sink<a>) = Sink<t> [into source<t>]
-    //  in the second version, B(Sink<b>) = Sink<a>; A(Sink<a>) = Sink<t>
+    // TODO: Do these compose well? eg, for A:t->a, B:a->b, C:b->c, compare:
+    //  A-B
+    //    .andThen(adaptSinkOfSource(A.andThen(B)))
+    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)))
+    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B))
+    //  A-B-C
+    //    .andThen(adaptSinkOfSource(A.andThen(B.andThen(C))))
+    //    .andThen(adaptSinkOfSource(A.andThen(B).andThen(C)))
+    //    .andThen(adaptSinkOfSource(A.andThen(B)).andThen(adaptSinkOfSource(C)))
+    //    .andThen(adaptSinkOfSource(A.andThen(B))).andThen(adaptSinkOfSource(C))
+    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B.andThen(C))))
+    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B).andThen(adaptSinkOfSource(C))))
+    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)).andThen(adaptSinkOfSource(C)))
+    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B))).andThen(adaptSinkOfSource(C))
+    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B.andThen(C)))
+    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B).andThen(adaptSinkOfSource(C)))
+    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B)).andThen(adaptSinkOfSource(C))
     
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<T, U> sinkMapper) {
         class SinkAdaptedSource implements Conduit.Source<U> {
@@ -633,8 +697,8 @@ public class Conduits {
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.andThen(signalSink);
                 
-                try (var subScope = new Subscope(executor.get())) {
-                    newSink.run(subScope::fork);
+                try (var scope = new Subscope(executor.get())) {
+                    newSink.run(scope::fork);
                     // As an optimization, we drain in the same thread instead of forking - otherwise this would look
                     // more like ClosedSilo.run(). We have to take more care to delegate throws and handle interrupts.
                     try {
@@ -644,15 +708,15 @@ public class Conduits {
                         try {
                             newSink.completeExceptionally(e1);
                         } catch (Error | RuntimeException e2) {
-                            subScope.fork(() -> { throw e2; });
+                            scope.fork(() -> { throw e2; });
                         }
                         if (e1 instanceof InterruptedException) {
                             Thread.currentThread().interrupt();
                         }
                     }
-                    subScope.join();
+                    scope.join();
                     if (signalSink.error != null) {
-                        throw new ExecutionException(signalSink.error); // TODO: adaptSinkOfSource(A.compose(B)) would wrap once, chaining would wrap twice
+                        throw new ExecutionException(signalSink.error); // TODO: adaptSinkOfSource(A.andThen(B)) would wrap once, chaining would wrap twice
                     }
                     return signalSink.drained;
                 } // TODO: SubScope.close() does not interrupt threads
