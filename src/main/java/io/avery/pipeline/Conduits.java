@@ -193,6 +193,7 @@ public class Conduits {
     //  - why exception cause chaining
     //  - semantics of the boolean return of drainFromSource/ToSink, and why the default impls can be the same
     //  - using buffers between threads (with polling), vs synchronized handoffs (with pushing)
+    //  - why 'SubScope' instead of actual STS? why run(Executor) instead of run(STS)?
     
     // TODO: Dropping elements...
     //  - eg in zip, can't know we will use either value until we have both
@@ -352,7 +353,7 @@ public class Conduits {
     
     public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
                                                  BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
-        record ScopedSink<T>(Subscope scope, Conduit.StepSink<? super T> sink) { }
+        record ScopedSink<T>(SubScope scope, Conduit.StepSink<? super T> sink) { }
         
         class GroupBy implements Conduit.Sink<T> {
             final AsyncInit<Executor> executor = new AsyncInit<>();
@@ -376,7 +377,7 @@ public class Conduits {
                 }
                 
                 Map<K, Object> scopedSinkByKey = new HashMap<>();
-                try (var scope = new Subscope(executor.get())) {
+                try (var scope = new SubScope(executor.get())) {
                     try {
                         for (T val; (val = source.poll()) != null; ) {
                             K key = classifier.apply(val);
@@ -388,13 +389,13 @@ public class Conduits {
                             var scopedSink = (ScopedSink<T>) s;
                             if (s == null) {
                                 var sink = Objects.requireNonNull(sinkFactory.apply(key, val));
-                                var subScope = new Subscope(scope::fork);
+                                var subScope = new SubScope(scope);
                                 scopedSink = new ScopedSink<>(subScope, sink);
                                 scopedSinkByKey.put(key, scopedSink);
                                 // Note that running a sink per key could produce unbounded threads.
                                 // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                                 // incomplete sinks and returning null if maxed (thus dropping elements).
-                                sink.run(subScope::fork);
+                                sink.run(subScope);
                             }
                             if (!scopedSink.sink.offer(val)) {
                                 scopedSink.sink.complete();
@@ -414,7 +415,7 @@ public class Conduits {
                         // Re-throw, so that if we are part of a fan-out, sibling sinks may see
                         throw t1;
                     }
-                } // TODO: SubScope.close() does not interrupt threads
+                }
             }
             
             @Override
@@ -468,14 +469,14 @@ public class Conduits {
                 if (subSource == null) {
                     return true;
                 }
-                try (var scope = new Subscope(executor.get())) {
-                    subSource.run(scope::fork);
+                try (var scope = new SubScope(executor.get())) {
+                    subSource.run(scope);
                     try (subSource) {
                         draining = subSource.drainToSink(sink);
                     }
                     scope.join();
                     return draining;
-                } // TODO: SubScope.close() does not interrupt threads
+                }
             }
             
             @Override
@@ -516,23 +517,26 @@ public class Conduits {
                     return false; // Not drained
                 }
                 
-                try (var scope = new Subscope(executor.get())) {
+                try (var scope = new SubScope(executor.get())) {
                     for (T e; (e = source.poll()) != null; ) {
                         Conduit.StepSource<U> subSource = mapper.apply(e);
                         if (subSource == null) {
                             continue;
                         }
-                        subSource.run(scope::fork);
+                        subSource.run(scope);
+                        boolean cancelled = false;
                         try (subSource) {
                             if (!sink.drainFromSource(subSource)) {
-                                scope.join();
-                                return false;
+                                cancelled = true;
                             }
                         }
                         scope.join();
+                        if (cancelled) {
+                            return false;
+                        }
                     }
                     return true;
-                } // TODO: SubScope.close() does not interrupt threads
+                }
             }
             
             @Override
@@ -593,14 +597,14 @@ public class Conduits {
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.compose(signalSource);
                 
-                try (var scope = new Subscope(executor.get())) {
-                    newSource.run(scope::fork);
+                try (var scope = new SubScope(executor.get())) {
+                    newSource.run(scope);
                     try (newSource) {
                         sink.drainFromSource(newSource);
                     }
-                    scope.join(); // TODO: Ensure join-before-close, else we lose the exception
+                    scope.join();
                     return signalSource.drained;
-                } // TODO: SubScope.close() does not interrupt threads
+                }
             }
             
             @Override
@@ -697,8 +701,8 @@ public class Conduits {
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.andThen(signalSink);
                 
-                try (var scope = new Subscope(executor.get())) {
-                    newSink.run(scope::fork);
+                try (var scope = new SubScope(executor.get())) {
+                    newSink.run(scope);
                     // As an optimization, we drain in the same thread instead of forking - otherwise this would look
                     // more like ClosedSilo.run(). We have to take more care to delegate throws and handle interrupts.
                     try {
@@ -708,7 +712,7 @@ public class Conduits {
                         try {
                             newSink.completeExceptionally(e1);
                         } catch (Error | RuntimeException e2) {
-                            scope.fork(() -> { throw e2; });
+                            scope.execute(() -> { throw e2; });
                         }
                         if (e1 instanceof InterruptedException) {
                             Thread.currentThread().interrupt();
@@ -716,10 +720,10 @@ public class Conduits {
                     }
                     scope.join();
                     if (signalSink.error != null) {
-                        throw new ExecutionException(signalSink.error); // TODO: adaptSinkOfSource(A.andThen(B)) would wrap once, chaining would wrap twice
+                        throw new ExecutionException(signalSink.error); // TODO: aSOS(A.andThen(B)) would wrap once; aSOS(A).andThen(aSOS(B)) would wrap twice
                     }
                     return signalSink.drained;
-                } // TODO: SubScope.close() does not interrupt threads
+                }
             }
             
             @Override
@@ -2413,66 +2417,10 @@ public class Conduits {
         }
     }
     
-    /**
-     * A 'StructuredTaskScope-lite', whose only job is to join after (rounds of) forking. The actual forking will
-     * delegate to something else (eg a real STS that knows how to handle the completions).
-     *
-     * <p>This class is basically a thin wrapper around a Phaser.
-     */
-    private static class Subscope implements AutoCloseable {
-        final Executor executor;
-        final Phaser phaser;
-        
-        public Subscope(Executor executor) {
-            this.executor = executor;
-            this.phaser = new Phaser(1);
-        }
-        
-        public void fork(Runnable task) {
-            if (phaser.register() < 0) {
-                throw new IllegalStateException("SubScope is closed");
-            }
-            try {
-                executor.execute(() -> {
-                    try {
-                        task.run();
-                    } finally {
-                        phaser.arriveAndDeregister();
-                    }
-                });
-            } catch (Error | RuntimeException e) {
-                // Task was not forked
-                phaser.arriveAndDeregister();
-                throw e;
-            }
-        }
-        
-        public void join() throws InterruptedException {
-            int phase = phaser.arrive();
-            if (phase < 0) {
-                throw new IllegalStateException("SubScope is closed");
-            }
-            phaser.awaitAdvanceInterruptibly(phase);
-        }
-        
-        @Override
-        public void close() {
-            int phase = phaser.arriveAndDeregister();
-            if (phase < 0) {
-                return;
-            }
-            phaser.awaitAdvance(phase);
-        }
-    }
-    
     private static class AsyncInit<T> {
         final ReentrantLock lock = new ReentrantLock();
         final Condition ready = lock.newCondition();
         volatile T value = null;
-        
-        T orNull() {
-            return value;
-        }
         
         T get() throws InterruptedException {
             T val = value;
