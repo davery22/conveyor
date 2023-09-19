@@ -407,11 +407,11 @@ public class Conduits {
                                     scopedSinkByKey.put(key, TOMBSTONE);
                                 }
                             }
-                            composedComplete(sinks(scopedSinkByKey).iterator()); // TODO: Stack?
+                            composedComplete(sinks(scopedSinkByKey).iterator());
                             return true; // Source finished
                         } catch (Error | Exception t1) {
                             try {
-                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), t1); // TODO: Stack?
+                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), t1);
                             } catch (Throwable t2) {
                                 t1.addSuppressed(t2);
                             }
@@ -534,6 +534,7 @@ public class Conduits {
                         subSource.run(scopedExecutor);
                         boolean drained = callAndJoin(scope, () -> {
                             try (subSource) {
+                                // TODO: We cannot have a flatMap that works this way if Sink.drainFromSource completes the Sink.
                                 return sink.drainFromSource(subSource);
                             }
                         });
@@ -2378,59 +2379,65 @@ public class Conduits {
     }
     
     private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
-        if (!sources.hasNext()) {
-            return;
+        Throwable ex = null;
+        while (sources.hasNext()) {
+            var source = sources.next();
+            try {
+                source.close();
+            } catch (Error | Exception e) {
+                if (ex == null) {
+                    ex = e;
+                } else {
+                    ex.addSuppressed(e);
+                }
+            }
         }
-        try (var ignored = sources.next()) {
-            composedClose(sources);
+        switch (ex) {
+            case Exception e -> throw e;
+            case Error e -> throw e;
+            case null, default -> {}
         }
     }
     
     private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks) throws Exception {
-        if (!sinks.hasNext()) {
-            return;
-        }
-        var sink = sinks.next();
-        Throwable primaryEx = null;
-        try {
-            composedComplete(sinks);
-        } catch (Error | Exception ex) {
-            primaryEx = ex;
-            throw ex;
-        } finally {
-            if (primaryEx != null) {
-                try {
-                    sink.complete();
-                } catch (Throwable suppressedEx) {
-                    primaryEx.addSuppressed(suppressedEx);
-                }
-            } else {
+        Throwable ex = null;
+        while (sinks.hasNext()) {
+            var sink = sinks.next();
+            try {
                 sink.complete();
+            } catch (Error | Exception e) {
+                if (ex == null) {
+                    ex = e;
+                } else {
+                    ex.addSuppressed(e);
+                }
             }
+        }
+        switch (ex) {
+            case Exception e -> throw e;
+            case Error e -> throw e;
+            case null, default -> {}
         }
     }
     
-    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable e) {
-        if (!sinks.hasNext()) {
-            return;
-        }
-        var sink = sinks.next();
-        Throwable primaryEx = null;
-        try {
-            composedCompleteExceptionally(sinks, e);
-        } catch (Error | RuntimeException ex) {
-            primaryEx = ex;
-            throw ex;
-        } finally {
-            if (primaryEx != null) {
-                try {
-                    sink.completeExceptionally(e);
-                } catch (Throwable suppressedEx) {
-                    primaryEx.addSuppressed(suppressedEx);
+    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable exception) {
+        Throwable ex = null;
+        while (sinks.hasNext()) {
+            var sink = sinks.next();
+            try {
+                sink.completeExceptionally(exception);
+            } catch (Error | Exception e) {
+                if (ex == null) {
+                    ex = e;
+                } else {
+                    ex.addSuppressed(e);
                 }
-            } else {
-                sink.completeExceptionally(e);
             }
+        }
+        switch (ex) {
+            case Exception e -> throw e;
+            case Error e -> throw e;
+            case null, default -> {}
         }
     }
     
