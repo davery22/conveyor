@@ -36,7 +36,8 @@ class ConduitsTest {
     static void testGroupBy() throws Exception {
         try (var scope = new SlowFailScope()) {
             lineSource()
-                .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length())))))
+                .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length()))),
+                                                    t -> { }))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
                 .run(Conduits.scopedExecutor(scope));
             
