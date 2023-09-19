@@ -50,11 +50,7 @@ public class Conduit {
          *
          * @param ex
          */
-        default void completeExceptionally(Throwable ex) {
-            // Default impl handles the case where the Sink has no async downstream.
-            // Implementations that have an async downstream should override this method to propagate error downstream.
-            throw new CompletionException(ex);
-        }
+        default void completeExceptionally(Throwable ex) throws Exception { }
         
         // Stage/Segue chaining
         default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }

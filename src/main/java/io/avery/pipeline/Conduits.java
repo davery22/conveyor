@@ -409,14 +409,14 @@ public class Conduits {
                             }
                             composedComplete(sinks(scopedSinkByKey).iterator());
                             return true; // Source finished
-                        } catch (Error | Exception t1) {
+                        } catch (Error | Exception ex) {
                             try {
-                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), t1);
-                            } catch (Throwable t2) {
-                                t1.addSuppressed(t2);
+                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), ex);
+                            } catch (Throwable t) {
+                                ex.addSuppressed(t);
                             }
                             // Re-throw, so that if we are part of a fan-out, sibling sinks may see
-                            throw t1;
+                            throw ex;
                         }
                     });
                 }
@@ -492,7 +492,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 draining = false;
                 sink.completeExceptionally(ex);
             }
@@ -552,7 +552,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 sink.completeExceptionally(ex);
             }
             
@@ -623,7 +623,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
@@ -889,7 +889,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 if (state == CLOSED) {
                     return;
                 }
@@ -1416,7 +1416,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
@@ -1451,7 +1451,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
@@ -1484,7 +1484,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
@@ -1550,7 +1550,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
@@ -1585,7 +1585,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
@@ -1620,7 +1620,7 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) {
+            public void completeExceptionally(Throwable ex) throws Exception {
                 composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
             }
             
@@ -2420,7 +2420,7 @@ public class Conduits {
         }
     }
     
-    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable exception) {
+    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
         Throwable ex = null;
         while (sinks.hasNext()) {
             var sink = sinks.next();
@@ -2449,7 +2449,7 @@ public class Conduits {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             wrapped = () -> { Thread.interrupted(); throw e; };
-        } catch (Exception | Error e) {
+        } catch (Error | Exception e) {
             wrapped = () -> { throw e; };
         }
         try {
@@ -2542,10 +2542,6 @@ public class Conduits {
         
         @Override
         public void run(Executor executor) {
-            // TODO: Called again with a different argument?
-            // TODO: Arbitrary STS is concerning:
-            //  - ShutdownOnSuccess is definitely not okay; that would skip most of the pipeline and yield a meaningless (null) result
-            //  - ShutdownOnFailure would interrupt downstreams even if they recover, and not report subsequent failures
             if (!RAN.compareAndSet(this, false, true)) {
                 return;
             }
@@ -2558,12 +2554,15 @@ public class Conduits {
                         source.drainToSink(ss);
                     } else if (source instanceof Conduit.StepSource<? extends T> ss) {
                         sink.drainFromSource(ss);
-                    } else {
-                        throw new AssertionError("source must be StepSource or sink must be StepSink");
                     }
                     sink.complete();
                 } catch (Throwable ex) {
-                    sink.completeExceptionally(ex);
+                    try {
+                        sink.completeExceptionally(ex);
+                    } catch (Throwable t) {
+                        ex.addSuppressed(t);
+                    }
+                    throw new CompletionException(ex);
                 }
             });
         }
@@ -2609,7 +2608,7 @@ public class Conduits {
         }
         
         @Override
-        public void completeExceptionally(Throwable ex) {
+        public void completeExceptionally(Throwable ex) throws Exception {
             sink.completeExceptionally(ex);
         }
     }
