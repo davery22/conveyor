@@ -384,6 +384,7 @@ public class Conduits {
                         Conduit.StepSink<? super T> subSink = Conduits.stepSink(e -> true);
                         var exec = scopedExecutor(scope);
                         try {
+                            boolean drained = true;
                             boolean split = true;
                             for (T val; (val = source.poll()) != null; ) {
                                 if ((!splitAfter && predicate.test(val)) || split) {
@@ -395,14 +396,14 @@ public class Conduits {
                                 split = splitAfter && predicate.test(val);
                                 if (!subSink.offer(val)) {
                                     if (eagerCancel) {
-                                        subSink.complete();
-                                        return false;
+                                        drained = false;
+                                        break;
                                     }
                                     split = true;
                                 }
                             }
                             subSink.complete();
-                            return true;
+                            return drained;
                         } catch (Error | Exception e) {
                             try {
                                 subSink.completeExceptionally(e);
@@ -420,6 +421,7 @@ public class Conduits {
     }
     
     public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
+                                                 boolean eagerCancel,
                                                  Consumer<? super Throwable> asyncExceptionHandler,
                                                  BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
         record ScopedSink<T>(SubScope scope, Conduit.StepSink<? super T> sink) { }
@@ -448,9 +450,9 @@ public class Conduits {
                 try (var scope = new DelegateFailScope("groupBy-drainFromSource",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
                                                        asyncExceptionHandler)) {
-                    var exec = scopedExecutor(scope);
                     return joinAfterCall(scope, () -> {
                         try {
+                            boolean drained = true;
                             for (T val; (val = source.poll()) != null; ) {
                                 K key = classifier.apply(val);
                                 var s = scopedSinkByKey.get(key);
@@ -461,30 +463,33 @@ public class Conduits {
                                 var scopedSink = (ScopedSink<T>) s;
                                 if (s == null) {
                                     var subSink = Objects.requireNonNull(sinkFactory.apply(key, val));
-                                    var subScope = new SubScope(exec);
+                                    var subScope = new SubScope(scope);
                                     scopedSink = new ScopedSink<>(subScope, subSink);
                                     scopedSinkByKey.put(key, scopedSink);
                                     // Note that running a sink per key could produce unbounded threads.
                                     // We leave this to the sinkFactory to resolve if necessary, eg by tracking
-                                    // incomplete sinks and returning null if maxed (thus dropping elements).
+                                    // incomplete sinks and returning a no-op Sink if maxed (thus dropping elements).
                                     subSink.run(subScope);
                                 }
                                 if (!scopedSink.sink.offer(val)) {
+                                    if (eagerCancel) {
+                                        drained = false;
+                                        break;
+                                    }
                                     scopedSink.sink.complete();
                                     scopedSink.scope.join();
                                     scopedSinkByKey.put(key, TOMBSTONE);
                                 }
                             }
                             composedComplete(sinks(scopedSinkByKey).iterator());
-                            return true; // Source finished
-                        } catch (Error | Exception ex) {
+                            return drained;
+                        } catch (Error | Exception e) {
                             try {
-                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), ex);
+                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), e);
                             } catch (Throwable t) {
-                                ex.addSuppressed(t);
+                                e.addSuppressed(t);
                             }
-                            // Re-throw, so that if we are part of a fan-out, sibling sinks may see
-                            throw ex;
+                            throw e;
                         }
                     });
                 }
@@ -2559,6 +2564,44 @@ public class Conduits {
             if (subtask.state() == Subtask.State.FAILED) {
                 exceptionHandler.accept(subtask.exception());
             }
+        }
+    }
+    
+    // Used by groupBy (when eagerCancel=false) to wait for run() tasks to finish after completing a Sink
+    private static class SubScope implements Executor {
+        final StructuredTaskScope<?> scope;
+        final Phaser phaser;
+        
+        SubScope(StructuredTaskScope<?> scope) {
+            this.scope = scope;
+            this.phaser = new Phaser(1);
+        }
+        
+        @Override
+        public void execute(Runnable task) {
+            if (phaser.register() < 0) {
+                // In case someone holds on to the Executor reference when they shouldn't
+                throw new IllegalStateException("SubScope is closed");
+            }
+            try {
+                scope.fork(() -> {
+                    try {
+                        task.run();
+                        return null;
+                    } finally {
+                        phaser.arriveAndDeregister();
+                    }
+                });
+            } catch (Error | RuntimeException e) {
+                // Task was not forked
+                phaser.arriveAndDeregister();
+                throw e;
+            }
+        }
+        
+        public void join() throws InterruptedException {
+            int phase = phaser.arrive();
+            phaser.awaitAdvanceInterruptibly(phase);
         }
     }
     
