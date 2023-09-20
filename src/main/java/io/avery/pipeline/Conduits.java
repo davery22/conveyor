@@ -341,19 +341,87 @@ public class Conduits {
     // and inner Stage(s) run the shared piece, because the outer should run it first, and not wait
     // until all inners are finished (if it waits at all).
     
-    // TODO:
-    //  Does plain Sink need complete()/completeExceptionally()? (Can they be implicit in drainFromSource()?)
-    //  Does plain Source need close()? (Can it be implicit in drainToSink()?)
-    //  If plain Sink's drainFromSource() implicitly completes downstreams, so should StepSink...
-    //  If plain Source's drainToSink() implicitly closes upstreams, so should StepSource...
+    // Does plain Sink need complete()/completeExceptionally()? (Can they be implicit in drainFromSource()?)
+    // Does plain Source need close()? (Can it be implicit in drainToSink()?)
+    // If plain Sink's drainFromSource() implicitly completes downstreams, so should StepSink...
+    // If plain Source's drainToSink() implicitly closes upstreams, so should StepSource...
+    //
+    // Why not implicit close/complete/exceptionally for plain Sinks/Sources?
+    // 1. Forcing Sinks to replicate the try-catch-complete-suppress dance is obnoxious & error-prone
+    // 2. Some operators - like plain flatMap - need Sink.drainFromSource to NOT complete the Sink
+    // 3. If a sink throws, its fan-out siblings only see interrupt[edException], not original exception
+    // 4. Default impls (ie 'do nothing') are already hands-off - only override if we need propagation
     
     // TODO: default close() / complete() do not prevent further poll() / offer()...
     
+    // Note: concat substreams happens naturally in split, since we join after each sink, and sinks do not overlap
+    //       merge substreams happens naturally in groupBy, since we join after each sink, and sinks overlap
+    
     // --- Sinks ---
     
+    public static <T> Conduit.Sink<T> split(Predicate<? super T> predicate,
+                                            boolean splitAfter,
+                                            boolean eagerCancel,
+                                            Consumer<? super Throwable> asyncExceptionHandler,
+                                            Function<T, Conduit.StepSink<? super T>> sinkFactory) {
+        Objects.requireNonNull(predicate);
+        Objects.requireNonNull(asyncExceptionHandler);
+        Objects.requireNonNull(sinkFactory);
+        
+        class Split implements Conduit.Sink<T> {
+            final AtomicBoolean called = new AtomicBoolean(false);
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                if (!called.compareAndSet(false, true)) {
+                    return false; // Not drained
+                }
+                
+                try (var scope = new DelegateFailScope("splitWhen-drainFromSource",
+                                                       Thread.ofVirtual().name("thread-", 0).factory(),
+                                                       asyncExceptionHandler)) {
+                    return joinAfterCall(scope, () -> {
+                        Conduit.StepSink<? super T> subSink = Conduits.stepSink(e -> true);
+                        var exec = scopedExecutor(scope);
+                        try {
+                            boolean split = true;
+                            for (T val; (val = source.poll()) != null; ) {
+                                if ((!splitAfter && predicate.test(val)) || split) {
+                                    subSink.complete();
+                                    scope.join();
+                                    subSink = sinkFactory.apply(val);
+                                    subSink.run(exec);
+                                }
+                                split = splitAfter && predicate.test(val);
+                                if (!subSink.offer(val)) {
+                                    if (eagerCancel) {
+                                        subSink.complete();
+                                        return false;
+                                    }
+                                    split = true;
+                                }
+                            }
+                            subSink.complete();
+                            return true;
+                        } catch (Error | Exception e) {
+                            try {
+                                subSink.completeExceptionally(e);
+                            } catch (Throwable t) {
+                                e.addSuppressed(t);
+                            }
+                            throw e;
+                        }
+                    });
+                }
+            }
+        }
+        
+        return new Split();
+    }
+    
     public static <T, K> Conduit.Sink<T> groupBy(Function<T, K> classifier,
-                                                 BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory,
-                                                 Consumer<? super Throwable> innerExceptionHandler) {
+                                                 Consumer<? super Throwable> asyncExceptionHandler,
+                                                 BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
         record ScopedSink<T>(SubScope scope, Conduit.StepSink<? super T> sink) { }
         
         class GroupBy implements Conduit.Sink<T> {
@@ -379,9 +447,9 @@ public class Conduits {
                 Map<K, Object> scopedSinkByKey = new HashMap<>();
                 try (var scope = new DelegateFailScope("groupBy-drainFromSource",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       innerExceptionHandler)) {
-                    var scopedExecutor = scopedExecutor(scope);
-                    return callAndJoin(scope, () -> {
+                                                       asyncExceptionHandler)) {
+                    var exec = scopedExecutor(scope);
+                    return joinAfterCall(scope, () -> {
                         try {
                             for (T val; (val = source.poll()) != null; ) {
                                 K key = classifier.apply(val);
@@ -392,14 +460,14 @@ public class Conduits {
                                 @SuppressWarnings("unchecked")
                                 var scopedSink = (ScopedSink<T>) s;
                                 if (s == null) {
-                                    var sink = Objects.requireNonNull(sinkFactory.apply(key, val));
-                                    var subScope = new SubScope(scopedExecutor);
-                                    scopedSink = new ScopedSink<>(subScope, sink);
+                                    var subSink = Objects.requireNonNull(sinkFactory.apply(key, val));
+                                    var subScope = new SubScope(exec);
+                                    scopedSink = new ScopedSink<>(subScope, subSink);
                                     scopedSinkByKey.put(key, scopedSink);
                                     // Note that running a sink per key could produce unbounded threads.
                                     // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                                     // incomplete sinks and returning null if maxed (thus dropping elements).
-                                    sink.run(subScope);
+                                    subSink.run(subScope);
                                 }
                                 if (!scopedSink.sink.offer(val)) {
                                     scopedSink.sink.complete();
@@ -421,40 +489,13 @@ public class Conduits {
                     });
                 }
             }
-            
-            @Override
-            public void complete() {
-                // Nothing to do
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) {
-                // Nothing to do?
-                // To respect structured concurrency, internal sinks must be completed in drainFromSource.
-                // If we originated the exception, it would have been passed to internal sinks then.
-                // If we did not originate the exception (eg we are part of a fan-out, like balance, and a sibling sink
-                // threw), we probably received an interrupt and threw / passed InterruptedException to internal sinks.
-                // Either way, at this point the internal sinks are done and gone, so there is nothing to do here.
-                // TODO: Should we always throw in completeExceptionally?
-                //  - This would ensure we never 'lose' the exception
-                //  - It would also mean that internal completions would throw...
-                //    - which would cause fan-out to interrupt siblings...
-                //    - so we could reconsider removing complete[Exceptionally] from Sink / close from Source
-                //      - if we're comfortable treating downstream sinks just like internal sinks
-                //        - ie in fan-out, pass InterruptedException downstream, rather than sibling exception
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                // Nothing to do
-            }
         }
         
         return new GroupBy();
     }
     
     public static <T, U> Conduit.StepSinkOperator<T, U> stepFlatMap(Function<? super T, ? extends Conduit.Source<U>> mapper,
-                                                                    Consumer<? super Throwable> innerExceptionHandler) {
+                                                                    Consumer<? super Throwable> asyncExceptionHandler) {
         class FlatMap implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
             boolean draining = true;
@@ -475,9 +516,9 @@ public class Conduits {
                 }
                 try (var scope = new DelegateFailScope("stepFlatMap-offer",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       innerExceptionHandler)) {
+                                                       asyncExceptionHandler)) {
                     subSource.run(scopedExecutor(scope));
-                    return draining = callAndJoin(scope, () -> {
+                    return draining = joinAfterCall(scope, () -> {
                         try (subSource) {
                             return subSource.drainToSink(sink);
                         }
@@ -507,7 +548,7 @@ public class Conduits {
     }
     
     public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<U>> mapper,
-                                                            Consumer<? super Throwable> innerExceptionHandler) {
+                                                            Consumer<? super Throwable> asyncExceptionHandler) {
         class FlatMap implements Conduit.Sink<T> {
             final Conduit.Sink<U> sink;
             final AtomicBoolean called = new AtomicBoolean(false);
@@ -524,15 +565,15 @@ public class Conduits {
                 
                 try (var scope = new DelegateFailScope("flatMap-drainFromSource",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       innerExceptionHandler)) {
-                    var scopedExecutor = scopedExecutor(scope);
+                                                       asyncExceptionHandler)) {
+                    var exec = scopedExecutor(scope);
                     for (T e; (e = source.poll()) != null; ) {
                         Conduit.StepSource<U> subSource = mapper.apply(e);
                         if (subSource == null) {
                             continue;
                         }
-                        subSource.run(scopedExecutor);
-                        boolean drained = callAndJoin(scope, () -> {
+                        subSource.run(exec);
+                        boolean drained = joinAfterCall(scope, () -> {
                             try (subSource) {
                                 // TODO: We cannot have a flatMap that works this way if Sink.drainFromSource completes the Sink.
                                 return sink.drainFromSource(subSource);
@@ -566,7 +607,7 @@ public class Conduits {
     }
     
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<T, U> sourceMapper,
-                                                                      Consumer<? super Throwable> innerExceptionHandler) {
+                                                                      Consumer<? super Throwable> asyncExceptionHandler) {
         class SourceAdaptedSink implements Conduit.Sink<T> {
             final Conduit.Sink<U> sink;
             
@@ -605,9 +646,9 @@ public class Conduits {
                 
                 try (var scope = new DelegateFailScope("adaptSourceOfSink-drainFromSource",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       innerExceptionHandler)) {
+                                                       asyncExceptionHandler)) {
                     newSource.run(scopedExecutor(scope));
-                    callAndJoin(scope, () -> {
+                    joinAfterCall(scope, () -> {
                         try (newSource) {
                             return sink.drainFromSource(newSource);
                         }
@@ -655,7 +696,7 @@ public class Conduits {
     //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B)).andThen(adaptSinkOfSource(C))
     
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<T, U> sinkMapper,
-                                                                        Consumer<? super Throwable> innerExceptionHandler) {
+                                                                        Consumer<? super Throwable> asyncExceptionHandler) {
         class SinkAdaptedSource implements Conduit.Source<U> {
             final Conduit.Source<T> source;
             
@@ -712,7 +753,7 @@ public class Conduits {
                 
                 try (var scope = new DelegateFailScope("adaptSinkOfSource-drainToSink",
                                                        Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       innerExceptionHandler)) {
+                                                       asyncExceptionHandler)) {
                     newSink.run(scopedExecutor(scope));
                     scope.fork(() -> {
                         try {
@@ -2441,7 +2482,7 @@ public class Conduits {
         }
     }
     
-    private static <T> T callAndJoin(StructuredTaskScope<?> scope, Callable<T> callable) throws Exception {
+    private static <T> T joinAfterCall(StructuredTaskScope<?> scope, Callable<T> callable) throws Exception {
         Callable<T> wrapped;
         try {
             T t = callable.call();
