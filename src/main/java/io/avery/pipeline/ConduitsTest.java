@@ -35,6 +35,47 @@ class ConduitsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new SlowFailScope()) {
+            var buffer = buffer(16);
+            var refSink = Conduits.refCountedStepSink(buffer.sink());
+            
+            lineSource()
+                .andThen(Conduits
+                    .groupBy(
+                        (String line) -> {
+                            if (line.isEmpty()) return '*';
+                            if ("HALT".equals(line)) throw new IllegalStateException("HALTED!");
+                            return line.charAt(0);
+                        },
+                        true,
+                        t -> { },
+                        (k, v) -> Conduits
+                            .stepFlatMap(e -> Conduits.source(Stream.of(k, e, v)), t -> { })
+                            .andThen(buffer(16))
+                            .andThen(Conduits
+                                .gather(flatMap(e -> {
+                                    // This completes the shared buffer (below) and closes the owned buffer (above)
+                                    // Further offers to the shared buffer will return false,
+                                    // causing owned buffers to close, causing inner sinks to complete
+                                    // With no exception, and eagerCancel=false, only source completion can tell groupBy to stop
+                                    // Even with eagerCancel=true, every layer of async boundaries necessitates another offer
+                                    if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
+                                    return Stream.of(e);
+                                }))
+                                .andThen(refSink.get())
+                            )
+                    )
+                    .compose(Conduits.alsoComplete(refSink.get()))
+                )
+                .andThen(buffer.source())
+                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
+                .run(Conduits.scopedExecutor(scope));
+            
+            scope.join().throwIfFailed();
+        }
+    }
+    
+    static void testAdaptSinkOfSource() throws Exception {
+        try (var scope = new SlowFailScope()) {
             lineSource()
                 .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length()))),
                                                     t -> { }))
