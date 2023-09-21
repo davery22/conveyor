@@ -393,16 +393,6 @@ public class Conduits {
         }
     }
     
-    public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
-        Objects.requireNonNull(sourceToClose);
-        return source -> new AlsoClose<>(source, sourceToClose);
-    }
-    
-    public static <T> Conduit.StepSourceOperator<T, T> stepAlsoClose(Conduit.Source<?> sourceToClose) {
-        Objects.requireNonNull(sourceToClose);
-        return source -> new AlsoClose.Step<>(source, sourceToClose);
-    }
-    
     private static class AlsoComplete<T> implements Conduit.Sink<T> {
         final Conduit.Sink<T> sink;
         final Conduit.Sink<?> sinkToComplete;
@@ -459,6 +449,16 @@ public class Conduits {
         }
     }
     
+    public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
+        Objects.requireNonNull(sourceToClose);
+        return source -> new AlsoClose<>(source, sourceToClose);
+    }
+    
+    public static <T> Conduit.StepSourceOperator<T, T> stepAlsoClose(Conduit.Source<?> sourceToClose) {
+        Objects.requireNonNull(sourceToClose);
+        return source -> new AlsoClose.Step<>(source, sourceToClose);
+    }
+    
     public static <T> Conduit.SinkOperator<T, T> alsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         return sink -> new AlsoComplete<>(sink, sinkToComplete);
@@ -467,141 +467,6 @@ public class Conduits {
     public static <T> Conduit.StepSinkOperator<T, T> stepAlsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         return sink -> new AlsoComplete.Step<>(sink, sinkToComplete);
-    }
-    
-    private static class RefCountedSource<T> implements Conduit.Source<T> {
-        final Conduit.Source<T> source;
-        final AtomicInteger count = new AtomicInteger(-1);
-        
-        RefCountedSource(Conduit.Source<T> source) {
-            this.source = source;
-        }
-        
-        @Override
-        public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
-            return source.drainToSink(sink);
-        }
-        
-        @Override
-        public void close() throws Exception {
-            for (int c = 1; c > 0; ) { // Initial guess = 1
-                if (c == (c = count.compareAndExchange(c, c-1))) {
-                    if (c == 1) { // Count has gone to 0 -- close
-                        source.close();
-                    }
-                    return;
-                }
-            }
-        }
-        
-        void register() {
-            //  0 --> do nothing (already completed)
-            // -1 --> set to 1 (first caller)
-            // >0 --> increment
-            for (int c = count.compareAndExchange(-1, 1); c > 0; ) {
-                if (c == (c = count.compareAndExchange(c, c+1))) {
-                    return;
-                }
-            }
-        }
-        
-        static class Step<T> extends RefCountedSource<T> implements Conduit.StepSource<T> {
-            Step(Conduit.StepSource<T> source) {
-                super(source);
-            }
-            
-            @Override
-            public T poll() throws Exception {
-                return ((Conduit.StepSource<T>) source).poll();
-            }
-        }
-    }
-    
-    public static <T> Supplier<Conduit.Source<T>> refCountedSource(Conduit.Source<T> source) {
-        var refCountedSource = new RefCountedSource<>(Objects.requireNonNull(source));
-        return () -> {
-            refCountedSource.register();
-            return refCountedSource;
-        };
-    }
-    
-    public static <T> Supplier<Conduit.StepSource<T>> refCountedStepSource(Conduit.StepSource<T> source) {
-        var refCountedSource = new RefCountedSource.Step<>(Objects.requireNonNull(source));
-        return () -> {
-            refCountedSource.register();
-            return refCountedSource;
-        };
-    }
-    
-    private static class RefCountedSink<T> implements Conduit.Sink<T> {
-        final Conduit.Sink<T> sink;
-        final AtomicInteger count = new AtomicInteger(-1);
-        
-        RefCountedSink(Conduit.Sink<T> sink) {
-            this.sink = sink;
-        }
-        
-        @Override
-        public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-            return sink.drainFromSource(source);
-        }
-        
-        @Override
-        public void complete() throws Exception {
-            for (int c = 1; c > 0; ) { // Initial guess = 1
-                if (c == (c = count.compareAndExchange(c, c-1))) {
-                    if (c == 1) { // Count has gone to 0 -- complete
-                        sink.complete();
-                    }
-                    return;
-                }
-            }
-        }
-        
-        @Override
-        public void completeExceptionally(Throwable ex) throws Exception {
-            if (count.getAndSet(-2) != -2) {
-                sink.completeExceptionally(ex);
-            }
-        }
-        
-        void register() {
-            // -2 or 0 --> do nothing (already completed)
-            // -1      --> set to 1 (first caller)
-            // >0      --> increment
-            for (int c = count.compareAndExchange(-1, 1); c > 0; ) {
-                if (c == (c = count.compareAndExchange(c, c+1))) {
-                    return;
-                }
-            }
-        }
-        
-        static class Step<T> extends RefCountedSink<T> implements Conduit.StepSink<T> {
-            Step(Conduit.StepSink<T> sink) {
-                super(sink);
-            }
-            
-            @Override
-            public boolean offer(T input) throws Exception {
-                return ((Conduit.StepSink<T>) sink).offer(input);
-            }
-        }
-    }
-    
-    public static <T> Supplier<Conduit.Sink<T>> refCountedSink(Conduit.Sink<T> sink) {
-        var refCountedSink = new RefCountedSink<>(Objects.requireNonNull(sink));
-        return () -> {
-            refCountedSink.register();
-            return refCountedSink;
-        };
-    }
-    
-    public static <T> Supplier<Conduit.StepSink<T>> refCountedStepSink(Conduit.StepSink<T> sink) {
-        var refCountedSink = new RefCountedSink.Step<>(Objects.requireNonNull(sink));
-        return () -> {
-            refCountedSink.register();
-            return refCountedSink;
-        };
     }
     
     public static <T> Conduit.Sink<T> split(Predicate<? super T> predicate,

@@ -36,7 +36,7 @@ class ConduitsTest {
     static void testGroupBy() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             var buffer = buffer(16);
-            var refSink = Conduits.refCountedStepSink(buffer.sink());
+            var noCompleteBuffer = Conduits.stepSink(buffer.sink()::offer);
             
             lineSource()
                 .andThen(Conduits
@@ -61,10 +61,10 @@ class ConduitsTest {
                                     if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
                                     return Stream.of(e);
                                 }))
-                                .andThen(refSink.get())
+                                .andThen(noCompleteBuffer)
                             )
                     )
-                    .compose(Conduits.alsoComplete(refSink.get()))
+                    .compose(Conduits.alsoComplete(buffer.sink()))
                 )
                 .andThen(buffer.source())
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
