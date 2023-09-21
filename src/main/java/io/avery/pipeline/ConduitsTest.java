@@ -93,7 +93,7 @@ class ConduitsTest {
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
             Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null)
-                .andThen(Conduits.mapAsyncOrdered(
+                .andThen(Conduits.mapBalanceOrdered(
                     4, 400,
                     i -> () -> i * 2
                 ))
@@ -174,7 +174,7 @@ class ConduitsTest {
     static void test1() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
-                .andThen(Conduits.mapAsyncPartitioned(
+                .andThen(Conduits.mapBalancePartitioned(
                     10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s

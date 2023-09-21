@@ -8,7 +8,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
@@ -1057,11 +1056,11 @@ public class Conduits {
         return Gather::new;
     }
     
-    public static <T, K, U> Conduit.SinkStepSource<T, U> mapAsyncPartitioned(int parallelism,
-                                                                             int permitsPerPartition,
-                                                                             int bufferLimit,
-                                                                             Function<? super T, K> classifier,
-                                                                             BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
+    public static <T, K, U> Conduit.SinkStepSource<T, U> mapBalancePartitioned(int parallelism,
+                                                                               int permitsPerPartition,
+                                                                               int bufferLimit,
+                                                                               Function<? super T, K> classifier,
+                                                                               BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
         // POLL:
         // Worker polls element from source
         // If completion buffer is full, worker waits until not full
@@ -1084,7 +1083,7 @@ public class Conduits {
         Objects.requireNonNull(mapper);
         
         if (permitsPerPartition >= parallelism) {
-            return mapAsyncOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
+            return mapBalanceOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
         }
         
         class Item {
@@ -1105,7 +1104,7 @@ public class Conduits {
             int permits = permitsPerPartition;
         }
         
-        class MapAsyncPartitioned implements Conduit.SinkStepSource<T, U> {
+        class MapBalancePartitioned implements Conduit.SinkStepSource<T, U> {
             final ReentrantLock sourceLock = new ReentrantLock();
             final ReentrantLock lock = new ReentrantLock();
             final Condition completionNotFull = lock.newCondition();
@@ -1214,7 +1213,7 @@ public class Conduits {
             class Sink implements Conduit.Sink<T> {
                 @Override
                 public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsyncPartitioned-drainFromSource",
+                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapBalancePartitioned-drainFromSource",
                                                                                Thread.ofVirtual().name("thread-", 0).factory())) {
                         var tasks = IntStream.range(0, parallelism)
                             .mapToObj(i -> new Worker())
@@ -1318,12 +1317,12 @@ public class Conduits {
             @Override public Conduit.StepSource<U> source() { return new Source(); }
         }
         
-        return new MapAsyncPartitioned();
+        return new MapBalancePartitioned();
     }
     
-    public static <T, U> Conduit.SinkStepSource<T, U> mapAsyncOrdered(int parallelism,
-                                                                      int bufferLimit,
-                                                                      Function<? super T, ? extends Callable<U>> mapper) {
+    public static <T, U> Conduit.SinkStepSource<T, U> mapBalanceOrdered(int parallelism,
+                                                                        int bufferLimit,
+                                                                        Function<? super T, ? extends Callable<U>> mapper) {
         if (parallelism < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism and bufferLimit must be positive");
         }
@@ -1340,7 +1339,7 @@ public class Conduits {
             }
         }
         
-        class MapAsyncOrdered implements Conduit.SinkStepSource<T, U> {
+        class MapBalanceOrdered implements Conduit.SinkStepSource<T, U> {
             final ReentrantLock sourceLock = new ReentrantLock();
             final ReentrantLock lock = new ReentrantLock();
             final Condition completionNotFull = lock.newCondition();
@@ -1409,7 +1408,7 @@ public class Conduits {
             class Sink implements Conduit.Sink<T> {
                 @Override
                 public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsyncOrdered-drainFromSource",
+                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapBalanceOrdered-drainFromSource",
                                                                                Thread.ofVirtual().name("thread-", 0).factory())) {
                         var tasks = IntStream.range(0, parallelism)
                             .mapToObj(i -> new Worker())
@@ -1511,73 +1510,42 @@ public class Conduits {
             @Override public Conduit.StepSource<U> source() { return new Source(); }
         }
         
-        return new MapAsyncOrdered();
+        return new MapBalanceOrdered();
     }
     
-    public static <T, U> Conduit.SinkToStepOperator<T, U> mapAsync(int parallelism,
-                                                                   Function<? super T, ? extends Callable<U>> mapper) {
-        class MapAsync implements Conduit.Sink<T> {
-            final Conduit.StepSink<U> sink;
-            final ReentrantLock lock = new ReentrantLock();
-            
-            MapAsync(Conduit.StepSink<U> sink) {
-                this.sink = sink;
-            }
-            
-            class Worker implements Conduit.Sink<T> {
-                @Override
-                public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                    for (;;) {
-                        T in;
-                        Callable<U> callable;
-                        
-                        lock.lockInterruptibly();
-                        try {
-                            if ((in = source.poll()) == null) {
-                                return true;
-                            }
-                            callable = mapper.apply(in);
-                        } finally {
-                            lock.unlock();
-                        }
-                        U out = callable.call();
-                        if (out != null && !sink.offer(out)) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            
-            @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapAsync-drainFromSource",
-                                                                           Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var tasks = IntStream.range(0, parallelism)
-                        .mapToObj(i -> new Worker())
-                        .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
-                        .toList();
-                    scope.join().throwIfFailed();
-                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
-                }
-            }
-            
-            @Override
-            public void complete() throws Exception {
-                sink.complete();
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                sink.completeExceptionally(Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                sink.run(executor);
-            }
+    public static <T, C extends Callable<T>> Conduit.StepToSourceOperator<C, T> balanceMergeSource(int parallelism) {
+        if (parallelism < 1) {
+            throw new IllegalArgumentException("parallelism must be positive");
         }
         
-        return MapAsync::new;
+        return source -> {
+            Conduit.StepSource<T> worker = () -> {
+                for (C c; (c = source.poll()) != null; ) {
+                    var t = c.call();
+                    if (t != null) { // Skip nulls
+                        return t;
+                    }
+                }
+                return null;
+            };
+            return merge(IntStream.range(0, parallelism).mapToObj(i -> worker).toList())
+                .andThen(alsoClose(source));
+        };
+    }
+    
+    public static <T, C extends Callable<T>> Conduit.SinkToStepOperator<C, T> balanceMergeSink(int parallelism) {
+        if (parallelism < 1) {
+            throw new IllegalArgumentException("parallelism must be positive");
+        }
+        
+        return sink -> {
+            Conduit.StepSink<C> worker = c -> {
+                var t = c.call();
+                return t == null || sink.offer(t); // Skip nulls
+            };
+            return balance(IntStream.range(0, parallelism).mapToObj(i -> worker).toList())
+                .compose(alsoComplete(sink));
+        };
     }
     
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
