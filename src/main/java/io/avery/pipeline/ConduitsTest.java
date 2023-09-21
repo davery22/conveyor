@@ -34,7 +34,7 @@ class ConduitsTest {
     }
     
     static void testGroupBy() throws Exception {
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             var buffer = buffer(16);
             var refSink = Conduits.refCountedStepSink(buffer.sink());
             
@@ -68,27 +68,27 @@ class ConduitsTest {
                 )
                 .andThen(buffer.source())
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
         }
     }
     
     static void testAdaptSinkOfSource() throws Exception {
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
                 .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length()))),
                                                     t -> { }))
                 .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
         }
     }
     
     static void testMapAsyncVsMapBalanced() throws Exception {
         var start = Instant.now();
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             long[] a = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
@@ -98,9 +98,9 @@ class ConduitsTest {
                     i -> () -> i * 2
                 ))
                 .andThen(Conduits.stepSink(e -> { a[0] += e; return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
             System.out.println(a[0]);
         }
         var end = Instant.now();
@@ -109,7 +109,7 @@ class ConduitsTest {
     
     static void testNostepVsBuffer() throws Exception {
         var start = Instant.now();
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             long[] a = { 0 }, b = { 0 }, c = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
@@ -138,9 +138,9 @@ class ConduitsTest {
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
                     ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
                 )))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
             System.out.println(a[0] + b[0] + c[0]);
         }
         var end = Instant.now();
@@ -149,7 +149,7 @@ class ConduitsTest {
     
     static void testSpeed() throws Exception {
         var start = Instant.now();
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             long[] res = { 0 };
             
             Conduits
@@ -162,9 +162,9 @@ class ConduitsTest {
                     return true;
                 })
                 .andThen(Conduits.stepSink(e -> { res[0] += e; return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
             System.out.println(res[0]);
         }
         var end = Instant.now();
@@ -172,7 +172,7 @@ class ConduitsTest {
     }
     
     static void test1() throws Exception {
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
                 .andThen(Conduits.mapAsyncPartitioned(
                     10, 3, 15,
@@ -180,9 +180,9 @@ class ConduitsTest {
                     (s, c) -> () -> c + ":" + s
                 ))
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
 
 //            lineSource()
 //                .andThen(ConduitsTest.buffer(4))
@@ -196,7 +196,7 @@ class ConduitsTest {
     }
     
     static void test2() throws Exception {
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
 //            var segue = Conduits.stepFuse(
 //                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
 //                Conduits.tokenBucket(
@@ -241,14 +241,14 @@ class ConduitsTest {
                     .andThen(ConduitsTest.buffer(16))
                 )
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
         }
     }
     
     static void testBidi() throws InterruptedException, ExecutionException {
-        try (var scope = new SlowFailScope()) {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             var buffer = Conduits.extrapolate(0, e -> Collections.emptyIterator(), 256);
             var iter = Stream.generate(new Scanner(System.in)::nextLine)
                 .takeWhile(line -> !"stop".equalsIgnoreCase(line))
@@ -261,9 +261,9 @@ class ConduitsTest {
                     buffer.sink(),
                     Conduits.stepSink(e -> { System.out.println(e); return true; })
                 )))
-                .run(Conduits.scopedExecutor(scope));
+                .run(Conduits.scopeExecutor(scope));
             
-            scope.join().throwIfFailed();
+            scope.join();
         }
     }
     
@@ -271,11 +271,11 @@ class ConduitsTest {
         var iter = Stream.generate(new Scanner(System.in)::nextLine)
             .takeWhile(line -> !"stop".equalsIgnoreCase(line))
             .iterator();
-        return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
-//        return Conduits.stepSource(() -> {
-//            if (iter.hasNext()) return iter.next();
-//            throw new IllegalStateException("TRIP");
-//        });
+//        return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
+        return Conduits.stepSource(() -> {
+            if (iter.hasNext()) return iter.next();
+            throw new IllegalStateException("TRIP");
+        });
     }
     
     private static <T> Conduit.StepSegue<T, T> buffer(int bufferLimit) {

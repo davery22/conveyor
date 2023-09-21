@@ -622,12 +622,12 @@ public class Conduits {
                     return false; // Not drained
                 }
                 
-                try (var scope = new DelegateFailScope("splitWhen-drainFromSource",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
+                try (var scope = new FailureHandlingScope("splitWhen-drainFromSource",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
                     return joinAfterCall(scope, () -> {
                         Conduit.StepSink<? super T> subSink = Conduits.stepSink(e -> true);
-                        var exec = scopedExecutor(scope);
+                        var exec = scopeExecutor(scope);
                         try {
                             boolean drained = true;
                             boolean split = true;
@@ -692,9 +692,9 @@ public class Conduits {
                 }
                 
                 Map<K, Object> scopedSinkByKey = new HashMap<>();
-                try (var scope = new DelegateFailScope("groupBy-drainFromSource",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
+                try (var scope = new FailureHandlingScope("groupBy-drainFromSource",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
                     return joinAfterCall(scope, () -> {
                         try {
                             boolean drained = true;
@@ -764,10 +764,10 @@ public class Conduits {
                 if (subSource == null) {
                     return true;
                 }
-                try (var scope = new DelegateFailScope("stepFlatMap-offer",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
-                    subSource.run(scopedExecutor(scope));
+                try (var scope = new FailureHandlingScope("stepFlatMap-offer",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
+                    subSource.run(scopeExecutor(scope));
                     return draining = joinAfterCall(scope, () -> {
                         try (subSource) {
                             return subSource.drainToSink(sink);
@@ -813,10 +813,10 @@ public class Conduits {
                     return false; // Not drained
                 }
                 
-                try (var scope = new DelegateFailScope("flatMap-drainFromSource",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
-                    var exec = scopedExecutor(scope);
+                try (var scope = new FailureHandlingScope("flatMap-drainFromSource",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
+                    var exec = scopeExecutor(scope);
                     for (T e; (e = source.poll()) != null; ) {
                         Conduit.StepSource<U> subSource = mapper.apply(e);
                         if (subSource == null) {
@@ -894,10 +894,10 @@ public class Conduits {
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.compose(signalSource);
                 
-                try (var scope = new DelegateFailScope("adaptSourceOfSink-drainFromSource",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
-                    newSource.run(scopedExecutor(scope));
+                try (var scope = new FailureHandlingScope("adaptSourceOfSink-drainFromSource",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
+                    newSource.run(scopeExecutor(scope));
                     joinAfterCall(scope, () -> {
                         try (newSource) {
                             return sink.drainFromSource(newSource);
@@ -1001,10 +1001,10 @@ public class Conduits {
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.andThen(signalSink);
                 
-                try (var scope = new DelegateFailScope("adaptSinkOfSource-drainToSink",
-                                                       Thread.ofVirtual().name("thread-", 0).factory(),
-                                                       asyncExceptionHandler)) {
-                    newSink.run(scopedExecutor(scope));
+                try (var scope = new FailureHandlingScope("adaptSinkOfSource-drainToSink",
+                                                          Thread.ofVirtual().name("thread-", 0).factory(),
+                                                          asyncExceptionHandler)) {
+                    newSink.run(scopeExecutor(scope));
                     scope.fork(() -> {
                         try {
                             source.drainToSink(newSink);
@@ -2665,7 +2665,7 @@ public class Conduits {
         return sink;
     }
     
-    public static Executor scopedExecutor(StructuredTaskScope<?> scope) {
+    public static Executor scopeExecutor(StructuredTaskScope<?> scope) {
         return runnable -> scope.fork(Executors.callable(runnable, null));
     }
     
@@ -2793,22 +2793,6 @@ public class Conduits {
         @Override
         public synchronized Exception getCause() {
             return (Exception) super.getCause();
-        }
-    }
-    
-    private static class DelegateFailScope extends StructuredTaskScope<Object> {
-        final Consumer<? super Throwable> exceptionHandler;
-        
-        DelegateFailScope(String name, ThreadFactory factory, Consumer<? super Throwable> exceptionHandler) {
-            super(name, factory);
-            this.exceptionHandler = exceptionHandler;
-        }
-        
-        @Override
-        protected void handleComplete(Subtask<?> subtask) {
-            if (subtask.state() == Subtask.State.FAILED) {
-                exceptionHandler.accept(subtask.exception());
-            }
         }
     }
     
