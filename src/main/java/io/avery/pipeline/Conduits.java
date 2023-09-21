@@ -1021,13 +1021,8 @@ public class Conduits {
                     }
                 }
                 
-                return switch (signalSink.exception) {
-                    case null -> signalSink.drained;
-                    case InterruptedException e -> { Thread.interrupted(); throw e; }
-                    case Exception e -> throw e;
-                    case Error e -> throw e;
-                    case Throwable e -> throw new CompletionException(e); // TODO: Okay wrapping?
-                };
+                throwAsException(signalSink.exception);
+                return signalSink.drained;
             }
             
             @Override
@@ -2672,10 +2667,13 @@ public class Conduits {
     private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
         Throwable ex = null;
         while (sources.hasNext()) {
-            var source = sources.next();
             try {
-                source.close();
+                sources.next().close();
             } catch (Error | Exception e) {
+                if (e instanceof InterruptedException) {
+                    // Only fair to reinstate interrupt for later sources
+                    Thread.currentThread().interrupt();
+                }
                 if (ex == null) {
                     ex = e;
                 } else {
@@ -2683,20 +2681,19 @@ public class Conduits {
                 }
             }
         }
-        switch (ex) {
-            case Exception e -> throw e;
-            case Error e -> throw e;
-            case null, default -> {}
-        }
+        throwAsException(ex);
     }
     
     private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks) throws Exception {
         Throwable ex = null;
         while (sinks.hasNext()) {
-            var sink = sinks.next();
             try {
-                sink.complete();
+                sinks.next().complete();
             } catch (Error | Exception e) {
+                if (e instanceof InterruptedException) {
+                    // Only fair to reinstate interrupt for later sinks
+                    Thread.currentThread().interrupt();
+                }
                 if (ex == null) {
                     ex = e;
                 } else {
@@ -2704,20 +2701,19 @@ public class Conduits {
                 }
             }
         }
-        switch (ex) {
-            case Exception e -> throw e;
-            case Error e -> throw e;
-            case null, default -> {}
-        }
+        throwAsException(ex);
     }
     
     private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
         Throwable ex = null;
         while (sinks.hasNext()) {
-            var sink = sinks.next();
             try {
-                sink.completeExceptionally(exception);
+                sinks.next().completeExceptionally(exception);
             } catch (Error | Exception e) {
+                if (e instanceof InterruptedException) {
+                    // Only fair to reinstate interrupt for later sinks
+                    Thread.currentThread().interrupt();
+                }
                 if (ex == null) {
                     ex = e;
                 } else {
@@ -2725,10 +2721,16 @@ public class Conduits {
                 }
             }
         }
+        throwAsException(ex);
+    }
+    
+    private static void throwAsException(Throwable ex) throws Exception {
         switch (ex) {
+            case null -> { }
+            case InterruptedException e -> { Thread.interrupted(); throw e; }
             case Exception e -> throw e;
             case Error e -> throw e;
-            case null, default -> {}
+            case Throwable e -> throw new IllegalArgumentException("Unexpected Throwable", e);
         }
     }
     
