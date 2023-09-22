@@ -1101,7 +1101,7 @@ public class Conduits {
                     K key = null;
                     Item item = null;
                     Callable<U> callable = null;
-                    Exception ex = null;
+                    Throwable exception = null;
                     
                     for (;;) {
                         try {
@@ -1145,8 +1145,8 @@ public class Conduits {
                                 }
                             }
                             item.out = callable.call();
-                        } catch (Exception e) {
-                            ex = e;
+                        } catch (Error | Exception e) {
+                            exception = e;
                         } finally {
                             if (item != null) {
                                 lock.lock();
@@ -1160,28 +1160,25 @@ public class Conduits {
                                         key = null;
                                         item = null;
                                         callable = null;
-                                        if (ex == null && (item = partition.buffer.poll()) != null) {
+                                        if (exception == null && (item = partition.buffer.poll()) != null) {
                                             @SuppressWarnings("unchecked")
                                             K k = key = (K) item.out;
                                             try {
                                                 callable = mapper.apply(item.in, key);
-                                            } catch (Exception e) {
-                                                ex = e;
+                                            } catch (Error | Exception e) {
+                                                exception = e;
                                                 continue;
                                             }
                                         } else if (++partition.permits == permitsPerPartition) {
                                             partitionByKey.remove(key);
                                         }
+                                        throwAsException(exception);
                                         break;
                                     }
                                 } finally {
                                     lock.unlock();
                                 }
                             }
-                        }
-                        
-                        if (ex != null) {
-                            throw ex;
                         }
                     }
                 }
