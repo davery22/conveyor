@@ -689,7 +689,6 @@ public class Conduits {
                         subSource.run(exec);
                         boolean drained = joinAfterCall(scope, () -> {
                             try (subSource) {
-                                // TODO: We cannot have a flatMap that works this way if Sink.drainFromSource completes the Sink.
                                 return sink.drainFromSource(subSource);
                             }
                         });
@@ -746,21 +745,16 @@ public class Conduits {
                     }
                 }
                 
-                // 1. We run all upstream Silos of newSource in an inner scope and wait for them to finish, in case they
-                //    try to poll the signalSource, and to ensure we don't leak threads.
-                // 2. We submit any errors thrown from tasks in the inner scope to the outer scope for re-throw.
-                //    This ensures the errors are not lost. It would be wrong to capture/throw those locally, as their
-                //    downstream(s) might yet recover. If no recovery occurs, either an error propagates to the
-                //    newSource, and we throw that locally (via poll), or it doesn't, meaning it's not relevant.
-                // 3. We close newSource, to ensure upstream threads don't deadlock. If that throws, we let it throw
-                //    locally. We also throw locally if sink#drainFromSource throws.
-                
                 var signalSource = new SignalSource();
                 var newSource = sourceMapper.compose(signalSource);
                 
                 try (var scope = new FailureHandlingScope("adaptSourceOfSink-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
+                    // Basically, we are trying to make
+                    //   `source.andThen(adaptSourceOfSink(sourceMapper).andThen(sink))`
+                    // behave as if it was
+                    //   `source.andThen(sourceMapper).andThen(sink)`
                     newSource.run(scopeExecutor(scope));
                     joinAfterCall(scope, () -> {
                         try (newSource) {
@@ -849,39 +843,48 @@ public class Conduits {
                     }
                 }
                 
-                // 1. We run all downstream Silos of newSink in an inner scope and wait for them to finish, in case they
-                //    try to offer to or complete the signalSink, and to ensure we don't leak threads.
-                // 2. We submit any errors thrown from tasks in the inner scope to the outer scope for re-throw.
-                //    This ensures the errors are not lost. It would be wrong to capture/throw those locally, as their
-                //    downstream(s) might yet recover. If no recovery occurs, either an error propagates to the
-                //    signalSink (via complete), and we throw that locally, or it doesn't, meaning it's not relevant.
-                // 3. We complete newSink, to ensure downstream threads don't deadlock, and in case that causes it to
-                //    emit additional values downstream. If draining or completing throws, we catch and complete newSink
-                //    exceptionally. If that throws (which can happen eg if newSink is a fan-out and one of the
-                //    downstreams is synchronous), it didn't do it for a reason the original sink would care about, so
-                //    we submit to the outer scope for re-throw.
-                // 4. We only throw an exception locally if it arrived at the signalSink.
-                
                 var signalSink = new SignalSink();
                 var newSink = sinkMapper.andThen(signalSink);
                 
                 try (var scope = new FailureHandlingScope("adaptSinkOfSource-drainToSink",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
+                    // Basically, we are trying to make
+                    //   `source.andThen(adaptSinkOfSource(sinkMapper)).andThen(sink)`
+                    // behave as if it was
+                    //   `source.andThen(sinkMapper.andThen(sink))`
+                    //
+                    // For exception handling:
+                    //  - If there is no async boundary between newSink and signalSink, they should see the same
+                    //    exception. We throw it from this method, so that it gets passed to sink.
+                    //  - If there is an async boundary between newSink and signalSink, they should see different
+                    //    exceptions (signalSink's should be wrapped in UpstreamException). We pass the one that reaches
+                    //    newSink to the asyncExceptionHandler, and throw the one that reaches signalSink from this
+                    //    method, so that it gets passed to sink.
                     newSink.run(scopeExecutor(scope));
-                    scope.fork(() -> {
+                    Throwable exception = null;
+                    try {
+                        source.drainToSink(newSink);
+                        newSink.complete();
+                    } catch (Throwable e) {
                         try {
-                            source.drainToSink(newSink);
-                            newSink.complete();
+                            newSink.completeExceptionally(e);
                         } catch (Throwable t) {
-                            newSink.completeExceptionally(t);
+                            e.addSuppressed(t);
                         }
-                        return null;
-                    });
+                        exception = e;
+                    }
                     try {
                         scope.join();
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
+                    }
+                    // For well-behaving implementations, newSink's exception would match signalSink's exception if
+                    // (and only if) there was no async boundary between newSink and signalSink.
+                    if (exception != null && exception != signalSink.exception) {
+                        try {
+                            asyncExceptionHandler.accept(exception);
+                        } catch (Throwable ignore) { }
                     }
                 }
                 
@@ -2716,7 +2719,7 @@ public class Conduits {
         }
     }
     
-    abstract static class Chain {
+    private abstract static class Chain {
         final Conduit.Stage left;
         final Conduit.Stage right;
         
