@@ -353,6 +353,59 @@ public class Conduits {
     // 3. If a sink throws, its fan-out siblings only see interrupt[edException], not original exception
     // 4. Default impls (ie 'do nothing') are already hands-off - only override if we need propagation
     
+    
+    // Maybe complete(x) should set exception even if complete(null) returned normally?
+    
+    // We should never complete the sink internally, as it is not safe to assume the sink is ready-to-complete when this
+    // source is done with it. For example: concat(). If Source#drainToSink completed the sink, the StepSink passed to
+    // concat#drainToSink would be completed by the first Source, and the StepSink would be unable to receive from
+    // subsequent Sources.
+    
+    // TODO: What about adapting the (non-step)Sink-side of a StepSource?
+    //  You can do it... but then the StepSource becomes a Source - ie it is destructive
+    //  There's no way non-destructive to do this - the method called by run() (drainFromSource) is on the Sink.
+    //  But is there a use case?
+    
+    // TODO: Throws before completing downstream vs throws after
+    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
+    // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
+    // TODO: We should ONLY throw an exception if the SignalSink received one
+    //  - In that case, we're just giving it back to Sink#complete(error)
+    //  Otherwise, throw the exception in a fork off the original scope, so scope sees it
+    
+    // Could we just do completion internally, and let external completion no-op?
+    //  - This would be unable to handle external causes for completion
+    //    - ...Which don't occur / aren't safe for a plain Sink/Source...?
+    //      - But these are StepSinks/Sources, darn
+    //    - Does this really matter?
+    //      - In Silo'd usage, if newSink.complete(ex) throws, we may race to complete the Sink with that exception instead of ex (or a downstream ex, or nothing if recovered downstream)
+    //        - TODO: Okay so... always swallow newSink throws then?
+    //          - But if newSink has no async bound, newSink throws may be original Sink throws
+    //      - In ad-hoc usage, we could:
+    //        a) call complete() before calling drainToSink TODO
+    //        b) call complete() concurrently with drainToSink TODO
+    //        c) call complete() after calling drainToSink
+    //  - We generally don't want to complete the sink internally, in case it is shared with others (eg shared buffer)
+    //    - TODO: But then, what DOES complete the shared buffer?? Currently (eg balance) we actually would have each sink completing it...
+    //      - Can maybe do some shenanigans like balanceMerge(List<StepSinkOperator>) -> StepToSinkOperator
+    //        - Pass buffer to result, internally wraps in a StepSink that tracks completions, passes Sinks to balance
+    //        - This is pretty limited, eg 'balance' comes from needing a single StepSink in the end, rather than multiple discreet
+    //        - This is like a more powerful mapAsync
+    //      - balanceMerge(List<StepSourceOperator>) -> StepToSourceOperator
+    //        - Pass buffer to result, internally wraps in a StepSource that tracks closes, passes Sources to merge
+    //        - Again like mapAsync, but as a Source
+    //      - Or expose the 'buffer-wrapper' types directly:
+    //        - MergeSink - completes the underlying StepSink upon normal completions reaching count, or upon any abrupt completion
+    //        - BalanceSource - closes the underlying StepSource upon closes reaching count
+    //        - counting completions/closes would be thrown off if they happen both internally and externally
+    // Could we delegate the completion to be handled correctly externally?
+    //  - Sink should complete normally or abruptly if it would complete that way as a result of completing newSink normally or abruptly
+    //  - If complete(null) reaches the SignalSink, don't throw; as the Sink itself may throw on complete(null), but we won't know til later
+    //    - For that matter, maybe just don't throw after source.drainToSink(newSink)?
+    //      - No... Due to possible async bounds, completion only makes sense coming from newSink
+    //      - And we can't do anything about what the original Sink is on the outside (no wrapping)
+    //  - Not completing the Sink when we normally would can mean that it accepts more offers than it normally would
+    
     // TODO: default close() / complete() do not prevent further poll() / offer()...
     
     // Note: concat substreams happens naturally in split, since we join after each sink, and sinks do not overlap
@@ -360,15 +413,7 @@ public class Conduits {
     
     // --- Sinks ---
     
-    private static class AlsoClose<T> implements Conduit.Source<T> {
-        final Conduit.Source<T> source;
-        final Conduit.Source<?> sourceToClose;
-        
-        AlsoClose(Conduit.Source<T> source, Conduit.Source<?> sourceToClose) {
-            this.source = source;
-            this.sourceToClose = sourceToClose;
-        }
-        
+    private record AlsoClose<T>(Conduit.Source<T> source, Conduit.Source<?> sourceToClose) implements Conduit.Source<T> {
         @Override
         public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
             return source.drainToSink(sink);
@@ -380,28 +425,9 @@ public class Conduits {
                 source.close();
             }
         }
-        
-        static class Step<T> extends AlsoClose<T> implements Conduit.StepSource<T> {
-            Step(Conduit.StepSource<T> source, Conduit.Source<?> sourceToComplete) {
-                super(source, sourceToComplete);
-            }
-            
-            @Override
-            public T poll() throws Exception {
-                return ((Conduit.StepSource<T>) source).poll();
-            }
-        }
     }
     
-    private static class AlsoComplete<T> implements Conduit.Sink<T> {
-        final Conduit.Sink<T> sink;
-        final Conduit.Sink<?> sinkToComplete;
-        
-        AlsoComplete(Conduit.Sink<T> sink, Conduit.Sink<?> sinkToComplete) {
-            this.sink = sink;
-            this.sinkToComplete = sinkToComplete;
-        }
-        
+    private record AlsoComplete<T>(Conduit.Sink<T> sink, Conduit.Sink<?> sinkToComplete) implements Conduit.Sink<T> {
         @Override
         public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
             return sink.drainFromSource(source);
@@ -436,17 +462,6 @@ public class Conduits {
             }
             sinkToComplete.completeExceptionally(ex);
         }
-        
-        static class Step<T> extends AlsoComplete<T> implements Conduit.StepSink<T> {
-            Step(Conduit.StepSink<T> sink, Conduit.Sink<?> sinkToComplete) {
-                super(sink, sinkToComplete);
-            }
-            
-            @Override
-            public boolean offer(T input) throws Exception {
-                return ((Conduit.StepSink<T>) sink).offer(input);
-            }
-        }
     }
     
     public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
@@ -454,19 +469,9 @@ public class Conduits {
         return source -> new AlsoClose<>(source, sourceToClose);
     }
     
-    public static <T> Conduit.StepSourceOperator<T, T> stepAlsoClose(Conduit.Source<?> sourceToClose) {
-        Objects.requireNonNull(sourceToClose);
-        return source -> new AlsoClose.Step<>(source, sourceToClose);
-    }
-    
     public static <T> Conduit.SinkOperator<T, T> alsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         return sink -> new AlsoComplete<>(sink, sinkToComplete);
-    }
-    
-    public static <T> Conduit.StepSinkOperator<T, T> stepAlsoComplete(Conduit.Sink<?> sinkToComplete) {
-        Objects.requireNonNull(sinkToComplete);
-        return sink -> new AlsoComplete.Step<>(sink, sinkToComplete);
     }
     
     public static <T> Conduit.Sink<T> split(Predicate<? super T> predicate,
@@ -879,59 +884,6 @@ public class Conduits {
         
         return SinkAdaptedSource::new;
     }
-    
-    // Maybe complete(x) should set exception even if complete(null) returned normally?
-    
-    // We should never complete the sink internally, as it is not safe to assume the sink is ready-to-complete when this
-    // source is done with it. For example: concat(). If Source#drainToSink completed the sink, the StepSink passed to
-    // concat#drainToSink would be completed by the first Source, and the StepSink would be unable to receive from
-    // subsequent Sources.
-    
-    // TODO: What about adapting the (non-step)Sink-side of a StepSource?
-    //  You can do it... but then the StepSource becomes a Source - ie it is destructive
-    //  There's no way non-destructive to do this - the method called by run() (drainFromSource) is on the Sink.
-    //  But is there a use case?
-    
-    // TODO: Throws before completing downstream vs throws after
-    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
-    // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
-    // TODO: We should ONLY throw an exception if the SignalSink received one
-    //  - In that case, we're just giving it back to Sink#complete(error)
-    //  Otherwise, throw the exception in a fork off the original scope, so scope sees it
-    
-    // Could we just do completion internally, and let external completion no-op?
-    //  - This would be unable to handle external causes for completion
-    //    - ...Which don't occur / aren't safe for a plain Sink/Source...?
-    //      - But these are StepSinks/Sources, darn
-    //    - Does this really matter?
-    //      - In Silo'd usage, if newSink.complete(ex) throws, we may race to complete the Sink with that exception instead of ex (or a downstream ex, or nothing if recovered downstream)
-    //        - TODO: Okay so... always swallow newSink throws then?
-    //          - But if newSink has no async bound, newSink throws may be original Sink throws
-    //      - In ad-hoc usage, we could:
-    //        a) call complete() before calling drainToSink TODO
-    //        b) call complete() concurrently with drainToSink TODO
-    //        c) call complete() after calling drainToSink
-    //  - We generally don't want to complete the sink internally, in case it is shared with others (eg shared buffer)
-    //    - TODO: But then, what DOES complete the shared buffer?? Currently (eg balance) we actually would have each sink completing it...
-    //      - Can maybe do some shenanigans like balanceMerge(List<StepSinkOperator>) -> StepToSinkOperator
-    //        - Pass buffer to result, internally wraps in a StepSink that tracks completions, passes Sinks to balance
-    //        - This is pretty limited, eg 'balance' comes from needing a single StepSink in the end, rather than multiple discreet
-    //        - This is like a more powerful mapAsync
-    //      - balanceMerge(List<StepSourceOperator>) -> StepToSourceOperator
-    //        - Pass buffer to result, internally wraps in a StepSource that tracks closes, passes Sources to merge
-    //        - Again like mapAsync, but as a Source
-    //      - Or expose the 'buffer-wrapper' types directly:
-    //        - MergeSink - completes the underlying StepSink upon normal completions reaching count, or upon any abrupt completion
-    //        - BalanceSource - closes the underlying StepSource upon closes reaching count
-    //        - counting completions/closes would be thrown off if they happen both internally and externally
-    // Could we delegate the completion to be handled correctly externally?
-    //  - Sink should complete normally or abruptly if it would complete that way as a result of completing newSink normally or abruptly
-    //  - If complete(null) reaches the SignalSink, don't throw; as the Sink itself may throw on complete(null), but we won't know til later
-    //    - For that matter, maybe just don't throw after source.drainToSink(newSink)?
-    //      - No... Due to possible async bounds, completion only makes sense coming from newSink
-    //      - And we can't do anything about what the original Sink is on the outside (no wrapping)
-    //  - Not completing the Sink when we normally would can mean that it accepts more offers than it normally would
-    
     
     public static <In, T, A> Conduit.StepSinkOperator<In, T> gather(Gatherer<In, A, T> gatherer) {
         Objects.requireNonNull(gatherer);
