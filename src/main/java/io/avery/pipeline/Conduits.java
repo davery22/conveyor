@@ -193,7 +193,8 @@ public class Conduits {
     //  - why exception cause chaining
     //  - semantics of the boolean return of drainFromSource/ToSink, and why the default impls can be the same
     //  - using buffers between threads (with polling), vs synchronized handoffs (with pushing)
-    //  - why 'SubScope' instead of actual STS? why run(Executor) instead of run(STS)?
+    //  - (X) why 'SubScope' instead of actual STS?
+    //  - why run(Executor) instead of run(STS)?
     
     // TODO: Dropping elements...
     //  - eg in zip, can't know we will use either value until we have both
@@ -818,16 +819,6 @@ public class Conduits {
                 
                 class SignalSink implements Conduit.StepSink<U> {
                     volatile boolean drained = true;
-                    volatile Throwable exception;
-                    
-                    static final VarHandle EXCEPTION;
-                    static {
-                        try {
-                            EXCEPTION = MethodHandles.lookup().findVarHandle(SignalSink.class, "exception", Throwable.class);
-                        } catch (ReflectiveOperationException e) {
-                            throw new ExceptionInInitializerError(e);
-                        }
-                    }
                     
                     @Override
                     public boolean offer(U input) throws Exception {
@@ -835,11 +826,6 @@ public class Conduits {
                             return drained = false;
                         }
                         return true;
-                    }
-                    
-                    @Override
-                    public void completeExceptionally(Throwable ex) {
-                        EXCEPTION.compareAndSet(this, null, Objects.requireNonNull(ex));
                     }
                 }
                 
@@ -854,41 +840,29 @@ public class Conduits {
                     // behave as if it was
                     //   `source.andThen(sinkMapper.andThen(sink))`
                     //
-                    // For exception handling:
-                    //  - If there is no async boundary between newSink and signalSink, they should see the same
-                    //    exception. We throw it from this method, so that it gets passed to sink.
-                    //  - If there is an async boundary between newSink and signalSink, they should see different
-                    //    exceptions (signalSink's should be wrapped in UpstreamException). We pass the one that reaches
-                    //    newSink to the asyncExceptionHandler, and throw the one that reaches signalSink from this
-                    //    method, so that it gets passed to sink.
+                    // A potential difference is in exception handling. We process newSink in this thread, and throw if
+                    // the 'silo' below throws. This means that exception may be passed to sink.completeExceptionally
+                    // sometime after this method exits. If there is an async boundary between newSink and sink, sink
+                    // would see a different exception than it would have in the `sinkMapper.andThen(sink)` version. No
+                    // heroics here can perfectly match the behavior of that version, so instead of trying and failing
+                    // in subtle ways, we go with the more obvious implementation.
                     newSink.run(scopeExecutor(scope));
-                    Throwable exception = null;
-                    try {
-                        source.drainToSink(newSink);
-                        newSink.complete();
-                    } catch (Throwable e) {
+                    joinAfterCall(scope, () -> {
                         try {
-                            newSink.completeExceptionally(e);
-                        } catch (Throwable t) {
-                            e.addSuppressed(t);
+                            source.drainToSink(newSink);
+                            newSink.complete();
+                            return null;
+                        } catch (Error | Exception e) {
+                            try {
+                                newSink.completeExceptionally(e);
+                            } catch (Throwable t) {
+                                e.addSuppressed(t);
+                            }
+                            throw e;
                         }
-                        exception = e;
-                    }
-                    try {
-                        scope.join();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                    // For well-behaving implementations, newSink's exception would match signalSink's exception if
-                    // (and only if) there was no async boundary between newSink and signalSink.
-                    if (exception != null && exception != signalSink.exception) {
-                        try {
-                            asyncExceptionHandler.accept(exception);
-                        } catch (Throwable ignore) { }
-                    }
+                    });
                 }
                 
-                throwAsException(signalSink.exception);
                 return signalSink.drained;
             }
             
