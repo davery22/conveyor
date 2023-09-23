@@ -441,6 +441,11 @@ public class Conduits {
                     lock.unlock();
                 }
             }
+            
+            @Override
+            public void run(Executor executor) {
+                source.run(executor);
+            }
         }
         
         return LockedStepSource::new;
@@ -477,12 +482,18 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
+                Objects.requireNonNull(ex);
                 lock.lock();
                 try {
                     sink.completeExceptionally(ex);
                 } finally {
                     lock.unlock();
                 }
+            }
+            
+            @Override
+            public void run(Executor executor) {
+                sink.run(executor);
             }
         }
         
@@ -510,6 +521,7 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
+                Objects.requireNonNull(ex);
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
@@ -533,6 +545,11 @@ public class Conduits {
                     }
                     throw e;
                 }
+            }
+            
+            @Override
+            public void run(Executor executor) {
+                sink.run(executor);
             }
         }
         
@@ -560,10 +577,11 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
+                Objects.requireNonNull(ex);
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
-                    try (var scope = new FailureHandlingScope("recoverStep-completeExceptionally",
+                    try (var scope = new FailureHandlingScope("recover-completeExceptionally",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
                         source.run(scopeExecutor(scope));
@@ -584,70 +602,102 @@ public class Conduits {
                     throw e;
                 }
             }
+            
+            @Override
+            public void run(Executor executor) {
+                sink.run(executor);
+            }
         }
         
         return Recover::new;
     }
     
-    private record AlsoClose<T>(Conduit.Source<T> source, Conduit.Source<?> sourceToClose) implements Conduit.Source<T> {
-        @Override
-        public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
-            return source.drainToSink(sink);
-        }
-        
-        @Override
-        public void close() throws Exception {
-            try (sourceToClose) {
-                source.close();
-            }
-        }
-    }
-    
-    private record AlsoComplete<T>(Conduit.Sink<T> sink, Conduit.Sink<?> sinkToComplete) implements Conduit.Sink<T> {
-        @Override
-        public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-            return sink.drainFromSource(source);
-        }
-        
-        @Override
-        public void complete() throws Exception {
-            try {
-                sink.complete();
-            } catch (Error | Exception e) {
-                try {
-                    sinkToComplete.complete();
-                } catch (Throwable t) {
-                    e.addSuppressed(t);
-                }
-                throw e;
-            }
-            sinkToComplete.complete();
-        }
-        
-        @Override
-        public void completeExceptionally(Throwable ex) throws Exception {
-            try {
-                sink.completeExceptionally(ex);
-            } catch (Error | Exception e) {
-                try {
-                    sinkToComplete.completeExceptionally(ex);
-                } catch (Throwable t) {
-                    e.addSuppressed(t);
-                }
-                throw e;
-            }
-            sinkToComplete.completeExceptionally(ex);
-        }
-    }
-    
     public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
         Objects.requireNonNull(sourceToClose);
-        return source -> new AlsoClose<>(source, sourceToClose);
+        
+        class AlsoClose implements Conduit.Source<T> {
+            final Conduit.Source<T> source;
+            
+            AlsoClose(Conduit.Source<T> source) {
+                this.source = Objects.requireNonNull(source);
+            }
+            
+            @Override
+            public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
+                return source.drainToSink(sink);
+            }
+            
+            @Override
+            public void close() throws Exception {
+                try (sourceToClose) {
+                    source.close();
+                }
+            }
+            
+            @Override
+            public void run(Executor executor) {
+                source.run(executor);
+                sourceToClose.run(executor);
+            }
+        }
+        
+        return AlsoClose::new;
     }
     
     public static <T> Conduit.SinkOperator<T, T> alsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
-        return sink -> new AlsoComplete<>(sink, sinkToComplete);
+        
+        class AlsoComplete implements Conduit.Sink<T> {
+            final Conduit.Sink<T> sink;
+            
+            AlsoComplete(Conduit.Sink<T> sink) {
+                this.sink = Objects.requireNonNull(sink);
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                return sink.drainFromSource(source);
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                try {
+                    sink.complete();
+                } catch (Error | Exception e) {
+                    try {
+                        sinkToComplete.complete();
+                    } catch (Throwable t) {
+                        e.addSuppressed(t);
+                    }
+                    throw e;
+                }
+                sinkToComplete.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) throws Exception {
+                Objects.requireNonNull(ex);
+                try {
+                    sink.completeExceptionally(ex);
+                } catch (Error | Exception e) {
+                    try {
+                        sinkToComplete.completeExceptionally(ex);
+                    } catch (Throwable t) {
+                        e.addSuppressed(t);
+                    }
+                    throw e;
+                }
+                sinkToComplete.completeExceptionally(ex);
+            }
+            
+            @Override
+            public void run(Executor executor) {
+                sink.run(executor);
+                sinkToComplete.run(executor);
+            }
+        }
+        
+        return AlsoComplete::new;
     }
     
     public static <T> Conduit.Sink<T> split(Predicate<? super T> predicate,
@@ -790,13 +840,13 @@ public class Conduits {
         return new GroupBy();
     }
     
-    public static <T, U> Conduit.StepSinkOperator<T, U> stepFlatMap(Function<? super T, ? extends Conduit.Source<U>> mapper,
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapStep(Function<? super T, ? extends Conduit.Source<U>> mapper,
                                                                     Consumer<? super Throwable> asyncExceptionHandler) {
-        class FlatMap implements Conduit.StepSink<T> {
+        class FlatMapStep implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
             boolean draining = true;
             
-            FlatMap(Conduit.StepSink<U> sink) {
+            FlatMapStep(Conduit.StepSink<U> sink) {
                 this.sink = sink;
             }
             
@@ -810,7 +860,7 @@ public class Conduits {
                 if (subSource == null) {
                     return true;
                 }
-                try (var scope = new FailureHandlingScope("stepFlatMap-offer",
+                try (var scope = new FailureHandlingScope("flatMapStep-offer",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     subSource.run(scopeExecutor(scope));
@@ -831,7 +881,7 @@ public class Conduits {
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
                 draining = false;
-                sink.completeExceptionally(ex);
+                sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
             @Override
@@ -840,7 +890,7 @@ public class Conduits {
             }
         }
         
-        return FlatMap::new;
+        return FlatMapStep::new;
     }
     
     public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<U>> mapper,
@@ -889,7 +939,7 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                sink.completeExceptionally(ex);
+                sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
             @Override
@@ -1145,6 +1195,7 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
+                Objects.requireNonNull(ex);
                 if (state == CLOSED) {
                     return;
                 }
@@ -1786,8 +1837,8 @@ public class Conduits {
         return new Route();
     }
     
-    public static <T> Conduit.StepSink<T> stepSpill(List<? extends Conduit.StepSink<T>> sinks) {
-        class StepSpill implements Conduit.StepSink<T> {
+    public static <T> Conduit.StepSink<T> spillStep(List<? extends Conduit.StepSink<T>> sinks) {
+        class SpillStep implements Conduit.StepSink<T> {
             int i = 0;
             
             @Override
@@ -1818,7 +1869,7 @@ public class Conduits {
             }
         }
         
-        return new StepSpill();
+        return new SpillStep();
     }
     
     public static <T> Conduit.Sink<T> spill(List<? extends Conduit.Sink<T>> sinks) {
@@ -1858,8 +1909,8 @@ public class Conduits {
     
     // --- Sources ---
     
-    public static <T> Conduit.StepSource<T> stepConcat(List<? extends Conduit.StepSource<T>> sources) {
-        class StepConcat implements Conduit.StepSource<T> {
+    public static <T> Conduit.StepSource<T> concatStep(List<? extends Conduit.StepSource<T>> sources) {
+        class ConcatStep implements Conduit.StepSource<T> {
             int i = 0;
             
             @Override
@@ -1886,7 +1937,7 @@ public class Conduits {
             }
         }
         
-        return new StepConcat();
+        return new ConcatStep();
     }
     
     public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
@@ -2054,10 +2105,10 @@ public class Conduits {
     
     public static <T1, T2, T> Conduit.Source<T> zipLatest(Conduit.Source<T1> source1,
                                                           Conduit.Source<T2> source2,
-                                                          BiFunction<? super T1, ? super T2, T> merger) {
+                                                          BiFunction<? super T1, ? super T2, T> combiner) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
-        Objects.requireNonNull(merger);
+        Objects.requireNonNull(combiner);
         
         class ZipLatest implements Conduit.Source<T> {
             final ReentrantLock lock = new ReentrantLock();
@@ -2108,7 +2159,7 @@ public class Conduits {
                                 }
                                 ready.signal();
                             }
-                            T t = merger.apply(latest1, latest2);
+                            T t = combiner.apply(latest1, latest2);
                             if (!sink.offer(t)) {
                                 state = CANCELLED;
                                 return false;
@@ -2142,7 +2193,7 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                lock.lockInterruptibly();
+                lock.lock();
                 try {
                     if ((state & CLOSED) != 0) {
                         return;
@@ -2297,7 +2348,7 @@ public class Conduits {
                     tokens -= head.cost;
                     cost -= head.cost;
                     queue.poll();
-                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchSinkDeadline(Instant.MIN); // TODO: Might not be below costLimit yet
                     ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head == null) {

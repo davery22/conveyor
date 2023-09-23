@@ -49,7 +49,7 @@ class ConduitsTest {
                         true,
                         t -> { },
                         (k, v) -> Conduits
-                            .stepFlatMap(e -> Conduits.source(Stream.of(k, e, v)), t -> { })
+                            .flatMapStep(e -> Conduits.source(Stream.of(k, e, v)), t -> { })
                             .andThen(buffer(16))
                             .andThen(Conduits
                                 .gather(flatMap(e -> {
