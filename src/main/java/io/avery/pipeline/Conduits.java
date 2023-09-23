@@ -2792,13 +2792,12 @@ public class Conduits {
         
         @Override
         public void run(Executor executor) {
-            if (!RAN.compareAndSet(this, false, true)) {
-                return;
-            }
-            
             source.run(executor);
             sink.run(executor);
             executor.execute(() -> {
+                if (!RAN.compareAndSet(this, false, true)) {
+                    return;
+                }
                 try (source) {
                     if (sink instanceof Conduit.StepSink<? super T> ss) {
                         source.drainToSink(ss);
