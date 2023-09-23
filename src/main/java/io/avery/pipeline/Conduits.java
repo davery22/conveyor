@@ -413,6 +413,182 @@ public class Conduits {
     
     // --- Sinks ---
     
+    public static <T> Conduit.StepSourceOperator<T, T> lockedStepSource() {
+        class LockedStepSource implements Conduit.StepSource<T> {
+            final Conduit.StepSource<T> source;
+            final ReentrantLock lock = new ReentrantLock();
+            
+            LockedStepSource(Conduit.StepSource<T> source) {
+                this.source = source;
+            }
+            
+            @Override
+            public T poll() throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    return source.poll();
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            @Override
+            public void close() throws Exception {
+                lock.lock();
+                try {
+                    source.close();
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+        
+        return LockedStepSource::new;
+    }
+    
+    public static <T> Conduit.StepSinkOperator<T, T> lockedStepSink() {
+        class LockedStepSink implements Conduit.StepSink<T> {
+            final Conduit.StepSink<T> sink;
+            final ReentrantLock lock = new ReentrantLock();
+            
+            LockedStepSink(Conduit.StepSink<T> sink) {
+                this.sink = sink;
+            }
+            
+            @Override
+            public boolean offer(T input) throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    return sink.offer(input);
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    sink.complete();
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) throws Exception {
+                lock.lock();
+                try {
+                    sink.completeExceptionally(ex);
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+        
+        return LockedStepSink::new;
+    }
+    
+    public static <T> Conduit.StepSinkOperator<T, T> recoverStep(Function<? super Throwable, ? extends Conduit.Source<? extends T>> mapper,
+                                                                 Consumer<? super Throwable> asyncExceptionHandler) {
+        class RecoverStep implements Conduit.StepSink<T> {
+            final Conduit.StepSink<T> sink;
+            
+            RecoverStep(Conduit.StepSink<T> sink) {
+                this.sink = sink;
+            }
+            
+            @Override
+            public boolean offer(T input) throws Exception {
+                return sink.offer(input);
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) throws Exception {
+                boolean running = false;
+                try {
+                    var source = Objects.requireNonNull(mapper.apply(ex));
+                    try (var scope = new FailureHandlingScope("recoverStep-completeExceptionally",
+                                                              Thread.ofVirtual().name("thread-", 0).factory(),
+                                                              asyncExceptionHandler)) {
+                        source.run(scopeExecutor(scope));
+                        running = true;
+                        joinAfterCall(scope, () -> {
+                            try (source) {
+                                return source.drainToSink(sink);
+                            }
+                        });
+                    }
+                    sink.complete(); // Note: This may be the second time calling...
+                } catch (Error | Exception e) {
+                    try {
+                        sink.completeExceptionally(running ? e : ex);
+                    } catch (Throwable t) {
+                        e.addSuppressed(t);
+                    }
+                    throw e;
+                }
+            }
+        }
+        
+        return RecoverStep::new;
+    }
+    
+    public static <T> Conduit.SinkOperator<T, T> recover(Function<? super Throwable, ? extends Conduit.StepSource<? extends T>> mapper,
+                                                         Consumer<? super Throwable> asyncExceptionHandler) {
+        class Recover implements Conduit.Sink<T> {
+            final Conduit.Sink<T> sink;
+            
+            Recover(Conduit.Sink<T> sink) {
+                this.sink = sink;
+            }
+            
+            @Override
+            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
+                return sink.drainFromSource(source);
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                sink.complete();
+            }
+            
+            @Override
+            public void completeExceptionally(Throwable ex) throws Exception {
+                boolean running = false;
+                try {
+                    var source = Objects.requireNonNull(mapper.apply(ex));
+                    try (var scope = new FailureHandlingScope("recoverStep-completeExceptionally",
+                                                              Thread.ofVirtual().name("thread-", 0).factory(),
+                                                              asyncExceptionHandler)) {
+                        source.run(scopeExecutor(scope));
+                        running = true;
+                        joinAfterCall(scope, () -> {
+                            try (source) {
+                                return sink.drainFromSource(source);
+                            }
+                        });
+                    }
+                    sink.complete(); // Note: This may be the second time calling...
+                } catch (Error | Exception e) {
+                    try {
+                        sink.completeExceptionally(running ? e : ex);
+                    } catch (Throwable t) {
+                        e.addSuppressed(t);
+                    }
+                    throw e;
+                }
+            }
+        }
+        
+        return Recover::new;
+    }
+    
     private record AlsoClose<T>(Conduit.Source<T> source, Conduit.Source<?> sourceToClose) implements Conduit.Source<T> {
         @Override
         public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
