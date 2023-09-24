@@ -7,7 +7,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
@@ -832,13 +831,13 @@ public class Conduits {
         return new GroupBy();
     }
     
-    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapStep(Function<? super T, ? extends Conduit.Source<? extends U>> mapper,
-                                                                    Consumer<? super Throwable> asyncExceptionHandler) {
-        class FlatMapStep implements Conduit.StepSink<T> {
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.Source<? extends U>> mapper,
+                                                                Consumer<? super Throwable> asyncExceptionHandler) {
+        class FlatMap implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
             boolean draining = true;
             
-            FlatMapStep(Conduit.StepSink<U> sink) {
+            FlatMap(Conduit.StepSink<U> sink) {
                 this.sink = sink;
             }
             
@@ -852,7 +851,7 @@ public class Conduits {
                 if (subSource == null) {
                     return true;
                 }
-                try (var scope = new FailureHandlingScope("flatMapStep-offer",
+                try (var scope = new FailureHandlingScope("flatMap-offer",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     subSource.run(scopeExecutor(scope));
@@ -861,62 +860,6 @@ public class Conduits {
                             return subSource.drainToSink(sink);
                         }
                     });
-                }
-            }
-            
-            @Override
-            public void complete() throws Exception {
-                sink.complete();
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                sink.completeExceptionally(Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                sink.run(executor);
-            }
-        }
-        
-        return FlatMapStep::new;
-    }
-    
-    public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<? extends U>> mapper,
-                                                            Consumer<? super Throwable> asyncExceptionHandler) {
-        class FlatMap implements Conduit.Sink<T> {
-            final Conduit.Sink<U> sink;
-            
-            FlatMap(Conduit.Sink<U> sink) {
-                this.sink = sink;
-            }
-            
-            @Override
-            public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                try (var scope = new FailureHandlingScope("flatMap-drainFromSource",
-                                                          Thread.ofVirtual().name("thread-", 0).factory(),
-                                                          asyncExceptionHandler)) {
-                    var exec = scopeExecutor(scope);
-                    for (T e; (e = source.poll()) != null; ) {
-                        var subSource = mapper.apply(e);
-                        if (subSource == null) {
-                            continue;
-                        }
-                        subSource.run(exec);
-                        boolean drained = joinAfterCall(scope, () -> {
-                            try (subSource) {
-                                // If sink is adaptSourceOfSink, we might fail to poll more from source simply because
-                                // there was an async bound and newSource completed early, not because our sink
-                                // "won't poll anymore"
-                                return sink.drainFromSource(subSource);
-                            }
-                        });
-                        if (!drained) {
-                            return false;
-                        }
-                    }
-                    return true;
                 }
             }
             
