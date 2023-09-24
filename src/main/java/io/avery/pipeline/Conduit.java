@@ -75,7 +75,7 @@ public class Conduit {
          * @param ex
          * @throws Exception
          */
-        default void completeExceptionally(Throwable ex) throws Exception { }
+        default void completeExceptionally(Throwable exception) throws Exception { }
         
         // Stage/Segue chaining
         default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }

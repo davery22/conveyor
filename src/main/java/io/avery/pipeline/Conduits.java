@@ -614,7 +614,7 @@ public class Conduits {
     public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
         Objects.requireNonNull(sourceToClose);
         
-        class AlsoClose implements Conduit.Source<T> {
+        class AlsoClose extends FanInSource<T> {
             final Conduit.Source<T> source;
             
             AlsoClose(Conduit.Source<T> source) {
@@ -627,16 +627,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                try (sourceToClose) {
-                    source.close();
-                }
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                source.run(executor);
-                sourceToClose.run(executor);
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return Stream.of(source, sourceToClose);
             }
         }
         
@@ -646,7 +638,7 @@ public class Conduits {
     public static <T> Conduit.SinkOperator<T, T> alsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         
-        class AlsoComplete implements Conduit.Sink<T> {
+        class AlsoComplete extends FanOutSink<T> {
             final Conduit.Sink<T> sink;
             
             AlsoComplete(Conduit.Sink<T> sink) {
@@ -659,40 +651,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                try {
-                    sink.complete();
-                } catch (Error | Exception e) {
-                    try {
-                        sinkToComplete.complete();
-                    } catch (Throwable t) {
-                        e.addSuppressed(t);
-                    }
-                    throw e;
-                }
-                sinkToComplete.complete();
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                Objects.requireNonNull(ex);
-                try {
-                    sink.completeExceptionally(ex);
-                } catch (Error | Exception e) {
-                    try {
-                        sinkToComplete.completeExceptionally(ex);
-                    } catch (Throwable t) {
-                        e.addSuppressed(t);
-                    }
-                    throw e;
-                }
-                sinkToComplete.completeExceptionally(ex);
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                sink.run(executor);
-                sinkToComplete.run(executor);
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return Stream.of(sink, sinkToComplete);
             }
         }
         
@@ -813,11 +773,11 @@ public class Conduits {
                                     scopedSinkByKey.put(key, TOMBSTONE);
                                 }
                             }
-                            composedComplete(sinks(scopedSinkByKey).iterator());
+                            composedComplete(sinks(scopedSinkByKey));
                             return drained;
                         } catch (Error | Exception e) {
                             try {
-                                composedCompleteExceptionally(sinks(scopedSinkByKey).iterator(), e);
+                                composedCompleteExceptionally(sinks(scopedSinkByKey), e);
                             } catch (Throwable t) {
                                 e.addSuppressed(t);
                             }
@@ -833,7 +793,7 @@ public class Conduits {
     
     public static <T, U> Conduit.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.Source<? extends U>> mapper,
                                                                 Consumer<? super Throwable> asyncExceptionHandler) {
-        class FlatMap implements Conduit.StepSink<T> {
+        class FlatMap extends ProxySink<T> implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
             boolean draining = true;
             
@@ -864,18 +824,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                sink.complete();
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                sink.completeExceptionally(Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            protected Conduit.Sink<?> sink() {
+                return sink;
             }
         }
         
@@ -884,7 +834,7 @@ public class Conduits {
     
     public static <T, U> Conduit.SinkOperator<T, U> adaptSourceOfSink(Conduit.StepSourceOperator<T, U> sourceMapper,
                                                                       Consumer<? super Throwable> asyncExceptionHandler) {
-        class SourceAdaptedSink implements Conduit.Sink<T> {
+        class SourceAdaptedSink extends ProxySink<T> {
             final Conduit.Sink<U> sink;
             
             SourceAdaptedSink(Conduit.Sink<U> sink) {
@@ -928,18 +878,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                sink.complete();
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                sink.completeExceptionally(Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            protected Conduit.Sink<?> sink() {
+                return sink;
             }
         }
         
@@ -966,7 +906,7 @@ public class Conduits {
     
     public static <T, U> Conduit.SourceOperator<T, U> adaptSinkOfSource(Conduit.StepSinkOperator<T, U> sinkMapper,
                                                                         Consumer<? super Throwable> asyncExceptionHandler) {
-        class SinkAdaptedSource implements Conduit.Source<U> {
+        class SinkAdaptedSource extends ProxySource<U> {
             final Conduit.Source<T> source;
             
             SinkAdaptedSource(Conduit.Source<T> source) {
@@ -1025,13 +965,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                source.close();
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                source.run(executor);
+            protected Conduit.Source<?> source() {
+                return source;
             }
         }
         
@@ -1629,7 +1564,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
-        class Balance implements Conduit.Sink<T> {
+        class Balance extends FanOutSink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource",
@@ -1643,20 +1578,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                composedComplete(sinks.iterator());
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var sink : sinks) {
-                    sink.run(executor);
-                }
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return sinks.stream();
             }
         }
         
@@ -1664,7 +1587,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.StepSink<T> broadcast(List<? extends Conduit.StepSink<T>> sinks) {
-        class Broadcast implements Conduit.StepSink<T> {
+        class Broadcast extends FanOutSink<T> implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws Exception {
                 for (var sink : sinks) {
@@ -1676,20 +1599,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                composedComplete(sinks.iterator());
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var sink : sinks) {
-                    sink.run(executor);
-                }
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return sinks.stream();
             }
         }
         
@@ -1720,7 +1631,7 @@ public class Conduits {
             }
         };
         
-        class Route implements Conduit.StepSink<T> {
+        class Route extends FanOutSink<T> implements Conduit.StepSink<T> {
             boolean done = false;
             
             @Override
@@ -1742,20 +1653,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                composedComplete(sinks.iterator());
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var sink : sinks) {
-                    sink.run(executor);
-                }
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return sinks.stream();
             }
         }
         
@@ -1763,7 +1662,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.StepSink<T> spillStep(List<? extends Conduit.StepSink<T>> sinks) {
-        class SpillStep implements Conduit.StepSink<T> {
+        class SpillStep extends FanOutSink<T> implements Conduit.StepSink<T> {
             int i = 0;
             
             @Override
@@ -1777,20 +1676,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                composedComplete(sinks.iterator());
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var sink : sinks) {
-                    sink.run(executor);
-                }
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return sinks.stream();
             }
         }
         
@@ -1798,7 +1685,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Sink<T> spill(List<? extends Conduit.Sink<T>> sinks) {
-        class Spill implements Conduit.Sink<T> {
+        class Spill extends FanOutSink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 for (var sink : sinks) {
@@ -1810,20 +1697,8 @@ public class Conduits {
             }
             
             @Override
-            public void complete() throws Exception {
-                composedComplete(sinks.iterator());
-            }
-            
-            @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
-                composedCompleteExceptionally(sinks.iterator(), Objects.requireNonNull(ex));
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var sink : sinks) {
-                    sink.run(executor);
-                }
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return sinks.stream();
             }
         }
         
@@ -1833,7 +1708,7 @@ public class Conduits {
     // --- Sources ---
     
     public static <T> Conduit.StepSource<T> concatStep(List<? extends Conduit.StepSource<T>> sources) {
-        class ConcatStep implements Conduit.StepSource<T> {
+        class ConcatStep extends FanInSource<T> implements Conduit.StepSource<T> {
             int i = 0;
             
             @Override
@@ -1848,15 +1723,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                composedClose(sources.iterator());
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var source : sources) {
-                    source.run(executor);
-                }
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return sources.stream();
             }
         }
         
@@ -1864,7 +1732,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
-        class Concat implements Conduit.Source<T> {
+        class Concat extends FanInSource<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 for (var source : sources) {
@@ -1876,15 +1744,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                composedClose(sources.iterator());
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var source : sources) {
-                    source.run(executor);
-                }
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return sources.stream();
             }
         }
         
@@ -1892,7 +1753,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Source<T> merge(List<? extends Conduit.Source<T>> sources) {
-        class Merge implements Conduit.Source<T> {
+        class Merge extends FanInSource<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink",
@@ -1906,15 +1767,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                composedClose(sources.iterator());
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var source : sources) {
-                    source.run(executor);
-                }
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return sources.stream();
             }
         }
         
@@ -1923,7 +1777,7 @@ public class Conduits {
     
     public static <T> Conduit.StepSource<T> mergeSorted(List<? extends Conduit.StepSource<T>> sources,
                                                         Comparator<? super T> comparator) {
-        class MergeSorted implements Conduit.StepSource<T> {
+        class MergeSorted extends FanInSource<T> implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = NEW;
             
@@ -1960,15 +1814,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                composedClose(sources.iterator());
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                for (var source : sources) {
-                    source.run(executor);
-                }
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return sources.stream();
             }
         }
         
@@ -1977,12 +1824,12 @@ public class Conduits {
     
     public static <T1, T2, T> Conduit.StepSource<T> zip(Conduit.StepSource<T1> source1,
                                                         Conduit.StepSource<T2> source2,
-                                                        BiFunction<? super T1, ? super T2, T> merger) {
+                                                        BiFunction<? super T1, ? super T2, T> combiner) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
-        Objects.requireNonNull(merger);
+        Objects.requireNonNull(combiner);
         
-        class Zip implements Conduit.StepSource<T> {
+        class Zip extends FanInSource<T> implements Conduit.StepSource<T> {
             boolean done = false;
             
             @Override
@@ -1996,20 +1843,12 @@ public class Conduits {
                     done = true;
                     return null;
                 }
-                return Objects.requireNonNull(merger.apply(e1, e2));
+                return Objects.requireNonNull(combiner.apply(e1, e2));
             }
             
             @Override
-            public void close() throws Exception {
-                try (source2) {
-                    source1.close();
-                }
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                source1.run(executor);
-                source2.run(executor);
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return Stream.of(source1, source2);
             }
         }
         
@@ -2023,7 +1862,7 @@ public class Conduits {
         Objects.requireNonNull(source2);
         Objects.requireNonNull(combiner);
         
-        class ZipLatest implements Conduit.Source<T> {
+        class ZipLatest extends FanInSource<T> {
             T1 latest1 = null;
             T2 latest2 = null;
             
@@ -2077,16 +1916,8 @@ public class Conduits {
             }
             
             @Override
-            public void close() throws Exception {
-                try (source2) {
-                    source1.close();
-                }
-            }
-            
-            @Override
-            public void run(Executor executor) {
-                source1.run(executor);
-                source2.run(executor);
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return Stream.of(source1, source2);
             }
         }
         
@@ -2528,64 +2359,64 @@ public class Conduits {
         return runnable -> scope.fork(Executors.callable(runnable, null));
     }
     
-    private static void composedClose(Iterator<? extends Conduit.Source<?>> sources) throws Exception {
-        Throwable ex = null;
-        while (sources.hasNext()) {
+    static void composedClose(Stream<? extends Conduit.Source<?>> sources) throws Exception {
+        Throwable[] ex = { null };
+        sources.sequential().forEach(source -> {
             try {
-                sources.next().close();
+                source.close();
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
                     // Only fair to reinstate interrupt for later sources
                     Thread.currentThread().interrupt();
                 }
-                if (ex == null) {
-                    ex = e;
+                if (ex[0] == null) {
+                    ex[0] = e;
                 } else {
-                    ex.addSuppressed(e);
+                    ex[0].addSuppressed(e);
                 }
             }
-        }
-        throwAsException(ex);
+        });
+        throwAsException(ex[0]);
     }
     
-    private static void composedComplete(Iterator<? extends Conduit.Sink<?>> sinks) throws Exception {
-        Throwable ex = null;
-        while (sinks.hasNext()) {
+    static void composedComplete(Stream<? extends Conduit.Sink<?>> sinks) throws Exception {
+        Throwable[] ex = { null };
+        sinks.sequential().forEach(sink -> {
             try {
-                sinks.next().complete();
+                sink.complete();
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
                     // Only fair to reinstate interrupt for later sinks
                     Thread.currentThread().interrupt();
                 }
-                if (ex == null) {
-                    ex = e;
+                if (ex[0] == null) {
+                    ex[0] = e;
                 } else {
-                    ex.addSuppressed(e);
+                    ex[0].addSuppressed(e);
                 }
             }
-        }
-        throwAsException(ex);
+        });
+        throwAsException(ex[0]);
     }
     
-    private static void composedCompleteExceptionally(Iterator<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
-        Throwable ex = null;
-        while (sinks.hasNext()) {
+    static void composedCompleteExceptionally(Stream<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
+        Throwable[] ex = { null };
+        sinks.sequential().forEach(sink -> {
             try {
-                sinks.next().completeExceptionally(exception);
+                sink.completeExceptionally(exception);
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
                     // Only fair to reinstate interrupt for later sinks
                     Thread.currentThread().interrupt();
                 }
-                if (ex == null) {
-                    ex = e;
+                if (ex[0] == null) {
+                    ex[0] = e;
                 } else {
-                    ex.addSuppressed(e);
+                    ex[0].addSuppressed(e);
                 }
             }
-        }
-        throwAsException(ex);
+        });
+        throwAsException(ex[0]);
     }
     
     private static void throwAsException(Throwable ex) throws Exception {
