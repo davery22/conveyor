@@ -1,6 +1,5 @@
 package io.avery.pipeline;
 
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -35,20 +34,46 @@ public class Conduit {
         /**
          *
          * @param source
-         * @return {@code true} if the source drained, meaning a call to {@link StepSource#poll() poll} returned {@code null}.
+         * @return {@code true} if the source drained, meaning a call to {@link StepSource#poll poll} returned {@code null}.
          * @throws Exception
          */
         boolean drainFromSource(StepSource<? extends In> source) throws Exception;
         
         /**
+         * Notifies any nearest downstream boundary sources to stop yielding elements that arrive after this signal.
+         *
+         * @implSpec To prevent unbounded buffering or deadlock, a boundary sink must implement its
+         * {@link StepSink#offer offer} and {@link #drainFromSource drainFromSource} methods to discard elements and
+         * return {@code false} after this method is called. The connected boundary source must return {@code null} from
+         * {@link StepSource#poll poll} and {@code false} from {@link Source#drainToSink drainToSink} after yielding all
+         * values that arrived before it received this signal.
+         *
+         * <p>A sink that delegates to downstream sinks must call {@code complete} on each downstream sink before
+         * returning from this method, unless this method throws.
+         *
+         * <p>The default implementation does nothing.
          *
          * @throws Exception
          */
         default void complete() throws Exception { }
         
         /**
+         * Notifies any nearest downstream boundary sources to stop yielding elements and throw
+         * {@link UpstreamException}.
+         *
+         * @implSpec To prevent unbounded buffering or deadlock, a boundary sink must implement its
+         * {@link StepSink#offer offer} and {@link #drainFromSource drainFromSource} methods to discard elements and
+         * return {@code false} after this method is called. The connected boundary source must throw an
+         * {@link UpstreamException}, wrapping the exception passed to this method, upon initiating any subsequent calls
+         * to {@link StepSource#poll poll} or subsequent offers in {@link Source#drainToSink drainToSink}.
+         *
+         * <p>A sink that delegates to downstream sinks must call {@code completeExceptionally} on each downstream sink
+         * before returning from this method, <strong>even if this method throws</strong>.
+         *
+         * <p>The default implementation does nothing.
          *
          * @param ex
+         * @throws Exception
          */
         default void completeExceptionally(Throwable ex) throws Exception { }
         
@@ -70,12 +95,18 @@ public class Conduit {
         /**
          *
          * @param sink
-         * @return {@code false} if the sink cancelled, meaning a call to {@link StepSink#offer(Object) offer} returned {@code false}.
+         * @return {@code false} if the sink cancelled, meaning a call to {@link StepSink#offer offer} returned {@code false}.
          * @throws Exception
          */
         boolean drainToSink(StepSink<? super Out> sink) throws Exception;
         
         /**
+         * Relinquishes any underlying resources held by this source.
+         *
+         * @implSpec A source that delegates to upstream sources must call {@code close} on each upstream source before
+         * returning from this method, <strong>even if this method throws</strong>.
+         *
+         * <p>The default implementation does nothing.
          *
          * @throws Exception
          */

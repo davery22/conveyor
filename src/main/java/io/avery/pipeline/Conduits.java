@@ -413,12 +413,12 @@ public class Conduits {
     
     // --- Sinks ---
     
-    public static <T> Conduit.StepSourceOperator<T, T> lockedStepSource() {
-        class LockedStepSource implements Conduit.StepSource<T> {
+    public static <T> Conduit.StepSourceOperator<T, T> synchronizeStepSource() {
+        class SynchronizedStepSource implements Conduit.StepSource<T> {
             final Conduit.StepSource<T> source;
             final ReentrantLock lock = new ReentrantLock();
             
-            LockedStepSource(Conduit.StepSource<T> source) {
+            SynchronizedStepSource(Conduit.StepSource<T> source) {
                 this.source = source;
             }
             
@@ -448,15 +448,15 @@ public class Conduits {
             }
         }
         
-        return LockedStepSource::new;
+        return SynchronizedStepSource::new;
     }
     
-    public static <T> Conduit.StepSinkOperator<T, T> lockedStepSink() {
-        class LockedStepSink implements Conduit.StepSink<T> {
+    public static <T> Conduit.StepSinkOperator<T, T> synchronizeStepSink() {
+        class SynchronizedStepSink implements Conduit.StepSink<T> {
             final Conduit.StepSink<T> sink;
             final ReentrantLock lock = new ReentrantLock();
             
-            LockedStepSink(Conduit.StepSink<T> sink) {
+            SynchronizedStepSink(Conduit.StepSink<T> sink) {
                 this.sink = sink;
             }
             
@@ -497,7 +497,7 @@ public class Conduits {
             }
         }
         
-        return LockedStepSink::new;
+        return SynchronizedStepSink::new;
     }
     
     public static <T> Conduit.StepSinkOperator<T, T> recoverStep(Function<? super Throwable, ? extends Conduit.Source<? extends T>> mapper,
@@ -710,15 +710,9 @@ public class Conduits {
         Objects.requireNonNull(sinkFactory);
         
         class Split implements Conduit.Sink<T> {
-            final AtomicBoolean called = new AtomicBoolean(false);
-            
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                if (!called.compareAndSet(false, true)) {
-                    return false; // Not drained
-                }
-                
-                try (var scope = new FailureHandlingScope("splitWhen-drainFromSource",
+                try (var scope = new FailureHandlingScope("split-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     return joinAfterCall(scope, () -> {
@@ -765,11 +759,13 @@ public class Conduits {
                                                  boolean eagerCancel,
                                                  Consumer<? super Throwable> asyncExceptionHandler,
                                                  BiFunction<K, T, Conduit.StepSink<? super T>> sinkFactory) {
+        Objects.requireNonNull(classifier);
+        Objects.requireNonNull(asyncExceptionHandler);
+        Objects.requireNonNull(sinkFactory);
+        
         record ScopedSink<T>(SubScope scope, Conduit.StepSink<? super T> sink) { }
         
         class GroupBy implements Conduit.Sink<T> {
-            final AtomicBoolean called = new AtomicBoolean(false);
-            
             static final Object TOMBSTONE = new Object();
             
             private static Stream<Conduit.Sink<?>> sinks(Map<?, Object> scopedSinkByKey) {
@@ -783,10 +779,6 @@ public class Conduits {
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                if (!called.compareAndSet(false, true)) {
-                    return false; // Not drained
-                }
-                
                 Map<K, Object> scopedSinkByKey = new HashMap<>();
                 try (var scope = new FailureHandlingScope("groupBy-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
@@ -840,7 +832,7 @@ public class Conduits {
         return new GroupBy();
     }
     
-    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapStep(Function<? super T, ? extends Conduit.Source<U>> mapper,
+    public static <T, U> Conduit.StepSinkOperator<T, U> flatMapStep(Function<? super T, ? extends Conduit.Source<? extends U>> mapper,
                                                                     Consumer<? super Throwable> asyncExceptionHandler) {
         class FlatMapStep implements Conduit.StepSink<T> {
             final Conduit.StepSink<U> sink;
@@ -874,13 +866,11 @@ public class Conduits {
             
             @Override
             public void complete() throws Exception {
-                draining = false;
                 sink.complete();
             }
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                draining = false;
                 sink.completeExceptionally(Objects.requireNonNull(ex));
             }
             
@@ -893,11 +883,10 @@ public class Conduits {
         return FlatMapStep::new;
     }
     
-    public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<U>> mapper,
+    public static <T, U> Conduit.SinkOperator<T, U> flatMap(Function<? super T, ? extends Conduit.StepSource<? extends U>> mapper,
                                                             Consumer<? super Throwable> asyncExceptionHandler) {
         class FlatMap implements Conduit.Sink<T> {
             final Conduit.Sink<U> sink;
-            final AtomicBoolean called = new AtomicBoolean(false);
             
             FlatMap(Conduit.Sink<U> sink) {
                 this.sink = sink;
@@ -905,22 +894,21 @@ public class Conduits {
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                if (!called.compareAndSet(false, true)) {
-                    return false; // Not drained
-                }
-                
                 try (var scope = new FailureHandlingScope("flatMap-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     var exec = scopeExecutor(scope);
                     for (T e; (e = source.poll()) != null; ) {
-                        Conduit.StepSource<U> subSource = mapper.apply(e);
+                        var subSource = mapper.apply(e);
                         if (subSource == null) {
                             continue;
                         }
                         subSource.run(exec);
                         boolean drained = joinAfterCall(scope, () -> {
                             try (subSource) {
+                                // If sink is adaptSourceOfSink, we might fail to poll more from source simply because
+                                // there was an async bound and newSource completed early, not because our sink
+                                // "won't poll anymore"
                                 return sink.drainFromSource(subSource);
                             }
                         });
@@ -962,8 +950,6 @@ public class Conduits {
             
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                // TODO: Check state?
-                
                 class SignalSource implements Conduit.StepSource<T> {
                     volatile boolean drained = false;
                     
@@ -1046,8 +1032,6 @@ public class Conduits {
             
             @Override
             public boolean drainToSink(Conduit.StepSink<? super U> sink) throws Exception {
-                // TODO: Check state?
-                
                 class SignalSink implements Conduit.StepSink<U> {
                     volatile boolean drained = true;
                     
@@ -1705,8 +1689,6 @@ public class Conduits {
         class Balance implements Conduit.Sink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
-                // TODO: State check?
-                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource",
                                                                            Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sinks.stream()
@@ -1876,8 +1858,6 @@ public class Conduits {
         class Spill implements Conduit.Sink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
-                // TODO: State check?
-                
                 for (var sink : sinks) {
                     if (sink.drainFromSource(source)) {
                         return true;
@@ -1944,8 +1924,6 @@ public class Conduits {
         class Concat implements Conduit.Source<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
-                // TODO: State check?
-                
                 for (var source : sources) {
                     if (!source.drainToSink(sink)) {
                         return false;
@@ -1974,8 +1952,6 @@ public class Conduits {
         class Merge implements Conduit.Source<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
-                // TODO: State check?
-                
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink",
                                                                            Thread.ofVirtual().name("thread-", 0).factory())) {
                     var tasks = sources.stream()
@@ -2064,21 +2040,17 @@ public class Conduits {
         Objects.requireNonNull(merger);
         
         class Zip implements Conduit.StepSource<T> {
-            int state = RUNNING;
-            
-            static final int RUNNING   = 0;
-            static final int COMPLETED = 1;
-            static final int CLOSED    = 2;
+            boolean done = false;
             
             @Override
             public T poll() throws Exception {
-                if (state >= COMPLETED) {
+                if (done) {
                     return null;
                 }
                 T1 e1;
                 T2 e2;
                 if ((e1 = source1.poll()) == null || (e2 = source2.poll()) == null) {
-                    state = COMPLETED;
+                    done = true;
                     return null;
                 }
                 return Objects.requireNonNull(merger.apply(e1, e2));
@@ -2086,11 +2058,9 @@ public class Conduits {
             
             @Override
             public void close() throws Exception {
-                if (state == CLOSED) {
-                    return;
+                try (source2) {
+                    source1.close();
                 }
-                state = CLOSED;
-                try (source1; source2) { }
             }
             
             @Override
@@ -2111,31 +2081,13 @@ public class Conduits {
         Objects.requireNonNull(combiner);
         
         class ZipLatest implements Conduit.Source<T> {
-            final ReentrantLock lock = new ReentrantLock();
-            final Condition ready = lock.newCondition();
             T1 latest1 = null;
             T2 latest2 = null;
-            int state = NEW;
-            
-            static final int NEW       = 0;
-            static final int STARTED   = 1;
-            static final int CANCELLED = 2;
-            static final int CLOSED    = 4;
-            
-            static final VarHandle STATE;
-            static {
-                try {
-                    STATE = MethodHandles.lookup().findVarHandle(ZipLatest.class, "state", int.class);
-                } catch (ReflectiveOperationException e) {
-                    throw new ExceptionInInitializerError(e);
-                }
-            }
             
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
-                if (!STATE.compareAndSet(this, NEW, STARTED)) {
-                    return true; // ie sink did not cancel
-                }
+                ReentrantLock lock = new ReentrantLock();
+                Condition ready = lock.newCondition();
                 
                 abstract class HelperSink<X, Y> implements Conduit.StepSink<X> {
                     @Override
@@ -2143,28 +2095,18 @@ public class Conduits {
                         Objects.requireNonNull(e);
                         lock.lockInterruptibly();
                         try {
-                            if (state >= CANCELLED) {
-                                return false;
-                            }
                             if (setLatest1(e) == null) {
                                 if (getLatest2() == null) {
                                     // Wait until we have the first element from both sources
                                     do {
                                         ready.await();
-                                        if (state >= CANCELLED) {
-                                            return false;
-                                        }
                                     } while (getLatest2() == null);
                                     return true; // First emission handled by other thread
                                 }
                                 ready.signal();
                             }
                             T t = combiner.apply(latest1, latest2);
-                            if (!sink.offer(t)) {
-                                state = CANCELLED;
-                                return false;
-                            }
-                            return true;
+                            return sink.offer(t);
                         } finally {
                             lock.unlock();
                         }
@@ -2184,24 +2126,17 @@ public class Conduits {
                 
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("zipLatest-drainToSink",
                                                                            Thread.ofVirtual().name("thread-", 0).factory())) {
-                    scope.fork(() -> source1.drainToSink(new HelperSink1()));
-                    scope.fork(() -> source2.drainToSink(new HelperSink2()));
+                    var task1 = scope.fork(() -> source1.drainToSink(new HelperSink1()));
+                    var task2 = scope.fork(() -> source2.drainToSink(new HelperSink2()));
                     scope.join().throwIfFailed();
-                    return (state & CANCELLED) == 0;
+                    return task1.get() && task2.get();
                 }
             }
             
             @Override
             public void close() throws Exception {
-                lock.lock();
-                try {
-                    if ((state & CLOSED) != 0) {
-                        return;
-                    }
-                    state |= CLOSED;
-                    try (source1; source2) { }
-                } finally {
-                    lock.unlock();
+                try (source2) {
+                    source1.close();
                 }
             }
             
