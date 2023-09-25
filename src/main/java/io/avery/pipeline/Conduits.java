@@ -531,17 +531,15 @@ public class Conduits {
                         running = true;
                         joinAfterCall(scope, () -> {
                             try (source) {
-                                return source.drainToSink(sink);
+                                source.drainToSink(sink);
+                                sink.complete(); // Note: This may be the second time calling...
+                                return null;
                             }
                         });
                     }
-                    sink.complete(); // Note: This may be the second time calling...
                 } catch (Error | Exception e) {
-                    try {
-                        sink.completeExceptionally(running ? e : ex);
-                    } catch (Throwable t) {
-                        e.addSuppressed(t);
-                    }
+                    var exception = running ? e : ex;
+                    callSuppressed(e, () -> { sink.completeExceptionally(exception); return null; });
                     throw e;
                 }
             }
@@ -586,17 +584,15 @@ public class Conduits {
                         running = true;
                         joinAfterCall(scope, () -> {
                             try (source) {
-                                return sink.drainFromSource(source);
+                                sink.drainFromSource(source);
+                                sink.complete(); // Note: This may be the second time calling...
+                                return null;
                             }
                         });
                     }
-                    sink.complete(); // Note: This may be the second time calling...
                 } catch (Error | Exception e) {
-                    try {
-                        sink.completeExceptionally(running ? e : ex);
-                    } catch (Throwable t) {
-                        e.addSuppressed(t);
-                    }
+                    var exception = running ? e : ex;
+                    callSuppressed(e, () -> { sink.completeExceptionally(exception); return null; });
                     throw e;
                 }
             }
@@ -698,11 +694,8 @@ public class Conduits {
                             subSink.complete();
                             return drained;
                         } catch (Error | Exception e) {
-                            try {
-                                subSink.completeExceptionally(e);
-                            } catch (Throwable t) {
-                                e.addSuppressed(t);
-                            }
+                            var s = subSink;
+                            callSuppressed(e, () -> { s.completeExceptionally(e); return null; });
                             throw e;
                         }
                     });
@@ -775,11 +768,7 @@ public class Conduits {
                             composedComplete(sinks(scopedSinkByKey));
                             return drained;
                         } catch (Error | Exception e) {
-                            try {
-                                composedCompleteExceptionally(sinks(scopedSinkByKey), e);
-                            } catch (Throwable t) {
-                                e.addSuppressed(t);
-                            }
+                            callSuppressed(e, () -> { composedCompleteExceptionally(sinks(scopedSinkByKey), e); return null; });
                             throw e;
                         }
                     });
@@ -950,11 +939,7 @@ public class Conduits {
                             newSink.complete();
                             return null;
                         } catch (Error | Exception e) {
-                            try {
-                                newSink.completeExceptionally(e);
-                            } catch (Throwable t) {
-                                e.addSuppressed(t);
-                            }
+                            callSuppressed(e, () -> { newSink.completeExceptionally(e); return null; });
                             throw e;
                         }
                     });
@@ -2355,16 +2340,12 @@ public class Conduits {
         return runnable -> scope.fork(Executors.callable(runnable, null));
     }
     
-    static void composedClose(Stream<? extends Conduit.Source<?>> sources) throws Exception {
+    public static void composedClose(Stream<? extends Conduit.Source<?>> sources) throws Exception {
         Throwable[] ex = { null };
         sources.sequential().forEach(source -> {
             try {
                 source.close();
             } catch (Error | Exception e) {
-                if (e instanceof InterruptedException) {
-                    // Only fair to reinstate interrupt for later sources
-                    Thread.currentThread().interrupt();
-                }
                 if (ex[0] == null) {
                     ex[0] = e;
                 } else {
@@ -2375,14 +2356,13 @@ public class Conduits {
         throwAsException(ex[0]);
     }
     
-    static void composedComplete(Stream<? extends Conduit.Sink<?>> sinks) throws Exception {
+    public static void composedComplete(Stream<? extends Conduit.Sink<?>> sinks) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {
             try {
                 sink.complete();
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
-                    // Only fair to reinstate interrupt for later sinks
                     Thread.currentThread().interrupt();
                 }
                 if (ex[0] == null) {
@@ -2395,14 +2375,13 @@ public class Conduits {
         throwAsException(ex[0]);
     }
     
-    static void composedCompleteExceptionally(Stream<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
+    public static void composedCompleteExceptionally(Stream<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {
             try {
                 sink.completeExceptionally(exception);
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
-                    // Only fair to reinstate interrupt for later sinks
                     Thread.currentThread().interrupt();
                 }
                 if (ex[0] == null) {
@@ -2426,22 +2405,52 @@ public class Conduits {
     }
     
     private static <T> T joinAfterCall(StructuredTaskScope<?> scope, Callable<T> callable) throws Exception {
-        Callable<T> wrapped;
+        T t;
         try {
-            T t = callable.call();
-            wrapped = () -> t;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            wrapped = () -> { Thread.interrupted(); throw e; };
+            t = callable.call();
         } catch (Error | Exception e) {
-            wrapped = () -> { throw e; };
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                try {
+                    scope.join();
+                } catch (InterruptedException ignore) { }
+                Thread.interrupted();
+            } else {
+                try {
+                    scope.join();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            throw e;
         }
         try {
             scope.join();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return wrapped.call();
+        return t;
+    }
+    
+    private static void callSuppressed(Throwable exception, Callable<?> callable) {
+        if (exception instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+            try {
+                callable.call();
+            } catch (Throwable t) {
+                exception.addSuppressed(t);
+            }
+            Thread.interrupted();
+        } else {
+            try {
+                callable.call();
+            } catch (Throwable t) {
+                if (t instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                exception.addSuppressed(t);
+            }
+        }
     }
     
     private static class Indexed<T> {
@@ -2562,10 +2571,9 @@ public class Conduits {
                     }
                     sink.complete();
                 } catch (Throwable ex) {
-                    try {
-                        sink.completeExceptionally(ex);
-                    } catch (Throwable t) {
-                        ex.addSuppressed(t);
+                    callSuppressed(ex, () -> { sink.completeExceptionally(ex); return null; });
+                    if (ex instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
                     }
                     throw new CompletionException(ex);
                 }
