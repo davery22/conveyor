@@ -264,7 +264,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
         }
         
         @Override
-        public void completeExceptionally(Throwable ex) {
+        public void completeAbruptly(Throwable ex) {
             lock.lock();
             try {
                 if (state() == CLOSED) {

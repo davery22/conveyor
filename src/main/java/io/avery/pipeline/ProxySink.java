@@ -12,8 +12,8 @@ public abstract class ProxySink<T> implements Conduit.Sink<T> {
     }
     
     @Override
-    public void completeExceptionally(Throwable exception) throws Exception {
-        Conduits.composedCompleteExceptionally(sinks(), exception);
+    public void completeAbruptly(Throwable exception) throws Exception {
+        Conduits.composedCompleteAbruptly(sinks(), exception);
     }
     
     @Override

@@ -67,15 +67,15 @@ public class Conduit {
          * {@link UpstreamException}, wrapping the exception passed to this method, upon initiating any subsequent calls
          * to {@link StepSource#poll poll} or subsequent offers in {@link Source#drainToSink drainToSink}.
          *
-         * <p>A sink that delegates to downstream sinks must call {@code completeExceptionally} on each downstream sink
+         * <p>A sink that delegates to downstream sinks must call {@code completeAbruptly} on each downstream sink
          * before returning from this method, <strong>even if this method throws</strong>.
          *
          * <p>The default implementation does nothing.
          *
-         * @param ex
+         * @param exception
          * @throws Exception
          */
-        default void completeExceptionally(Throwable exception) throws Exception { }
+        default void completeAbruptly(Throwable exception) throws Exception { }
         
         // Stage/Segue chaining
         default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }

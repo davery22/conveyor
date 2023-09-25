@@ -292,9 +292,9 @@ public class Conduits {
     
     // danger of running provided stages in a local scope:
     // can be forced to wait until everything completes, even though outcome of interest is known quickly
-    // eg offering to an intermediary sink, interested if a downstream sink cancelled (!offer) or completed exceptionally
+    // eg offering to an intermediary sink, interested if a downstream sink cancelled (!offer) or completed abruptly
     // (X) if the sink is completed we can wake up - nope
-    //  - the sink may be completed exceptionally after being completed normally
+    //  - the sink may be completed abruptly after being completed normally
     //  - if we wake up we leak threads
     
     // multiple sinks that all offer to the same buffer - like a merge, but on the sink-side
@@ -343,12 +343,12 @@ public class Conduits {
     // and inner Stage(s) run the shared piece, because the outer should run it first, and not wait
     // until all inners are finished (if it waits at all).
     
-    // Does plain Sink need complete()/completeExceptionally()? (Can they be implicit in drainFromSource()?)
+    // Does plain Sink need complete()/completeAbruptly()? (Can they be implicit in drainFromSource()?)
     // Does plain Source need close()? (Can it be implicit in drainToSink()?)
     // If plain Sink's drainFromSource() implicitly completes downstreams, so should StepSink...
     // If plain Source's drainToSink() implicitly closes upstreams, so should StepSource...
     //
-    // Why not implicit close/complete/exceptionally for plain Sinks/Sources?
+    // Why not implicit close/complete[Abruptly] for plain Sinks/Sources?
     // 1. Forcing Sinks to replicate the try-catch-complete-suppress dance is obnoxious & error-prone
     // 2. Some operators - like plain flatMap - need Sink.drainFromSource to NOT complete the Sink
     // 3. If a sink throws, its fan-out siblings only see interrupt[edException], not original exception
@@ -368,7 +368,7 @@ public class Conduits {
     //  But is there a use case?
     
     // TODO: Throws before completing downstream vs throws after
-    // If this throws uncaught, we end up completing sink exceptionally, which may not be correct
+    // If this throws uncaught, we end up completing sink abruptly, which may not be correct
     // We would ideally throw out of the fork() within Silo#run(), but currently that is impossible...
     // TODO: We should ONLY throw an exception if the SignalSink received one
     //  - In that case, we're just giving it back to Sink#complete(error)
@@ -482,10 +482,10 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable ex) throws Exception {
                 lock.lock();
                 try {
-                    sink.completeExceptionally(ex);
+                    sink.completeAbruptly(ex);
                 } finally {
                     lock.unlock();
                 }
@@ -520,11 +520,11 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable ex) throws Exception {
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
-                    try (var scope = new FailureHandlingScope("recoverStep-completeExceptionally",
+                    try (var scope = new FailureHandlingScope("recoverStep-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
                         source.run(scopeExecutor(scope));
@@ -539,7 +539,7 @@ public class Conduits {
                     }
                 } catch (Error | Exception e) {
                     var exception = running ? e : ex;
-                    callSuppressed(e, () -> { sink.completeExceptionally(exception); return null; });
+                    callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
                     throw e;
                 }
             }
@@ -573,11 +573,11 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable ex) throws Exception {
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
-                    try (var scope = new FailureHandlingScope("recover-completeExceptionally",
+                    try (var scope = new FailureHandlingScope("recover-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
                         source.run(scopeExecutor(scope));
@@ -592,7 +592,7 @@ public class Conduits {
                     }
                 } catch (Error | Exception e) {
                     var exception = running ? e : ex;
-                    callSuppressed(e, () -> { sink.completeExceptionally(exception); return null; });
+                    callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
                     throw e;
                 }
             }
@@ -695,7 +695,7 @@ public class Conduits {
                             return drained;
                         } catch (Error | Exception e) {
                             var s = subSink;
-                            callSuppressed(e, () -> { s.completeExceptionally(e); return null; });
+                            callSuppressed(e, () -> { s.completeAbruptly(e); return null; });
                             throw e;
                         }
                     });
@@ -768,7 +768,7 @@ public class Conduits {
                             composedComplete(sinks(scopedSinkByKey));
                             return drained;
                         } catch (Error | Exception e) {
-                            callSuppressed(e, () -> { composedCompleteExceptionally(sinks(scopedSinkByKey), e); return null; });
+                            callSuppressed(e, () -> { composedCompleteAbruptly(sinks(scopedSinkByKey), e); return null; });
                             throw e;
                         }
                     });
@@ -927,7 +927,7 @@ public class Conduits {
                     //   `source.andThen(sinkMapper.andThen(sink))`
                     //
                     // A potential difference is in exception handling. We process newSink in this thread, and throw if
-                    // the 'silo' below throws. This means that exception may be passed to sink.completeExceptionally
+                    // the 'silo' below throws. This means that exception may be passed to sink.completeAbruptly
                     // sometime after this method exits. If there is an async boundary between newSink and sink, sink
                     // would see a different exception than it would have in the `sinkMapper.andThen(sink)` version. No
                     // heroics here can perfectly match the behavior of that version, so instead of trying and failing
@@ -939,7 +939,7 @@ public class Conduits {
                             newSink.complete();
                             return null;
                         } catch (Error | Exception e) {
-                            callSuppressed(e, () -> { newSink.completeExceptionally(e); return null; });
+                            callSuppressed(e, () -> { newSink.completeAbruptly(e); return null; });
                             throw e;
                         }
                     });
@@ -1040,12 +1040,12 @@ public class Conduits {
             }
             
             @Override
-            public void completeExceptionally(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable ex) throws Exception {
                 if (state == CLOSED) {
                     return;
                 }
                 state = CLOSED;
-                sink.completeExceptionally(ex);
+                sink.completeAbruptly(ex);
             }
             
             @Override
@@ -1239,7 +1239,7 @@ public class Conduits {
                 }
                 
                 @Override
-                public void completeExceptionally(Throwable ex) {
+                public void completeAbruptly(Throwable ex) {
                     lock.lock();
                     try {
                         if (state == CLOSED) {
@@ -1433,7 +1433,7 @@ public class Conduits {
                 }
                 
                 @Override
-                public void completeExceptionally(Throwable ex) {
+                public void completeAbruptly(Throwable ex) {
                     lock.lock();
                     try {
                         if (state == CLOSED) {
@@ -2375,11 +2375,11 @@ public class Conduits {
         throwAsException(ex[0]);
     }
     
-    public static void composedCompleteExceptionally(Stream<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
+    public static void composedCompleteAbruptly(Stream<? extends Conduit.Sink<?>> sinks, Throwable exception) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {
             try {
-                sink.completeExceptionally(exception);
+                sink.completeAbruptly(exception);
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
@@ -2571,7 +2571,7 @@ public class Conduits {
                     }
                     sink.complete();
                 } catch (Throwable ex) {
-                    callSuppressed(ex, () -> { sink.completeExceptionally(ex); return null; });
+                    callSuppressed(ex, () -> { sink.completeAbruptly(ex); return null; });
                     if (ex instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
                     }
@@ -2621,8 +2621,8 @@ public class Conduits {
         }
         
         @Override
-        public void completeExceptionally(Throwable ex) throws Exception {
-            sink.completeExceptionally(ex);
+        public void completeAbruptly(Throwable ex) throws Exception {
+            sink.completeAbruptly(ex);
         }
     }
     
