@@ -1,22 +1,23 @@
 package io.avery.pipeline;
 
 import java.util.concurrent.Executor;
+import java.util.stream.Stream;
 
 public abstract class ProxySink<T> implements Conduit.Sink<T> {
-    protected abstract Conduit.Sink<?> sink();
+    protected abstract Stream<? extends Conduit.Sink<?>> sinks();
     
     @Override
     public void complete() throws Exception {
-        sink().complete();
+        Conduits.composedComplete(sinks());
     }
     
     @Override
-    public void completeExceptionally(Throwable ex) throws Exception {
-        sink().completeExceptionally(ex);
+    public void completeExceptionally(Throwable exception) throws Exception {
+        Conduits.composedCompleteExceptionally(sinks(), exception);
     }
     
     @Override
     public void run(Executor executor) {
-        sink().run(executor);
+        sinks().sequential().forEach(sink -> sink.run(executor));
     }
 }

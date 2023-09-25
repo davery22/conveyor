@@ -609,7 +609,7 @@ public class Conduits {
     public static <T> Conduit.SourceOperator<T, T> alsoClose(Conduit.Source<?> sourceToClose) {
         Objects.requireNonNull(sourceToClose);
         
-        class AlsoClose extends FanInSource<T> {
+        class AlsoClose extends ProxySource<T> {
             final Conduit.Source<T> source;
             
             AlsoClose(Conduit.Source<T> source) {
@@ -633,7 +633,7 @@ public class Conduits {
     public static <T> Conduit.SinkOperator<T, T> alsoComplete(Conduit.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         
-        class AlsoComplete extends FanOutSink<T> {
+        class AlsoComplete extends ProxySink<T> {
             final Conduit.Sink<T> sink;
             
             AlsoComplete(Conduit.Sink<T> sink) {
@@ -812,8 +812,8 @@ public class Conduits {
             }
             
             @Override
-            protected Conduit.Sink<?> sink() {
-                return sink;
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return Stream.of(sink);
             }
         }
         
@@ -866,8 +866,8 @@ public class Conduits {
             }
             
             @Override
-            protected Conduit.Sink<?> sink() {
-                return sink;
+            protected Stream<? extends Conduit.Sink<?>> sinks() {
+                return Stream.of(sink);
             }
         }
         
@@ -949,8 +949,8 @@ public class Conduits {
             }
             
             @Override
-            protected Conduit.Source<?> source() {
-                return source;
+            protected Stream<? extends Conduit.Source<?>> sources() {
+                return Stream.of(source);
             }
         }
         
@@ -1545,7 +1545,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Sink<T> balance(List<? extends Conduit.Sink<T>> sinks) {
-        class Balance extends FanOutSink<T> {
+        class Balance extends ProxySink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource",
@@ -1568,7 +1568,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.StepSink<T> broadcast(List<? extends Conduit.StepSink<T>> sinks) {
-        class Broadcast extends FanOutSink<T> implements Conduit.StepSink<T> {
+        class Broadcast extends ProxySink<T> implements Conduit.StepSink<T> {
             @Override
             public boolean offer(T input) throws Exception {
                 for (var sink : sinks) {
@@ -1612,7 +1612,7 @@ public class Conduits {
             }
         };
         
-        class Route extends FanOutSink<T> implements Conduit.StepSink<T> {
+        class Route extends ProxySink<T> implements Conduit.StepSink<T> {
             boolean done = false;
             
             @Override
@@ -1643,7 +1643,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.StepSink<T> spillStep(List<? extends Conduit.StepSink<T>> sinks) {
-        class SpillStep extends FanOutSink<T> implements Conduit.StepSink<T> {
+        class SpillStep extends ProxySink<T> implements Conduit.StepSink<T> {
             int i = 0;
             
             @Override
@@ -1666,7 +1666,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Sink<T> spill(List<? extends Conduit.Sink<T>> sinks) {
-        class Spill extends FanOutSink<T> {
+        class Spill extends ProxySink<T> {
             @Override
             public boolean drainFromSource(Conduit.StepSource<? extends T> source) throws Exception {
                 for (var sink : sinks) {
@@ -1689,7 +1689,7 @@ public class Conduits {
     // --- Sources ---
     
     public static <T> Conduit.StepSource<T> concatStep(List<? extends Conduit.StepSource<T>> sources) {
-        class ConcatStep extends FanInSource<T> implements Conduit.StepSource<T> {
+        class ConcatStep extends ProxySource<T> implements Conduit.StepSource<T> {
             int i = 0;
             
             @Override
@@ -1713,7 +1713,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Source<T> concat(List<? extends Conduit.Source<T>> sources) {
-        class Concat extends FanInSource<T> {
+        class Concat extends ProxySource<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws Exception {
                 for (var source : sources) {
@@ -1734,7 +1734,7 @@ public class Conduits {
     }
     
     public static <T> Conduit.Source<T> merge(List<? extends Conduit.Source<T>> sources) {
-        class Merge extends FanInSource<T> {
+        class Merge extends ProxySource<T> {
             @Override
             public boolean drainToSink(Conduit.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink",
@@ -1758,7 +1758,7 @@ public class Conduits {
     
     public static <T> Conduit.StepSource<T> mergeSorted(List<? extends Conduit.StepSource<T>> sources,
                                                         Comparator<? super T> comparator) {
-        class MergeSorted extends FanInSource<T> implements Conduit.StepSource<T> {
+        class MergeSorted extends ProxySource<T> implements Conduit.StepSource<T> {
             final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = NEW;
             
@@ -1810,7 +1810,7 @@ public class Conduits {
         Objects.requireNonNull(source2);
         Objects.requireNonNull(combiner);
         
-        class Zip extends FanInSource<T> implements Conduit.StepSource<T> {
+        class Zip extends ProxySource<T> implements Conduit.StepSource<T> {
             boolean done = false;
             
             @Override
@@ -1843,7 +1843,7 @@ public class Conduits {
         Objects.requireNonNull(source2);
         Objects.requireNonNull(combiner);
         
-        class ZipLatest extends FanInSource<T> {
+        class ZipLatest extends ProxySource<T> {
             T1 latest1 = null;
             T2 latest2 = null;
             
