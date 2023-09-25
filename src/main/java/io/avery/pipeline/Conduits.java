@@ -16,6 +16,8 @@ import java.util.stream.Stream;
 public class Conduits {
     private Conduits() {} // Utility
     
+    private static final Throwable NULL_EXCEPTION = new Throwable();
+    
     // concat() could work by creating a Conduit.Source that switches between 2 Conduit.Sources,
     // or by creating a Pipeline.Source that consumes one Conduit.Source and then another.
     // The latter case reduces to the former case, since Pipeline.Source needs to expose a Conduit.StepSource
@@ -481,7 +483,6 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                Objects.requireNonNull(ex);
                 lock.lock();
                 try {
                     sink.completeExceptionally(ex);
@@ -520,7 +521,6 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                Objects.requireNonNull(ex);
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
@@ -576,7 +576,6 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                Objects.requireNonNull(ex);
                 boolean running = false;
                 try {
                     var source = Objects.requireNonNull(mapper.apply(ex));
@@ -1057,7 +1056,6 @@ public class Conduits {
             
             @Override
             public void completeExceptionally(Throwable ex) throws Exception {
-                Objects.requireNonNull(ex);
                 if (state == CLOSED) {
                     return;
                 }
@@ -1257,14 +1255,13 @@ public class Conduits {
                 
                 @Override
                 public void completeExceptionally(Throwable ex) {
-                    Objects.requireNonNull(ex);
                     lock.lock();
                     try {
                         if (state == CLOSED) {
                             return;
                         }
                         state = CLOSED;
-                        exception = ex;
+                        exception = ex == null ? NULL_EXCEPTION : ex;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
                     } finally {
@@ -1284,7 +1281,7 @@ public class Conduits {
                                 item = completionBuffer.peek();
                                 if (state >= COMPLETING) {
                                     if (exception != null) {
-                                        throw new UpstreamException(exception);
+                                        throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
                                     } else if (state == CLOSED || item == null) {
                                         return null;
                                     }
@@ -1452,14 +1449,13 @@ public class Conduits {
                 
                 @Override
                 public void completeExceptionally(Throwable ex) {
-                    Objects.requireNonNull(ex);
                     lock.lock();
                     try {
                         if (state == CLOSED) {
                             return;
                         }
                         state = CLOSED;
-                        exception = ex;
+                        exception = ex == null ? NULL_EXCEPTION : ex;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
                     } finally {
@@ -1479,7 +1475,7 @@ public class Conduits {
                                 item = completionBuffer.peek();
                                 if (state >= COMPLETING) {
                                     if (exception != null) {
-                                        throw new UpstreamException(exception);
+                                        throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
                                     } else if (state == CLOSED || item == null) {
                                         return null;
                                     }

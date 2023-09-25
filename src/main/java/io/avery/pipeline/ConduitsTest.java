@@ -53,11 +53,6 @@ class ConduitsTest {
                             .andThen(buffer(16))
                             .andThen(Conduits
                                 .gather(flatMap(e -> {
-                                    // This completes the shared buffer (below) and closes the owned buffer (above)
-                                    // Further offers to the shared buffer will return false,
-                                    // causing owned buffers to close, causing inner sinks to complete
-                                    // With no exception, and eagerCancel=false, only source completion can tell groupBy to stop
-                                    // Even with eagerCancel=true, every layer of async boundaries necessitates another offer
                                     if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
                                     return Stream.of(e);
                                 }))
