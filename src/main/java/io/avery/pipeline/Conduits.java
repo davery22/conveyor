@@ -529,13 +529,11 @@ public class Conduits {
                                                               asyncExceptionHandler)) {
                         source.run(scopeExecutor(scope));
                         running = true;
-                        joinAfterCall(scope, () -> {
-                            try (source) {
-                                source.drainToSink(sink);
-                                sink.complete(); // Note: This may be the second time calling...
-                                return null;
-                            }
-                        });
+                        try (source) {
+                            source.drainToSink(sink);
+                            sink.complete(); // Note: This may be the second time calling...
+                        }
+                        scope.join();
                     }
                 } catch (Error | Exception e) {
                     var exception = running ? e : ex;
@@ -582,13 +580,11 @@ public class Conduits {
                                                               asyncExceptionHandler)) {
                         source.run(scopeExecutor(scope));
                         running = true;
-                        joinAfterCall(scope, () -> {
-                            try (source) {
-                                sink.drainFromSource(source);
-                                sink.complete(); // Note: This may be the second time calling...
-                                return null;
-                            }
-                        });
+                        try (source) {
+                            sink.drainFromSource(source);
+                            sink.complete(); // Note: This may be the second time calling...
+                        }
+                        scope.join();
                     }
                 } catch (Error | Exception e) {
                     var exception = running ? e : ex;
@@ -669,36 +665,35 @@ public class Conduits {
                 try (var scope = new FailureHandlingScope("split-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    return joinAfterCall(scope, () -> {
-                        Conduit.StepSink<? super T> subSink = Conduits.stepSink(e -> true);
-                        var exec = scopeExecutor(scope);
-                        try {
-                            boolean drained = true;
-                            boolean split = true;
-                            for (T val; (val = source.poll()) != null; ) {
-                                if ((!splitAfter && predicate.test(val)) || split) {
-                                    subSink.complete();
-                                    scope.join();
-                                    subSink = sinkFactory.apply(val);
-                                    subSink.run(exec);
-                                }
-                                split = splitAfter && predicate.test(val);
-                                if (!subSink.offer(val)) {
-                                    if (eagerCancel) {
-                                        drained = false;
-                                        break;
-                                    }
-                                    split = true;
-                                }
+                    Conduit.StepSink<? super T> subSink = Conduits.stepSink(e -> true);
+                    var exec = scopeExecutor(scope);
+                    try {
+                        boolean drained = true;
+                        boolean split = true;
+                        for (T val; (val = source.poll()) != null; ) {
+                            if ((!splitAfter && predicate.test(val)) || split) {
+                                subSink.complete();
+                                scope.join();
+                                subSink = sinkFactory.apply(val);
+                                subSink.run(exec);
                             }
-                            subSink.complete();
-                            return drained;
-                        } catch (Error | Exception e) {
-                            var s = subSink;
-                            callSuppressed(e, () -> { s.completeAbruptly(e); return null; });
-                            throw e;
+                            split = splitAfter && predicate.test(val);
+                            if (!subSink.offer(val)) {
+                                if (eagerCancel) {
+                                    drained = false;
+                                    break;
+                                }
+                                split = true;
+                            }
                         }
-                    });
+                        subSink.complete();
+                        scope.join();
+                        return drained;
+                    } catch (Error | Exception e) {
+                        var s = subSink;
+                        callSuppressed(e, () -> { s.completeAbruptly(e); return null; });
+                        throw e;
+                    }
                 }
             }
         }
@@ -734,44 +729,43 @@ public class Conduits {
                 try (var scope = new FailureHandlingScope("groupBy-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    return joinAfterCall(scope, () -> {
-                        try {
-                            boolean drained = true;
-                            for (T val; (val = source.poll()) != null; ) {
-                                K key = classifier.apply(val);
-                                var s = scopedSinkByKey.get(key);
-                                if (s == TOMBSTONE) {
-                                    continue;
-                                }
-                                @SuppressWarnings("unchecked")
-                                var scopedSink = (ScopedSink<T>) s;
-                                if (s == null) {
-                                    var subSink = Objects.requireNonNull(sinkFactory.apply(key, val));
-                                    var subScope = new SubScope(scope);
-                                    scopedSink = new ScopedSink<>(subScope, subSink);
-                                    scopedSinkByKey.put(key, scopedSink);
-                                    // Note that running a sink per key could produce unbounded threads.
-                                    // We leave this to the sinkFactory to resolve if necessary, eg by tracking
-                                    // incomplete sinks and returning a no-op Sink if maxed (thus dropping elements).
-                                    subSink.run(subScope);
-                                }
-                                if (!scopedSink.sink.offer(val)) {
-                                    if (eagerCancel) {
-                                        drained = false;
-                                        break;
-                                    }
-                                    scopedSink.sink.complete();
-                                    scopedSink.scope.join();
-                                    scopedSinkByKey.put(key, TOMBSTONE);
-                                }
+                    try {
+                        boolean drained = true;
+                        for (T val; (val = source.poll()) != null; ) {
+                            K key = classifier.apply(val);
+                            var s = scopedSinkByKey.get(key);
+                            if (s == TOMBSTONE) {
+                                continue;
                             }
-                            composedComplete(sinks(scopedSinkByKey));
-                            return drained;
-                        } catch (Error | Exception e) {
-                            callSuppressed(e, () -> { composedCompleteAbruptly(sinks(scopedSinkByKey), e); return null; });
-                            throw e;
+                            @SuppressWarnings("unchecked")
+                            var scopedSink = (ScopedSink<T>) s;
+                            if (s == null) {
+                                var subSink = Objects.requireNonNull(sinkFactory.apply(key, val));
+                                var subScope = new SubScope(scope);
+                                scopedSink = new ScopedSink<>(subScope, subSink);
+                                scopedSinkByKey.put(key, scopedSink);
+                                // Note that running a sink per key could produce unbounded threads.
+                                // We leave this to the sinkFactory to resolve if necessary, eg by tracking
+                                // incomplete sinks and returning a no-op Sink if maxed (thus dropping elements).
+                                subSink.run(subScope);
+                            }
+                            if (!scopedSink.sink.offer(val)) {
+                                if (eagerCancel) {
+                                    drained = false;
+                                    break;
+                                }
+                                scopedSink.sink.complete();
+                                scopedSink.scope.join();
+                                scopedSinkByKey.put(key, TOMBSTONE);
+                            }
                         }
-                    });
+                        composedComplete(sinks(scopedSinkByKey));
+                        scope.join();
+                        return drained;
+                    } catch (Error | Exception e) {
+                        callSuppressed(e, () -> { composedCompleteAbruptly(sinks(scopedSinkByKey), e); return null; });
+                        throw e;
+                    }
                 }
             }
         }
@@ -803,11 +797,12 @@ public class Conduits {
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     subSource.run(scopeExecutor(scope));
-                    return draining = joinAfterCall(scope, () -> {
-                        try (subSource) {
-                            return subSource.drainToSink(sink);
-                        }
-                    });
+                    boolean drained;
+                    try (subSource) {
+                        drained = subSource.drainToSink(sink);
+                    }
+                    scope.join();
+                    return drained;
                 }
             }
             
@@ -855,11 +850,10 @@ public class Conduits {
                     // behave as if it was
                     //   `source.andThen(sourceMapper).andThen(sink)`
                     newSource.run(scopeExecutor(scope));
-                    joinAfterCall(scope, () -> {
-                        try (newSource) {
-                            return sink.drainFromSource(newSource);
-                        }
-                    });
+                    try (newSource) {
+                        sink.drainFromSource(newSource);
+                    }
+                    scope.join();
                 }
                 
                 return signalSource.drained;
@@ -933,16 +927,14 @@ public class Conduits {
                     // heroics here can perfectly match the behavior of that version, so instead of trying and failing
                     // in subtle ways, we go with the more obvious implementation.
                     newSink.run(scopeExecutor(scope));
-                    joinAfterCall(scope, () -> {
-                        try {
-                            source.drainToSink(newSink);
-                            newSink.complete();
-                            return null;
-                        } catch (Error | Exception e) {
-                            callSuppressed(e, () -> { newSink.completeAbruptly(e); return null; });
-                            throw e;
-                        }
-                    });
+                    try {
+                        source.drainToSink(newSink);
+                        newSink.complete();
+                        scope.join();
+                    } catch (Error | Exception e) {
+                        callSuppressed(e, () -> { newSink.completeAbruptly(e); return null; });
+                        throw e;
+                    }
                 }
                 
                 return signalSink.drained;
@@ -2409,24 +2401,6 @@ public class Conduits {
             case Exception e -> throw e;
             case Error e -> throw e;
             case Throwable e -> throw new IllegalArgumentException("Unexpected Throwable", e);
-        }
-    }
-    
-    private static <T> T joinAfterCall(StructuredTaskScope<?> scope, Callable<T> callable) throws Exception {
-        boolean interrupted = false;
-        try {
-            return callable.call();
-        } catch (InterruptedException e) {
-            interrupted = true;
-            throw e;
-        } finally {
-            try {
-                scope.join();
-            } catch (InterruptedException e) {
-                if (!interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-            }
         }
     }
     
