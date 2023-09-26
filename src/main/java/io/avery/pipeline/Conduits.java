@@ -2200,8 +2200,9 @@ public class Conduits {
         }
         
         class Extrapolate implements TimedSegue.Core<T, T> {
+            T prev = null;
             Deque<T> queue = null;
-            Iterator<? extends T> iter = null;
+            Iterator<? extends T> iter = Collections.emptyIterator();
             boolean done = false;
             
             @Override
@@ -2217,8 +2218,9 @@ public class Conduits {
             
             @Override
             public void onOffer(TimedSegue.SinkController ctl, T input) {
+                prev = null;
+                iter = Collections.emptyIterator();
                 queue.offer(input);
-                iter = null;
                 ctl.latchSourceDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
                     ctl.latchSinkDeadline(Instant.MAX);
@@ -2230,18 +2232,24 @@ public class Conduits {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchSourceDeadline(Instant.MIN);
                     ctl.latchOutput(head);
-                    if (queue.peek() != null) {
-                        ctl.latchSourceDeadline(Instant.MIN);
-                    } else if (!done) {
-                        iter = Objects.requireNonNull(mapper.apply(head)); // TODO: May throw
-                        ctl.latchSourceDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                    if (!done) {
+                        prev = head;
                     } else {
                         ctl.latchClose();
                     }
                 } else if (!done) {
-                    ctl.latchOutput(iter.next());
-                    ctl.latchSourceDeadline(iter.hasNext() ? Instant.MIN : Instant.MAX);
+                    if ((head = prev) != null) {
+                        prev = null;
+                        iter = Objects.requireNonNull(mapper.apply(head));
+                    }
+                    if (iter.hasNext()) {
+                        ctl.latchOutput(iter.next());
+                        ctl.latchSourceDeadline(Instant.MIN);
+                    } else {
+                        ctl.latchSourceDeadline(Instant.MAX);
+                    }
                 } else {
                     ctl.latchClose();
                 }
