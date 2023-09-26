@@ -2413,31 +2413,21 @@ public class Conduits {
     }
     
     private static <T> T joinAfterCall(StructuredTaskScope<?> scope, Callable<T> callable) throws Exception {
-        T t;
+        boolean interrupted = false;
         try {
-            t = callable.call();
-        } catch (Error | Exception e) {
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-                try {
-                    scope.join();
-                } catch (InterruptedException ignore) { }
-                Thread.interrupted();
-            } else {
-                try {
-                    scope.join();
-                } catch (InterruptedException ie) {
+            return callable.call();
+        } catch (InterruptedException e) {
+            interrupted = true;
+            throw e;
+        } finally {
+            try {
+                scope.join();
+            } catch (InterruptedException e) {
+                if (!interrupted) {
                     Thread.currentThread().interrupt();
                 }
             }
-            throw e;
         }
-        try {
-            scope.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        return t;
     }
     
     private static void callSuppressed(Throwable exception, Callable<?> callable) {
