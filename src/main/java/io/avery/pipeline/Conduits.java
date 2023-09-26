@@ -16,7 +16,7 @@ import java.util.stream.Stream;
 public class Conduits {
     private Conduits() {} // Utility
     
-    private static final Throwable NULL_EXCEPTION = new Throwable();
+    static final Throwable NULL_EXCEPTION = new Throwable();
     
     // concat() could work by creating a Conduit.Source that switches between 2 Conduit.Sources,
     // or by creating a Pipeline.Source that consumes one Conduit.Source and then another.
@@ -2183,6 +2183,138 @@ public class Conduits {
         
         var core = new KeepAlive();
         return new TimedSegue<>(core);
+    }
+    
+    public static <T> Conduit.StepSegue<T, T> rendezvous() {
+        class Rendezvous implements Conduit.StepSegue<T, T> {
+            final ReentrantLock sinkLock = new ReentrantLock();
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition given = lock.newCondition();
+            final Condition taken = lock.newCondition();
+            Throwable exception = null;
+            T element = null;
+            int state = RUNNING;
+            
+            private static final int RUNNING    = 0;
+            private static final int COMPLETING = 1;
+            private static final int CLOSED     = 2;
+            
+            class Sink implements Conduit.StepSink<T> {
+                @Override
+                public boolean offer(T input) throws Exception {
+                    Objects.requireNonNull(input);
+                    sinkLock.lockInterruptibly(); // Prevent overwriting offers
+                    try {
+                        lock.lockInterruptibly();
+                        try {
+                            if (state >= COMPLETING) {
+                                return false;
+                            }
+                            element = input;
+                            given.signal();
+                            do {
+                                taken.await();
+                                if (state >= COMPLETING) {
+                                    return element == null;
+                                }
+                            } while (element != null);
+                            return true;
+                        } finally {
+                            lock.unlock();
+                        }
+                    } finally {
+                        sinkLock.unlock();
+                    }
+                }
+                
+                @Override
+                public void complete() throws Exception {
+                    lock.lockInterruptibly();
+                    try {
+                        if (state >= COMPLETING) {
+                            return;
+                        }
+                        state = COMPLETING;
+                        taken.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void completeAbruptly(Throwable ex) {
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        exception = ex == null ? NULL_EXCEPTION : ex;
+                        taken.signalAll();
+                        given.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            class Source implements Conduit.StepSource<T> {
+                @Override
+                public T poll() throws Exception {
+                    lock.lockInterruptibly();
+                    try {
+                        if (state == CLOSED) {
+                            if (exception != null) {
+                                throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                            }
+                            return null;
+                        }
+                        while (element == null) {
+                            given.await();
+                            if (state == CLOSED) {
+                                if (exception != null) {
+                                    throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                                }
+                                return null;
+                            }
+                        }
+                        T ret = element;
+                        element = null;
+                        taken.signal();
+                        return ret;
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void close() {
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        taken.signalAll();
+                        given.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            @Override
+            public Conduit.StepSink<T> sink() {
+                return new Sink();
+            }
+            
+            @Override
+            public Conduit.StepSource<T> source() {
+                return new Source();
+            }
+        }
+        
+        return new Rendezvous();
     }
     
     public static <T> Conduit.StepSegue<T ,T> buffer(int bufferLimit) {

@@ -67,8 +67,6 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
     
-    private static final Throwable NULL_EXCEPTION = new Throwable();
-    
     TimedSegue(Core<In, Out> core) {
         this.core = core;
     }
@@ -269,7 +267,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                     return;
                 }
                 setState(CLOSED);
-                exception = ex == null ? NULL_EXCEPTION : ex;
+                exception = ex == null ? Conduits.NULL_EXCEPTION : ex;
                 readyForSink.signalAll();
                 readyForSource.signalAll();
             } finally {
@@ -286,14 +284,14 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 try {
                     if (state() == CLOSED) {
                         if (exception != null) {
-                            throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                            throw new UpstreamException(exception == Conduits.NULL_EXCEPTION ? null : exception);
                         }
                         return null;
                     }
                     initIfNew();
                     if (!awaitSourceDeadline()) {
                         if (exception != null) {
-                            throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                            throw new UpstreamException(exception == Conduits.NULL_EXCEPTION ? null : exception);
                         }
                         return null;
                     }
