@@ -35,7 +35,7 @@ class ConduitsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
-            var buffer = buffer(16);
+            var buffer = Conduits.buffer(16);
             var noCompleteBuffer = Conduits.stepSink(buffer.sink()::offer);
             
             lineSource()
@@ -50,7 +50,7 @@ class ConduitsTest {
                         t -> { },
                         (k, v) -> Conduits
                             .flatMap(e -> Conduits.source(Stream.of(k, e, v)), t -> { })
-                            .andThen(buffer(16))
+                            .andThen(Conduits.buffer(16))
                             .andThen(Conduits
                                 .gather(flatMap(e -> {
                                     if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
@@ -129,9 +129,9 @@ class ConduitsTest {
 //                    Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; })
 //                )))
                 .andThen(Conduits.broadcast(List.of(
-                    ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> a[0] += e+1); return true; })),
-                    ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
-                    ConduitsTest.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
+                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> a[0] += e+1); return true; })),
+                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
+                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
                 )))
                 .run(Conduits.scopeExecutor(scope));
             
@@ -180,7 +180,7 @@ class ConduitsTest {
             scope.join();
 
 //            lineSource()
-//                .andThen(ConduitsTest.buffer(4))
+//                .andThen(Conduits.buffer(4))
 //                .andThen(Conduits.balance(
 //                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
 //                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
@@ -233,7 +233,7 @@ class ConduitsTest {
                 )
                 .andThen(Conduits
                     .gather(ConduitsTest.flatMap((String s) -> Stream.of(s+"22")))
-                    .andThen(ConduitsTest.buffer(16))
+                    .andThen(Conduits.buffer(16))
                 )
                 .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(Conduits.scopeExecutor(scope));
@@ -271,10 +271,6 @@ class ConduitsTest {
             if (iter.hasNext()) return iter.next();
             throw new IllegalStateException("TRIP");
         });
-    }
-    
-    private static <T> Conduit.StepSegue<T, T> buffer(int bufferLimit) {
-        return Conduits.extrapolate(null, e -> Collections.emptyIterator(), bufferLimit);
     }
     
     private static <T, R> Gatherer<T, ?, R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {

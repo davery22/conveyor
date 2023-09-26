@@ -2163,7 +2163,9 @@ public class Conduits {
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head);
-                    ctl.latchSourceDeadline((!queue.isEmpty() || done) ? Instant.MIN : clock().instant().plus(timeout));
+                    if (queue.isEmpty() && !done) {
+                        ctl.latchSourceDeadline(clock().instant().plus(timeout));
+                    }
                 } else if (!done) {
                     ctl.latchOutput(extraSupplier.get());
                     ctl.latchSourceDeadline(clock().instant().plus(timeout));
@@ -2180,6 +2182,56 @@ public class Conduits {
         }
         
         var core = new KeepAlive();
+        return new TimedSegue<>(core);
+    }
+    
+    public static <T> Conduit.StepSegue<T ,T> buffer(int bufferLimit) {
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        
+        class Buffer implements TimedSegue.Core<T, T> {
+            Deque<T> queue = null;
+            boolean done = false;
+            
+            @Override
+            public void onInit(TimedSegue.SinkController ctl) {
+                queue = new ArrayDeque<>(bufferLimit);
+            }
+            
+            @Override
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
+                queue.offer(input);
+                ctl.latchSourceDeadline(Instant.MIN);
+                if (queue.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
+            }
+            
+            @Override
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
+                T head = queue.poll();
+                if (head != null) {
+                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOutput(head);
+                    if (queue.peek() != null) {
+                        return;
+                    } else if (!done) {
+                        ctl.latchSourceDeadline(Instant.MAX);
+                        return;
+                    } // else fall-through
+                }
+                ctl.latchClose();
+            }
+            
+            @Override
+            public void onComplete(TimedSegue.SinkController ctl) {
+                done = true;
+                ctl.latchSourceDeadline(Instant.MIN);
+            }
+        }
+        
+        var core = new Buffer();
         return new TimedSegue<>(core);
     }
 
@@ -2224,7 +2276,6 @@ public class Conduits {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
-                    ctl.latchSourceDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (!done) {
                         prev = head;
@@ -2238,7 +2289,6 @@ public class Conduits {
                     }
                     if (iter.hasNext()) {
                         ctl.latchOutput(iter.next());
-                        ctl.latchSourceDeadline(Instant.MIN);
                     } else {
                         ctl.latchSourceDeadline(Instant.MAX);
                     }
