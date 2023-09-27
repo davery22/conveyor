@@ -1,4 +1,4 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
@@ -6,8 +6,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collector;
 
-public class Conduit {
-    private Conduit() {}
+public class Belt {
+    private Belt() {}
     
     // --- Stages ---
     
@@ -19,14 +19,14 @@ public class Conduit {
         default void run(Executor executor) { }
     }
     
-    public sealed interface Silo extends Stage permits Conduits.ClosedSilo, Conduits.ChainSilo {
+    public sealed interface Silo extends Stage permits Belts.ClosedSilo, Belts.ChainSilo {
         // Stage/Segue chaining
-        default Silo compose(Silo before) { return new Conduits.ChainSilo(before, this); }
-        default <T> Sink<T> compose(Sink<T> before) { return new Conduits.ChainSink<>(before, this); }
-        default <T> StepSink<T> compose(StepSink<T> before) { return new Conduits.ChainStepSink<>(before, this); }
-        default Silo andThen(Silo after) { return new Conduits.ChainSilo(this, after); }
-        default <T> Source<T> andThen(Source<T> after) { return new Conduits.ChainSource<>(this, after); }
-        default <T> StepSource<T> andThen(StepSource<T> after) { return new Conduits.ChainStepSource<>(this, after); }
+        default Silo compose(Silo before) { return new Belts.ChainSilo(before, this); }
+        default <T> Sink<T> compose(Sink<T> before) { return new Belts.ChainSink<>(before, this); }
+        default <T> StepSink<T> compose(StepSink<T> before) { return new Belts.ChainStepSink<>(before, this); }
+        default Silo andThen(Silo after) { return new Belts.ChainSilo(this, after); }
+        default <T> Source<T> andThen(Source<T> after) { return new Belts.ChainSource<>(this, after); }
+        default <T> StepSource<T> andThen(StepSource<T> after) { return new Belts.ChainStepSource<>(this, after); }
     }
     
     @FunctionalInterface
@@ -78,12 +78,12 @@ public class Conduit {
         default void completeAbruptly(Throwable exception) throws Exception { }
         
         // Stage/Segue chaining
-        default Silo compose(StepSource<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
-        default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
-        default <T> StepSink<T> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
-        default Sink<In> andThen(Silo after) { return new Conduits.ChainSink<>(this, after); }
-        default <T> Segue<In, T> andThen(Source<T> after) { return new Conduits.ChainSegue<>(this, after); }
-        default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { return new Conduits.ChainSinkStepSource<>(this, after); }
+        default Silo compose(StepSource<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default Sink<In> andThen(Silo after) { return new Belts.ChainSink<>(this, after); }
+        default <T> Segue<In, T> andThen(Source<T> after) { return new Belts.ChainSegue<>(this, after); }
+        default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { return new Belts.ChainSinkStepSource<>(this, after); }
         
         // Operator chaining
         default <T> Sink<T> compose(SinkOperator<T, In> mapper) { return mapper.andThen(this); }
@@ -142,12 +142,12 @@ public class Conduit {
         }
         
         // Stage/Segue chaining
-        default Source<Out> compose(Silo before) { return new Conduits.ChainSource<>(before, this); }
-        default <T> Segue<T, Out> compose(Sink<T> before) { return new Conduits.ChainSegue<>(before, this); }
-        default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { return new Conduits.ChainStepSinkSource<>(before, this); }
-        default Silo andThen(StepSink<? super Out> after) { return new Conduits.ClosedSilo<>(this, after); }
-        default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
-        default <T> StepSource<T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
+        default Source<Out> compose(Silo before) { return new Belts.ChainSource<>(before, this); }
+        default <T> Segue<T, Out> compose(Sink<T> before) { return new Belts.ChainSegue<>(before, this); }
+        default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { return new Belts.ChainStepSinkSource<>(before, this); }
+        default Silo andThen(StepSink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
         
         // Operator chaining
         default <T> Source<T> andThen(SourceOperator<Out, T> mapper) { return mapper.compose(this); }
@@ -175,12 +175,12 @@ public class Conduit {
         }
         
         // Stage/Segue chaining
-        default Silo compose(Source<? extends In> before) { return new Conduits.ClosedSilo<>(before, this); }
-        default <T> Sink<T> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
-        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSink<>(before.sink(), new Conduits.ClosedSilo<>(before.source(), this)); }
-        @Override default StepSink<In> andThen(Silo after) { return new Conduits.ChainStepSink<>(this, after); }
-        @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { return new Conduits.ChainStepSinkSource<>(this, after); }
-        @Override default <T> StepSegue<In, T> andThen(StepSource<T> after) { return new Conduits.ChainStepSegue<>(this, after); }
+        default Silo compose(Source<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        default <T> Sink<T> compose(Segue<T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        @Override default StepSink<In> andThen(Silo after) { return new Belts.ChainStepSink<>(this, after); }
+        @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { return new Belts.ChainStepSinkSource<>(this, after); }
+        @Override default <T> StepSegue<In, T> andThen(StepSource<T> after) { return new Belts.ChainStepSegue<>(this, after); }
         
         // Operator chaining
         default <T> Sink<T> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(this); }
@@ -207,12 +207,12 @@ public class Conduit {
         }
         
         // Stage/Segue chaining
-        @Override default StepSource<Out> compose(Silo before) { return new Conduits.ChainStepSource<>(before, this); }
-        @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { return new Conduits.ChainSinkStepSource<>(before, this); }
-        @Override default <T> StepSegue<T, Out> compose(StepSink<T> before) { return new Conduits.ChainStepSegue<>(before, this); }
-        default Silo andThen(Sink<? super Out> after) { return new Conduits.ClosedSilo<>(this, after); }
-        default <T> Source<T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
-        default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(this, after.sink()), after.source()); }
+        @Override default StepSource<Out> compose(Silo before) { return new Belts.ChainStepSource<>(before, this); }
+        @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { return new Belts.ChainSinkStepSource<>(before, this); }
+        @Override default <T> StepSegue<T, Out> compose(StepSink<T> before) { return new Belts.ChainStepSegue<>(before, this); }
+        default Silo andThen(Sink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        default <T> Source<T> andThen(Segue<? super Out, T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
         
         // Operator chaining
         default <T> Source<T> andThen(StepToSourceOperator<Out, T> mapper) { return mapper.compose(this); }
@@ -226,12 +226,12 @@ public class Conduit {
         Source<Out> source();
         
         // Stage/Segue chaining
-        default Source<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
-        default <T> Segue<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        default <T> StepSinkSource<T, Out> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        default Sink<In> andThen(StepSink<? super Out> after) { return new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
-        default <T> Segue<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
-        default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default Source<Out> compose(StepSource<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        default <T> Segue<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default Sink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        default <T> Segue<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
         default <T> Segue<T, Out> compose(SinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
@@ -244,12 +244,12 @@ public class Conduit {
         @Override StepSink<In> sink();
         
         // Stage/Segue chaining
-        default Source<Out> compose(Source<? extends In> before) { return new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
-        default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSegue<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSinkSource<>(before.sink(), new Conduits.ChainSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
-        @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
-        @Override default <T> StepSegue<In, T> andThen(StepSegue<? super Out, T> after) { return new Conduits.ChainStepSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default Source<Out> compose(Source<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default <T> StepSegue<In, T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
         default <T> Segue<T, Out> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
@@ -262,12 +262,12 @@ public class Conduit {
         @Override StepSource<Out> source();
         
         // Stage/Segue chaining
-        @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
-        @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default <T> StepSegue<T, Out> compose(StepSegue<T, ? extends In> before) { return new Conduits.ChainStepSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        default Sink<In> andThen(Sink<? super Out> after) { return new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
-        default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainSegue<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
-        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainSinkStepSource<>(new Conduits.ChainSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default <T> StepSegue<T, Out> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default Sink<In> andThen(Sink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
         @Override default <T> SinkStepSource<T, Out> compose(SinkOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }
@@ -278,12 +278,12 @@ public class Conduit {
     
     public interface StepSegue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
         // Stage/Segue chaining
-        @Override default StepSource<Out> compose(Source<? extends In> before) { return new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before, sink()), source()); }
-        @Override default <T> SinkStepSource<T, Out> compose(Segue<T, ? extends In> before) { return new Conduits.ChainSinkStepSource<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default <T> StepSegue<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Conduits.ChainStepSegue<>(before.sink(), new Conduits.ChainStepSource<>(new Conduits.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default StepSink<In> andThen(Sink<? super Out> after) { return new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after)); }
-        @Override default <T> StepSinkSource<In, T> andThen(Segue<? super Out, T> after) { return new Conduits.ChainStepSinkSource<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
-        @Override default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Conduits.ChainStepSegue<>(new Conduits.ChainStepSink<>(sink(), new Conduits.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default StepSource<Out> compose(Source<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        @Override default <T> SinkStepSource<T, Out> compose(Segue<T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default <T> StepSegue<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override default StepSink<In> andThen(Sink<? super Out> after) { return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        @Override default <T> StepSinkSource<In, T> andThen(Segue<? super Out, T> after) { return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
         @Override default <T> SinkStepSource<T, Out> compose(SinkToStepOperator<T, In> mapper) { return mapper.andThen(sink()).andThen(source()); }

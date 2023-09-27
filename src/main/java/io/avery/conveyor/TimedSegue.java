@@ -1,4 +1,4 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
+public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         void onInit(SinkController ctl) throws Exception;
@@ -208,7 +208,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
         }
     }
     
-    class Sink implements Conduit.StepSink<In> {
+    class Sink implements Belt.StepSink<In> {
         @Override
         public boolean offer(In input) throws Exception {
             Objects.requireNonNull(input);
@@ -267,7 +267,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                     return;
                 }
                 setState(CLOSED);
-                exception = ex == null ? Conduits.NULL_EXCEPTION : ex;
+                exception = ex == null ? Belts.NULL_EXCEPTION : ex;
                 readyForSink.signalAll();
                 readyForSource.signalAll();
             } finally {
@@ -276,7 +276,7 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
         }
     }
     
-    class Source implements Conduit.StepSource<Out> {
+    class Source implements Belt.StepSource<Out> {
         @Override
         public Out poll() throws Exception {
             for (;;) {
@@ -284,14 +284,14 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
                 try {
                     if (state() == CLOSED) {
                         if (exception != null) {
-                            throw new UpstreamException(exception == Conduits.NULL_EXCEPTION ? null : exception);
+                            throw new UpstreamException(exception == Belts.NULL_EXCEPTION ? null : exception);
                         }
                         return null;
                     }
                     initIfNew();
                     if (!awaitSourceDeadline()) {
                         if (exception != null) {
-                            throw new UpstreamException(exception == Conduits.NULL_EXCEPTION ? null : exception);
+                            throw new UpstreamException(exception == Belts.NULL_EXCEPTION ? null : exception);
                         }
                         return null;
                     }
@@ -335,12 +335,12 @@ public class TimedSegue<In, Out> implements Conduit.StepSegue<In, Out> {
     }
     
     @Override
-    public Conduit.StepSink<In> sink() {
+    public Belt.StepSink<In> sink() {
         return new Sink();
     }
     
     @Override
-    public Conduit.StepSource<Out> source() {
+    public Belt.StepSource<Out> source() {
         return new Source();
     }
 }

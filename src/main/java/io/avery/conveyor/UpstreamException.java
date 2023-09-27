@@ -1,4 +1,4 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 public class UpstreamException extends Exception {
     public UpstreamException(Throwable cause) {

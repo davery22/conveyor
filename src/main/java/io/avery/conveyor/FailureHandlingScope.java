@@ -1,4 +1,4 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.util.Objects;
 import java.util.concurrent.StructuredTaskScope;

@@ -1,10 +1,9 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
-import java.util.stream.Collector;
 
 interface Gatherer<T,A,R> {
     

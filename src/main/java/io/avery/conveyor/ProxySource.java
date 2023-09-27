@@ -1,14 +1,14 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
-public abstract class ProxySource<T> implements Conduit.Source<T> {
-    protected abstract Stream<? extends Conduit.Source<?>> sources();
+public abstract class ProxySource<T> implements Belt.Source<T> {
+    protected abstract Stream<? extends Belt.Source<?>> sources();
     
     @Override
     public void close() throws Exception {
-        Conduits.composedClose(sources());
+        Belts.composedClose(sources());
     }
     
     @Override

@@ -1,4 +1,4 @@
-package io.avery.pipeline;
+package io.avery.conveyor;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -14,7 +14,7 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-class ConduitsTest {
+class BeltsTest {
     
     // TODO: Remove
     public static void main(String[] args) throws Exception {
@@ -35,11 +35,11 @@ class ConduitsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
-            var buffer = Conduits.buffer(16);
-            var noCompleteBuffer = Conduits.stepSink(buffer.sink()::offer);
+            var buffer = Belts.buffer(16);
+            var noCompleteBuffer = Belts.stepSink(buffer.sink()::offer);
             
             lineSource()
-                .andThen(Conduits
+                .andThen(Belts
                     .groupBy(
                         (String line) -> {
                             if (line.isEmpty()) return '*';
@@ -48,10 +48,10 @@ class ConduitsTest {
                         },
                         true,
                         t -> { },
-                        (k, v) -> Conduits
-                            .flatMap(e -> Conduits.source(Stream.of(k, e, v)), t -> { })
-                            .andThen(Conduits.buffer(16))
-                            .andThen(Conduits
+                        (k, v) -> Belts
+                            .flatMap(e -> Belts.source(Stream.of(k, e, v)), t -> { })
+                            .andThen(Belts.buffer(16))
+                            .andThen(Belts
                                 .gather(flatMap(e -> {
                                     if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
                                     return Stream.of(e);
@@ -59,11 +59,11 @@ class ConduitsTest {
                                 .andThen(noCompleteBuffer)
                             )
                     )
-                    .compose(Conduits.alsoComplete(buffer.sink()))
+                    .compose(Belts.alsoComplete(buffer.sink()))
                 )
                 .andThen(buffer.source())
-                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.sink(source -> { source.forEach(System.out::println); return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
         }
@@ -72,10 +72,10 @@ class ConduitsTest {
     static void testAdaptSinkOfSource() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
-                .andThen(Conduits.adaptSinkOfSource(Conduits.gather(ConduitsTest.flatMap((String line) -> Stream.of(line.length()))),
+                .andThen(Belts.adaptSinkOfSource(Belts.gather(BeltsTest.flatMap((String line) -> Stream.of(line.length()))),
                                                     t -> { }))
-                .andThen(Conduits.stepSink(e -> { System.out.println(e); return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.stepSink(e -> { System.out.println(e); return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
         }
@@ -87,13 +87,13 @@ class ConduitsTest {
             long[] a = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
-            Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null)
-                .andThen(Conduits.mapBalanceOrdered(
+            Belts.stepSource(() -> iter.hasNext() ? iter.next() : null)
+                .andThen(Belts.mapBalanceOrdered(
                     4, 400,
                     i -> () -> i * 2
                 ))
-                .andThen(Conduits.stepSink(e -> { a[0] += e; return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.stepSink(e -> { a[0] += e; return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
             System.out.println(a[0]);
@@ -108,7 +108,7 @@ class ConduitsTest {
             long[] a = { 0 }, b = { 0 }, c = { 0 };
             var iter = Stream.iterate(0L, i -> i+1).limit(1_000_000).iterator();
             
-            Conduits
+            Belts
                 .stepSource(() -> iter.hasNext() ? iter.next() : null)
 //                .<Long>source(sink -> {
 //                    for (long i = 0; i < 1_000_000; i++) {
@@ -118,22 +118,22 @@ class ConduitsTest {
 //                    }
 //                    return true;
 //                })
-//                .andThen(Conduits.stepBroadcast(List.of(
-//                    Conduits.stepSink(e -> { a[0] += e+1; return true; }),
-//                    Conduits.stepSink(e -> { b[0] += e+2; return true; }),
-//                    Conduits.stepSink(e -> { c[0] += e+3; return true; })
+//                .andThen(Belts.stepBroadcast(List.of(
+//                    Belts.stepSink(e -> { a[0] += e+1; return true; }),
+//                    Belts.stepSink(e -> { b[0] += e+2; return true; }),
+//                    Belts.stepSink(e -> { c[0] += e+3; return true; })
 //                )))
-//                .andThen(Conduits.broadcast(List.of(
-//                    Conduits.sink(source -> { source.forEach(e -> a[0] += e+1); return true; }),
-//                    Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; }),
-//                    Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; })
+//                .andThen(Belts.broadcast(List.of(
+//                    Belts.sink(source -> { source.forEach(e -> a[0] += e+1); return true; }),
+//                    Belts.sink(source -> { source.forEach(e -> b[0] += e+2); return true; }),
+//                    Belts.sink(source -> { source.forEach(e -> c[0] += e+3); return true; })
 //                )))
-                .andThen(Conduits.broadcast(List.of(
-                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> a[0] += e+1); return true; })),
-                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
-                    Conduits.<Long>buffer(4).andThen(Conduits.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
+                .andThen(Belts.broadcast(List.of(
+                    Belts.<Long>buffer(4).andThen(Belts.sink(source -> { source.forEach(e -> a[0] += e+1); return true; })),
+                    Belts.<Long>buffer(4).andThen(Belts.sink(source -> { source.forEach(e -> b[0] += e+2); return true; })),
+                    Belts.<Long>buffer(4).andThen(Belts.sink(source -> { source.forEach(e -> c[0] += e+3); return true; }))
                 )))
-                .run(Conduits.scopeExecutor(scope));
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
             System.out.println(a[0] + b[0] + c[0]);
@@ -147,7 +147,7 @@ class ConduitsTest {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             long[] res = { 0 };
             
-            Conduits
+            Belts
                 .<Long>source(sink -> {
                     for (long i = 0; i < 1_000_000; i++) {
                         if (!sink.offer(i)) {
@@ -156,8 +156,8 @@ class ConduitsTest {
                     }
                     return true;
                 })
-                .andThen(Conduits.stepSink(e -> { res[0] += e; return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.stepSink(e -> { res[0] += e; return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
             System.out.println(res[0]);
@@ -169,21 +169,21 @@ class ConduitsTest {
     static void test1() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
-                .andThen(Conduits.mapBalancePartitioned(
+                .andThen(Belts.mapBalancePartitioned(
                     10, 3, 15,
                     (String s) -> s.isEmpty() ? '*' : s.charAt(0),
                     (s, c) -> () -> c + ":" + s
                 ))
-                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.sink(source -> { source.forEach(System.out::println); return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
 
 //            lineSource()
-//                .andThen(Conduits.buffer(4))
-//                .andThen(Conduits.balance(
-//                    IntStream.range(0, 4).mapToObj(i -> Conduits.stepFuse(
-//                        ConduitsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
+//                .andThen(Belts.buffer(4))
+//                .andThen(Belts.balance(
+//                    IntStream.range(0, 4).mapToObj(i -> Belts.stepFuse(
+//                        BeltsTest.flatMap((String s) -> Stream.of(s.repeat(i+1))),
 //                        buffer
 //                    )).toList()
 //                ))
@@ -192,9 +192,9 @@ class ConduitsTest {
     
     static void test2() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
-//            var segue = Conduits.stepFuse(
-//                ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
-//                Conduits.tokenBucket(
+//            var segue = Belts.stepFuse(
+//                BeltsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)),
+//                Belts.tokenBucket(
 //                    Duration.ofSeconds(1),
 //                    String::length,
 //                    10,
@@ -222,21 +222,21 @@ class ConduitsTest {
 //            });
             
             lineSource()
-                .andThen(Conduits
-                    .gather(ConduitsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)))
-                    .andThen(Conduits.tokenBucket(
+                .andThen(Belts
+                    .gather(BeltsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)))
+                    .andThen(Belts.tokenBucket(
                         Duration.ofSeconds(1),
                         String::length,
                         10,
                         100
                     ))
                 )
-                .andThen(Conduits
-                    .gather(ConduitsTest.flatMap((String s) -> Stream.of(s+"22")))
-                    .andThen(Conduits.buffer(16))
+                .andThen(Belts
+                    .gather(BeltsTest.flatMap((String s) -> Stream.of(s+"22")))
+                    .andThen(Belts.buffer(16))
                 )
-                .andThen(Conduits.sink(source -> { source.forEach(System.out::println); return true; }))
-                .run(Conduits.scopeExecutor(scope));
+                .andThen(Belts.sink(source -> { source.forEach(System.out::println); return true; }))
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
         }
@@ -244,30 +244,30 @@ class ConduitsTest {
     
     static void testBidi() throws InterruptedException, ExecutionException {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
-            var buffer = Conduits.extrapolate(0, e -> Collections.emptyIterator(), 256);
+            var buffer = Belts.extrapolate(0, e -> Collections.emptyIterator(), 256);
             var iter = Stream.generate(new Scanner(System.in)::nextLine)
                 .takeWhile(line -> !"stop".equalsIgnoreCase(line))
                 .iterator();
-            var probe = Conduits.stepSource(() -> iter.hasNext() ? iter.next().length() : null);
+            var probe = Belts.stepSource(() -> iter.hasNext() ? iter.next().length() : null);
             
-            Conduits
+            Belts
                 .zip(buffer.source(), probe, Integer::sum)
-                .andThen(Conduits.broadcast(List.of(
+                .andThen(Belts.broadcast(List.of(
                     buffer.sink(),
-                    Conduits.stepSink(e -> { System.out.println(e); return true; })
+                    Belts.stepSink(e -> { System.out.println(e); return true; })
                 )))
-                .run(Conduits.scopeExecutor(scope));
+                .run(Belts.scopeExecutor(scope));
             
             scope.join();
         }
     }
     
-    private static Conduit.StepSource<String> lineSource() {
+    private static Belt.StepSource<String> lineSource() {
         var iter = Stream.generate(new Scanner(System.in)::nextLine)
             .takeWhile(line -> !"stop".equalsIgnoreCase(line))
             .iterator();
-//        return Conduits.stepSource(() -> iter.hasNext() ? iter.next() : null);
-        return Conduits.stepSource(() -> {
+//        return Belts.stepSource(() -> iter.hasNext() ? iter.next() : null);
+        return Belts.stepSource(() -> {
             if (iter.hasNext()) return iter.next();
             throw new IllegalStateException("TRIP");
         });
