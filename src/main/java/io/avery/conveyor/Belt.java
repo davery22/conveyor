@@ -1,5 +1,6 @@
 package io.avery.conveyor;
 
+import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -113,6 +114,8 @@ public class Belt {
         default void close() throws Exception { }
         
         default void forEach(Consumer<? super Out> action) throws Exception {
+            Objects.requireNonNull(action);
+            
             class ConsumerSink implements StepSink<Out> {
                 @Override
                 public boolean offer(Out input) {

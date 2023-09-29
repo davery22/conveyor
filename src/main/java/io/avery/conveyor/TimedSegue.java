@@ -68,7 +68,7 @@ public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
     private static final int SINK   = 2 << 2;
     
     TimedSegue(Core<In, Out> core) {
-        this.core = core;
+        this.core = Objects.requireNonNull(core);
     }
     
     // One instance per TimedSegue.

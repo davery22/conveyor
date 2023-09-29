@@ -21,14 +21,7 @@ public class Belts {
     // TODO: How do things behave under adversarial exception-catching?
     // TODO: Upon re-entry after throwing, stages should either recover or fail-fast.
     
-    // TODO: Guards
-    //  - Nullness (params and function results)
-    //  - Bounds / Invariants
-    //  - Mutability (Copy lists)
     // TODO: Correctness
-    //  - Correct variance
-    //  - Ensure proper locking, CAS, etc
-    //  - Ensure consistent behavior across operator variants (eg [step]broadcast)
     //  - Ensure exceptions are recoverable / avoid partial effects
    
     // TODO: Some rules:
@@ -43,15 +36,13 @@ public class Belts {
     //  - close() MUST close each upstream before returning (normally or abruptly)
     //  - no violating structured concurrency - if a method forks threads, it must wait for them to finish
     
-    // --- Sinks ---
-    
     public static <T> Belt.StepSourceOperator<T, T> synchronizeStepSource() {
         class SynchronizedStepSource implements Belt.StepSource<T> {
             final Belt.StepSource<T> source;
             final ReentrantLock lock = new ReentrantLock();
             
             SynchronizedStepSource(Belt.StepSource<T> source) {
-                this.source = source;
+                this.source = Objects.requireNonNull(source);
             }
             
             @Override
@@ -89,7 +80,7 @@ public class Belts {
             final ReentrantLock lock = new ReentrantLock();
             
             SynchronizedStepSink(Belt.StepSink<T> sink) {
-                this.sink = sink;
+                this.sink = Objects.requireNonNull(sink);
             }
             
             @Override
@@ -133,11 +124,14 @@ public class Belts {
     
     public static <T> Belt.StepSinkOperator<T, T> recoverStep(Function<? super Throwable, ? extends Belt.Source<? extends T>> mapper,
                                                               Consumer<? super Throwable> asyncExceptionHandler) {
+        Objects.requireNonNull(mapper);
+        Objects.requireNonNull(asyncExceptionHandler);
+        
         class RecoverStep implements Belt.StepSink<T> {
             final Belt.StepSink<T> sink;
             
             RecoverStep(Belt.StepSink<T> sink) {
-                this.sink = sink;
+                this.sink = Objects.requireNonNull(sink);
             }
             
             @Override
@@ -184,11 +178,14 @@ public class Belts {
     
     public static <T> Belt.SinkOperator<T, T> recover(Function<? super Throwable, ? extends Belt.StepSource<? extends T>> mapper,
                                                       Consumer<? super Throwable> asyncExceptionHandler) {
+        Objects.requireNonNull(mapper);
+        Objects.requireNonNull(asyncExceptionHandler);
+        
         class Recover implements Belt.Sink<T> {
             final Belt.Sink<T> sink;
             
             Recover(Belt.Sink<T> sink) {
-                this.sink = sink;
+                this.sink = Objects.requireNonNull(sink);
             }
             
             @Override
@@ -285,7 +282,7 @@ public class Belts {
                                          boolean splitAfter,
                                          boolean eagerCancel,
                                          Consumer<? super Throwable> asyncExceptionHandler,
-                                         Function<T, Belt.StepSink<? super T>> sinkFactory) {
+                                         Function<? super T, ? extends Belt.StepSink<? super T>> sinkFactory) {
         Objects.requireNonNull(predicate);
         Objects.requireNonNull(asyncExceptionHandler);
         Objects.requireNonNull(sinkFactory);
@@ -332,10 +329,10 @@ public class Belts {
         return new Split();
     }
     
-    public static <T, K> Belt.Sink<T> groupBy(Function<T, K> classifier,
+    public static <T, K> Belt.Sink<T> groupBy(Function<? super T, ? extends K> classifier,
                                               boolean eagerCancel,
                                               Consumer<? super Throwable> asyncExceptionHandler,
-                                              BiFunction<K, T, Belt.StepSink<? super T>> sinkFactory) {
+                                              BiFunction<? super K, ? super T, ? extends Belt.StepSink<? super T>> sinkFactory) {
         Objects.requireNonNull(classifier);
         Objects.requireNonNull(asyncExceptionHandler);
         Objects.requireNonNull(sinkFactory);
@@ -363,7 +360,7 @@ public class Belts {
                     try {
                         boolean drained = true;
                         for (T val; (val = source.poll()) != null; ) {
-                            K key = classifier.apply(val);
+                            K key = Objects.requireNonNull(classifier.apply(val));
                             var s = scopedSinkByKey.get(key);
                             if (s == TOMBSTONE) {
                                 continue;
@@ -406,12 +403,15 @@ public class Belts {
     
     public static <T, U> Belt.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Belt.Source<? extends U>> mapper,
                                                              Consumer<? super Throwable> asyncExceptionHandler) {
+        Objects.requireNonNull(mapper);
+        Objects.requireNonNull(asyncExceptionHandler);
+        
         class FlatMap extends ProxySink<T> implements Belt.StepSink<T> {
             final Belt.StepSink<U> sink;
             boolean draining = true;
             
             FlatMap(Belt.StepSink<U> sink) {
-                this.sink = sink;
+                this.sink = Objects.requireNonNull(sink);
             }
             
             @Override
@@ -447,11 +447,14 @@ public class Belts {
     
     public static <T, U> Belt.SinkOperator<T, U> adaptSourceOfSink(Belt.StepSourceOperator<T, U> sourceMapper,
                                                                    Consumer<? super Throwable> asyncExceptionHandler) {
+        Objects.requireNonNull(sourceMapper);
+        Objects.requireNonNull(asyncExceptionHandler);
+        
         class SourceAdaptedSink extends ProxySink<T> {
             final Belt.Sink<U> sink;
             
             SourceAdaptedSink(Belt.Sink<U> sink) {
-                this.sink = sink;
+                this.sink = Objects.requireNonNull(sink);
             }
             
             @Override
@@ -518,11 +521,14 @@ public class Belts {
     
     public static <T, U> Belt.SourceOperator<T, U> adaptSinkOfSource(Belt.StepSinkOperator<T, U> sinkMapper,
                                                                      Consumer<? super Throwable> asyncExceptionHandler) {
+        Objects.requireNonNull(sinkMapper);
+        Objects.requireNonNull(asyncExceptionHandler);
+        
         class SinkAdaptedSource extends ProxySource<U> {
             final Belt.Source<T> source;
             
             SinkAdaptedSource(Belt.Source<T> source) {
-                this.source = source;
+                this.source = Objects.requireNonNull(source);
             }
             
             @Override
@@ -579,16 +585,14 @@ public class Belts {
         return SinkAdaptedSource::new;
     }
     
-    public static <In, T, A> Belt.StepSinkOperator<In, T> gather(Gatherer<In, A, T> gatherer) {
-        Objects.requireNonNull(gatherer);
-        
+    public static <T, A, R> Belt.StepSinkOperator<T, R> gather(Gatherer<? super T, A, R> gatherer) {
         var supplier = gatherer.supplier();
         var integrator = gatherer.integrator();
         var finisher = gatherer.finisher();
         
-        class Gather implements Belt.StepSink<In> {
-            final Belt.StepSink<T> sink;
-            final Gatherer.Sink<T> gsink;
+        class Gather implements Belt.StepSink<T> {
+            final Belt.StepSink<R> sink;
+            final Gatherer.Sink<R> gsink;
             A acc = null;
             int state = NEW;
             
@@ -597,8 +601,8 @@ public class Belts {
             static final int COMPLETED = 2;
             static final int CLOSED    = 3;
             
-            Gather(Belt.StepSink<T> sink) {
-                this.sink = sink;
+            Gather(Belt.StepSink<R> sink) {
+                this.sink = Objects.requireNonNull(sink);
                 this.gsink = el -> {
                     try {
                         return sink.offer(el);
@@ -624,7 +628,7 @@ public class Belts {
             }
             
             @Override
-            public boolean offer(In input) throws Exception {
+            public boolean offer(T input) throws Exception {
                 try {
                     if (state >= COMPLETED) {
                         return false;
@@ -682,8 +686,8 @@ public class Belts {
     public static <T, K, U> Belt.SinkStepSource<T, U> mapBalancePartitioned(int parallelism,
                                                                             int permitsPerPartition,
                                                                             int bufferLimit,
-                                                                            Function<? super T, K> classifier,
-                                                                            BiFunction<? super T, ? super K, ? extends Callable<U>> mapper) {
+                                                                            Function<? super T, ? extends K> classifier,
+                                                                            BiFunction<? super T, ? super K, ? extends Callable<? extends U>> mapper) {
         // POLL:
         // Worker polls element from source
         // If completion buffer is full, worker waits until not full
@@ -746,7 +750,7 @@ public class Belts {
                 public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
                     K key = null;
                     Item item = null;
-                    Callable<U> callable = null;
+                    Callable<? extends U> callable = null;
                     Throwable exception = null;
                     
                     for (;;) {
@@ -758,7 +762,7 @@ public class Belts {
                                     if (in == null) {
                                         return true;
                                     }
-                                    key = classifier.apply(in);
+                                    key = Objects.requireNonNull(classifier.apply(in));
                                     item = new Item(key, in);
                                     
                                     lock.lockInterruptibly();
@@ -941,7 +945,7 @@ public class Belts {
     
     public static <T, U> Belt.SinkStepSource<T, U> mapBalanceOrdered(int parallelism,
                                                                      int bufferLimit,
-                                                                     Function<? super T, ? extends Callable<U>> mapper) {
+                                                                     Function<? super T, ? extends Callable<? extends U>> mapper) {
         if (parallelism < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism and bufferLimit must be positive");
         }
@@ -976,7 +980,7 @@ public class Belts {
                 public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
                     for (;;) {
                         Item item = null;
-                        Callable<U> callable;
+                        Callable<? extends U> callable;
                         
                         try {
                             sourceLock.lockInterruptibly();
@@ -1137,6 +1141,7 @@ public class Belts {
         }
         
         return source -> {
+            Objects.requireNonNull(source);
             Belt.StepSource<T> worker = () -> {
                 for (C c; (c = source.poll()) != null; ) {
                     var t = c.call();
@@ -1157,6 +1162,7 @@ public class Belts {
         }
         
         return sink -> {
+            Objects.requireNonNull(sink);
             Belt.StepSink<C> worker = c -> {
                 var t = c.call();
                 return t == null || sink.offer(t); // Skip nulls
@@ -1166,13 +1172,15 @@ public class Belts {
         };
     }
     
-    public static <T> Belt.Sink<T> balance(List<? extends Belt.Sink<T>> sinks) {
+    public static <T> Belt.Sink<T> balance(Collection<? extends Belt.Sink<? super T>> sinks) {
+        var theSinks = List.copyOf(sinks);
+        
         class Balance extends ProxySink<T> {
             @Override
             public boolean drainFromSource(Belt.StepSource<? extends T> source) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("balance-drainFromSource",
                                                                            Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var tasks = sinks.stream()
+                    var tasks = theSinks.stream()
                         .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
                         .toList();
                     scope.join().throwIfFailed();
@@ -1182,18 +1190,20 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Sink<?>> sinks() {
-                return sinks.stream();
+                return theSinks.stream();
             }
         }
         
         return new Balance();
     }
     
-    public static <T> Belt.StepSink<T> broadcast(List<? extends Belt.StepSink<T>> sinks) {
+    public static <T> Belt.StepSink<T> broadcast(Collection<? extends Belt.StepSink<? super T>> sinks) {
+        var theSinks = List.copyOf(sinks);
+        
         class Broadcast extends ProxySink<T> implements Belt.StepSink<T> {
             @Override
             public boolean offer(T input) throws Exception {
-                for (var sink : sinks) {
+                for (var sink : theSinks) {
                     if (!sink.offer(input)) {
                         return false;
                     }
@@ -1203,21 +1213,23 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Sink<?>> sinks() {
-                return sinks.stream();
+                return theSinks.stream();
             }
         }
         
         return new Broadcast();
     }
     
-    public static <T, U> Belt.StepSink<T> route(BiConsumer<T, BiConsumer<Integer, U>> router,
+    public static <T, U> Belt.StepSink<T> route(BiConsumer<? super T, ? super BiConsumer<Integer, U>> router,
                                                 boolean eagerCancel,
-                                                List<? extends Belt.StepSink<U>> sinks) {
-        BitSet active = new BitSet(sinks.size());
-        active.set(0, sinks.size(), true);
+                                                Collection<? extends Belt.StepSink<? super U>> sinks) {
+        Objects.requireNonNull(router);
+        var theSinks = List.copyOf(sinks);
+        BitSet active = new BitSet(theSinks.size());
+        active.set(0, theSinks.size(), true);
         BiConsumer<Integer, U> pusher = (i, u) -> {
             try {
-                var sink = sinks.get(i); // Note: Can throw IOOBE
+                var sink = theSinks.get(i); // Note: Can throw IOOBE
                 if (active.get(i) && !sink.offer(u)) {
                     active.clear(i);
                 }
@@ -1250,28 +1262,30 @@ public class Belts {
                     }
                     throw e.getCause();
                 } finally {
-                    done = eagerCancel ? active.cardinality() < sinks.size() : active.isEmpty();
+                    done = eagerCancel ? active.cardinality() < theSinks.size() : active.isEmpty();
                 }
                 return !done;
             }
             
             @Override
             protected Stream<? extends Belt.Sink<?>> sinks() {
-                return sinks.stream();
+                return theSinks.stream();
             }
         }
         
         return new Route();
     }
     
-    public static <T> Belt.StepSink<T> spillStep(List<? extends Belt.StepSink<T>> sinks) {
+    public static <T> Belt.StepSink<T> spillStep(Collection<? extends Belt.StepSink<? super T>> sinks) {
+        var theSinks = List.copyOf(sinks);
+        
         class SpillStep extends ProxySink<T> implements Belt.StepSink<T> {
             int i = 0;
             
             @Override
             public boolean offer(T input) throws Exception {
-                for (; i < sinks.size(); i++) {
-                    if (sinks.get(i).offer(input)) {
+                for (; i < theSinks.size(); i++) {
+                    if (theSinks.get(i).offer(input)) {
                         return true;
                     }
                 }
@@ -1280,18 +1294,20 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Sink<?>> sinks() {
-                return sinks.stream();
+                return theSinks.stream();
             }
         }
         
         return new SpillStep();
     }
     
-    public static <T> Belt.Sink<T> spill(List<? extends Belt.Sink<T>> sinks) {
+    public static <T> Belt.Sink<T> spill(Collection<? extends Belt.Sink<? super T>> sinks) {
+        var theSinks = List.copyOf(sinks);
+        
         class Spill extends ProxySink<T> {
             @Override
             public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
-                for (var sink : sinks) {
+                for (var sink : theSinks) {
                     if (sink.drainFromSource(source)) {
                         return true;
                     }
@@ -1301,23 +1317,23 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Sink<?>> sinks() {
-                return sinks.stream();
+                return theSinks.stream();
             }
         }
         
         return new Spill();
     }
     
-    // --- Sources ---
-    
-    public static <T> Belt.StepSource<T> concatStep(List<? extends Belt.StepSource<T>> sources) {
+    public static <T> Belt.StepSource<T> concatStep(Collection<? extends Belt.StepSource<? extends T>> sources) {
+        var theSources = List.copyOf(sources);
+        
         class ConcatStep extends ProxySource<T> implements Belt.StepSource<T> {
             int i = 0;
             
             @Override
             public T poll() throws Exception {
-                for (; i < sources.size(); i++) {
-                    T t = sources.get(i).poll();
+                for (; i < theSources.size(); i++) {
+                    T t = theSources.get(i).poll();
                     if (t != null) {
                         return t;
                     }
@@ -1327,18 +1343,20 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Source<?>> sources() {
-                return sources.stream();
+                return theSources.stream();
             }
         }
         
         return new ConcatStep();
     }
     
-    public static <T> Belt.Source<T> concat(List<? extends Belt.Source<T>> sources) {
+    public static <T> Belt.Source<T> concat(Collection<? extends Belt.Source<? extends T>> sources) {
+        var theSources = List.copyOf(sources);
+        
         class Concat extends ProxySource<T> {
             @Override
             public boolean drainToSink(Belt.StepSink<? super T> sink) throws Exception {
-                for (var source : sources) {
+                for (var source : theSources) {
                     if (!source.drainToSink(sink)) {
                         return false;
                     }
@@ -1348,20 +1366,22 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Source<?>> sources() {
-                return sources.stream();
+                return theSources.stream();
             }
         }
         
         return new Concat();
     }
     
-    public static <T> Belt.Source<T> merge(List<? extends Belt.Source<T>> sources) {
+    public static <T> Belt.Source<T> merge(Collection<? extends Belt.Source<? extends T>> sources) {
+        var theSources = List.copyOf(sources);
+        
         class Merge extends ProxySource<T> {
             @Override
             public boolean drainToSink(Belt.StepSink<? super T> sink) throws InterruptedException, ExecutionException {
                 try (var scope = new StructuredTaskScope.ShutdownOnFailure("merge-drainToSink",
                                                                            Thread.ofVirtual().name("thread-", 0).factory())) {
-                    var tasks = sources.stream()
+                    var tasks = theSources.stream()
                         .map(source -> scope.fork(() -> source.drainToSink(sink)))
                         .toList();
                     scope.join().throwIfFailed();
@@ -1371,17 +1391,20 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Source<?>> sources() {
-                return sources.stream();
+                return theSources.stream();
             }
         }
         
         return new Merge();
     }
     
-    public static <T> Belt.StepSource<T> mergeSorted(List<? extends Belt.StepSource<T>> sources,
+    public static <T> Belt.StepSource<T> mergeSorted(Collection<? extends Belt.StepSource<? extends T>> sources,
                                                      Comparator<? super T> comparator) {
+        Objects.requireNonNull(comparator);
+        var theSources = List.copyOf(sources);
+        
         class MergeSorted extends ProxySource<T> implements Belt.StepSource<T> {
-            final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(sources.size(), Comparator.comparing(i -> i.element, comparator));
+            final PriorityQueue<Indexed<T>> latest = new PriorityQueue<>(theSources.size(), Comparator.comparing(i -> i.element, comparator));
             int lastIndex = NEW;
             
             static final int NEW       = -1;
@@ -1394,15 +1417,15 @@ public class Belts {
                         return null;
                     }
                     // First poll - poll all sources to bootstrap the queue
-                    for (int i = 0; i < sources.size(); i++) {
-                        var t = sources.get(i).poll();
+                    for (int i = 0; i < theSources.size(); i++) {
+                        var t = theSources.get(i).poll();
                         if (t != null) {
                             latest.offer(new Indexed<>(t, i));
                         }
                     }
                 } else {
                     // Subsequent poll - poll from the source that last emitted
-                    var t = sources.get(lastIndex).poll();
+                    var t = theSources.get(lastIndex).poll();
                     if (t != null) {
                         latest.offer(new Indexed<>(t, lastIndex));
                     }
@@ -1418,16 +1441,16 @@ public class Belts {
             
             @Override
             protected Stream<? extends Belt.Source<?>> sources() {
-                return sources.stream();
+                return theSources.stream();
             }
         }
         
         return new MergeSorted();
     }
     
-    public static <T1, T2, T> Belt.StepSource<T> zip(Belt.StepSource<T1> source1,
-                                                     Belt.StepSource<T2> source2,
-                                                     BiFunction<? super T1, ? super T2, T> combiner) {
+    public static <T1, T2, T> Belt.StepSource<T> zip(Belt.StepSource<? extends T1> source1,
+                                                     Belt.StepSource<? extends T2> source2,
+                                                     BiFunction<? super T1, ? super T2, ? extends T> combiner) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(combiner);
@@ -1458,9 +1481,9 @@ public class Belts {
         return new Zip();
     }
     
-    public static <T1, T2, T> Belt.Source<T> zipLatest(Belt.Source<T1> source1,
-                                                       Belt.Source<T2> source2,
-                                                       BiFunction<? super T1, ? super T2, T> combiner) {
+    public static <T1, T2, T> Belt.Source<T> zipLatest(Belt.Source<? extends T1> source1,
+                                                       Belt.Source<? extends T2> source2,
+                                                       BiFunction<? super T1, ? super T2, ? extends T> combiner) {
         Objects.requireNonNull(source1);
         Objects.requireNonNull(source2);
         Objects.requireNonNull(combiner);
@@ -1587,7 +1610,7 @@ public class Belts {
     }
     
     public static <T> Belt.StepSegue<T, T> tokenBucket(Duration tokenInterval,
-                                                       ToLongFunction<T> costMapper,
+                                                       ToLongFunction<? super T> costMapper,
                                                        long tokenLimit,
                                                        long costLimit) { // TODO: Obviate costLimit?
         Objects.requireNonNull(tokenInterval);
@@ -2070,7 +2093,9 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Belt.Source<T> source(Stream<T> stream) {
+    public static <T> Belt.Source<T> source(Stream<? extends T> stream) {
+        Objects.requireNonNull(stream);
+        
         class StreamSource implements Belt.Source<T> {
             boolean called = false;
             
@@ -2117,6 +2142,9 @@ public class Belts {
     }
     
     public static <T> Belt.StepSource<T> stepSource(Iterator<T> iterator, AutoCloseable onClose) {
+        Objects.requireNonNull(iterator);
+        Objects.requireNonNull(onClose);
+        
         class IteratorSource implements Belt.StepSource<T> {
             @Override
             public T poll() {
@@ -2133,22 +2161,23 @@ public class Belts {
     }
     
     public static <T> Belt.Source<T> source(Belt.Source<T> source) {
-        return source;
+        return Objects.requireNonNull(source);
     }
     
     public static <T> Belt.Sink<T> sink(Belt.Sink<T> sink) {
-        return sink;
+        return Objects.requireNonNull(sink);
     }
     
     public static <T> Belt.StepSource<T> stepSource(Belt.StepSource<T> source) {
-        return source;
+        return Objects.requireNonNull(source);
     }
     
     public static <T> Belt.StepSink<T> stepSink(Belt.StepSink<T> sink) {
-        return sink;
+        return Objects.requireNonNull(sink);
     }
     
     public static Executor scopeExecutor(StructuredTaskScope<?> scope) {
+        Objects.requireNonNull(scope);
         return runnable -> scope.fork(Executors.callable(runnable, null));
     }
     
@@ -2335,8 +2364,8 @@ public class Belts {
         }
         
         ClosedSilo(Belt.Source<? extends T> source, Belt.Sink<? super T> sink) {
-            this.source = source;
-            this.sink = sink;
+            this.source = Objects.requireNonNull(source);
+            this.sink = Objects.requireNonNull(sink);
         }
         
         @Override
@@ -2370,8 +2399,8 @@ public class Belts {
         final Belt.Stage right;
         
         Chain(Belt.Stage left, Belt.Stage right) {
-            this.left = left;
-            this.right = right;
+            this.left = Objects.requireNonNull(left);
+            this.right = Objects.requireNonNull(right);
         }
         
         public void run(Executor executor) {
@@ -2451,8 +2480,31 @@ public class Belts {
         }
     }
     
-    record ChainSegue<In, Out>(Belt.Sink<In> sink, Belt.Source<Out> source) implements Belt.Segue<In, Out> { }
-    record ChainStepSinkSource<In, Out>(Belt.StepSink<In> sink, Belt.Source<Out> source) implements Belt.StepSinkSource<In, Out> { }
-    record ChainSinkStepSource<In, Out>(Belt.Sink<In> sink, Belt.StepSource<Out> source) implements Belt.SinkStepSource<In, Out> { }
-    record ChainStepSegue<In, Out>(Belt.StepSink<In> sink, Belt.StepSource<Out> source) implements Belt.StepSegue<In, Out> { }
+    record ChainSegue<In, Out>(Belt.Sink<In> sink, Belt.Source<Out> source) implements Belt.Segue<In, Out> {
+        public ChainSegue {
+            Objects.requireNonNull(sink);
+            Objects.requireNonNull(source);
+        }
+    }
+    
+    record ChainStepSinkSource<In, Out>(Belt.StepSink<In> sink, Belt.Source<Out> source) implements Belt.StepSinkSource<In, Out> {
+        public ChainStepSinkSource {
+            Objects.requireNonNull(sink);
+            Objects.requireNonNull(source);
+        }
+    }
+    
+    record ChainSinkStepSource<In, Out>(Belt.Sink<In> sink, Belt.StepSource<Out> source) implements Belt.SinkStepSource<In, Out> {
+        public ChainSinkStepSource {
+            Objects.requireNonNull(sink);
+            Objects.requireNonNull(source);
+        }
+    }
+    
+    record ChainStepSegue<In, Out>(Belt.StepSink<In> sink, Belt.StepSource<Out> source) implements Belt.StepSegue<In, Out> {
+        public ChainStepSegue {
+            Objects.requireNonNull(sink);
+            Objects.requireNonNull(source);
+        }
+    }
 }
