@@ -243,3 +243,6 @@ Avoiding deadlock when waiting on nested runs
 - If there is a situation where an inner Source/Sink runs a Silo that other inner Sources/Sinks depend on, we can deadlock
 - To trigger this, the Silo would have to NOT already be running when the Source/Sink is run
 - To avoid this, the outer stage should be solely-responsible for running (and closing/completing) shared Stages
+
+Discuss:
+"recovery-safe" / avoid partial effects and deadlock

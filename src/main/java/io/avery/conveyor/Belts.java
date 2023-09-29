@@ -18,12 +18,6 @@ public class Belts {
     
     static final Throwable NULL_EXCEPTION = new Throwable();
     
-    // TODO: How do things behave under adversarial exception-catching?
-    // TODO: Upon re-entry after throwing, stages should either recover or fail-fast.
-    
-    // TODO: Correctness
-    //  - Ensure exceptions are recoverable / avoid partial effects
-   
     // TODO: Some rules:
     //  - drainFromSource/drainToSink (+poll/offer) must never call close/complete on arguments or 'this'
     //    - for the passed-in sources/sinks, they may be reused externally, eg by concat/spill
@@ -767,12 +761,12 @@ public class Belts {
                                     
                                     lock.lockInterruptibly();
                                     try {
-                                        if (state == CLOSED) {
+                                        if (state >= COMPLETING) {
                                             return false;
                                         }
                                         while (completionBuffer.size() == bufferLimit) {
                                             completionNotFull.await();
-                                            if (state == CLOSED) {
+                                            if (state >= COMPLETING) {
                                                 return false;
                                             }
                                         }
@@ -822,13 +816,13 @@ public class Belts {
                                         } else if (++partition.permits == permitsPerPartition) {
                                             partitionByKey.remove(key);
                                         }
-                                        throwAsException(exception);
                                         break;
                                     }
                                 } finally {
                                     lock.unlock();
                                 }
                             }
+                            throwAsException(exception);
                         }
                     }
                 }
@@ -845,6 +839,22 @@ public class Belts {
                             .toList();
                         scope.join().throwIfFailed();
                         return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
+                    } catch (Error | Exception e) {
+                        // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
+                        // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
+                        // processed items that were behind unprocessed items, to avoid violating order.
+                        lock.lock();
+                        try {
+                            var reachable = new LinkedList<Item>();
+                            for (Item i; (i = completionBuffer.poll()) != null && i.in == null; ) {
+                                reachable.offer(i);
+                            }
+                            completionBuffer.clear();
+                            completionBuffer.addAll(reachable);
+                        } finally {
+                            lock.unlock();
+                        }
+                        throw e;
                     }
                 }
                 
@@ -993,12 +1003,12 @@ public class Belts {
                                 
                                 lock.lockInterruptibly();
                                 try {
-                                    if (state == CLOSED) {
+                                    if (state >= COMPLETING) {
                                         return false;
                                     }
                                     while (completionBuffer.size() == bufferLimit) {
                                         completionNotFull.await();
-                                        if (state == CLOSED) {
+                                        if (state >= COMPLETING) {
                                             return false;
                                         }
                                     }
@@ -1039,6 +1049,22 @@ public class Belts {
                             .toList();
                         scope.join().throwIfFailed();
                         return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
+                    } catch (Error | Exception e) {
+                        // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
+                        // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
+                        // processed items that were behind unprocessed items, to avoid violating order.
+                        lock.lock();
+                        try {
+                            var reachable = new LinkedList<Item>();
+                            for (Item i; (i = completionBuffer.poll()) != null && i.in == null; ) {
+                                reachable.offer(i);
+                            }
+                            completionBuffer.clear();
+                            completionBuffer.addAll(reachable);
+                        } finally {
+                            lock.unlock();
+                        }
+                        throw e;
                     }
                 }
                 
