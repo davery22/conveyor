@@ -98,10 +98,10 @@ public class Belts {
             }
             
             @Override
-            public void completeAbruptly(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable cause) throws Exception {
                 lock.lock();
                 try {
-                    sink.completeAbruptly(ex);
+                    sink.completeAbruptly(cause);
                 } finally {
                     lock.unlock();
                 }
@@ -139,10 +139,10 @@ public class Belts {
             }
             
             @Override
-            public void completeAbruptly(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable cause) throws Exception {
                 boolean running = false;
                 try {
-                    var source = Objects.requireNonNull(mapper.apply(ex));
+                    var source = Objects.requireNonNull(mapper.apply(cause));
                     try (var scope = new FailureHandlingScope("recoverStep-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
@@ -155,7 +155,7 @@ public class Belts {
                         scope.join();
                     }
                 } catch (Error | Exception e) {
-                    var exception = running ? e : ex;
+                    var exception = running ? e : cause;
                     callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
                     throw e;
                 }
@@ -193,10 +193,10 @@ public class Belts {
             }
             
             @Override
-            public void completeAbruptly(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable cause) throws Exception {
                 boolean running = false;
                 try {
-                    var source = Objects.requireNonNull(mapper.apply(ex));
+                    var source = Objects.requireNonNull(mapper.apply(cause));
                     try (var scope = new FailureHandlingScope("recover-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
@@ -209,7 +209,7 @@ public class Belts {
                         scope.join();
                     }
                 } catch (Error | Exception e) {
-                    var exception = running ? e : ex;
+                    var exception = running ? e : cause;
                     callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
                     throw e;
                 }
@@ -660,12 +660,12 @@ public class Belts {
             }
             
             @Override
-            public void completeAbruptly(Throwable ex) throws Exception {
+            public void completeAbruptly(Throwable cause) throws Exception {
                 if (state == CLOSED) {
                     return;
                 }
                 state = CLOSED;
-                sink.completeAbruptly(ex);
+                sink.completeAbruptly(cause);
             }
             
             @Override
@@ -875,14 +875,14 @@ public class Belts {
                 }
                 
                 @Override
-                public void completeAbruptly(Throwable ex) {
+                public void completeAbruptly(Throwable cause) {
                     lock.lock();
                     try {
                         if (state == CLOSED) {
                             return;
                         }
                         state = CLOSED;
-                        exception = ex == null ? NULL_EXCEPTION : ex;
+                        exception = cause == null ? NULL_EXCEPTION : cause;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
                     } finally {
@@ -1085,14 +1085,14 @@ public class Belts {
                 }
                 
                 @Override
-                public void completeAbruptly(Throwable ex) {
+                public void completeAbruptly(Throwable cause) {
                     lock.lock();
                     try {
                         if (state == CLOSED) {
                             return;
                         }
                         state = CLOSED;
-                        exception = ex == null ? NULL_EXCEPTION : ex;
+                        exception = cause == null ? NULL_EXCEPTION : cause;
                         completionNotFull.signalAll();
                         outputReady.signalAll();
                     } finally {
@@ -1921,14 +1921,14 @@ public class Belts {
                 }
                 
                 @Override
-                public void completeAbruptly(Throwable ex) {
+                public void completeAbruptly(Throwable cause) {
                     lock.lock();
                     try {
                         if (state == CLOSED) {
                             return;
                         }
                         state = CLOSED;
-                        exception = ex == null ? NULL_EXCEPTION : ex;
+                        exception = cause == null ? NULL_EXCEPTION : cause;
                         taken.signalAll();
                         given.signalAll();
                     } finally {
@@ -2242,11 +2242,11 @@ public class Belts {
         throwAsException(ex[0]);
     }
     
-    public static void composedCompleteAbruptly(Stream<? extends Belt.Sink<?>> sinks, Throwable exception) throws Exception {
+    public static void composedCompleteAbruptly(Stream<? extends Belt.Sink<?>> sinks, Throwable cause) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {
             try {
-                sink.completeAbruptly(exception);
+                sink.completeAbruptly(cause);
             } catch (Error | Exception e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
@@ -2460,8 +2460,8 @@ public class Belts {
         }
         
         @Override
-        public void completeAbruptly(Throwable ex) throws Exception {
-            sink.completeAbruptly(ex);
+        public void completeAbruptly(Throwable cause) throws Exception {
+            sink.completeAbruptly(cause);
         }
     }
     

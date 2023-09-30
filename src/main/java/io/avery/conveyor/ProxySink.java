@@ -12,8 +12,8 @@ public abstract class ProxySink<T> implements Belt.Sink<T> {
     }
     
     @Override
-    public void completeAbruptly(Throwable exception) throws Exception {
-        Belts.composedCompleteAbruptly(sinks(), exception);
+    public void completeAbruptly(Throwable cause) throws Exception {
+        Belts.composedCompleteAbruptly(sinks(), cause);
     }
     
     @Override

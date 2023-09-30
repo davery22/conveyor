@@ -260,14 +260,14 @@ public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
         }
         
         @Override
-        public void completeAbruptly(Throwable ex) {
+        public void completeAbruptly(Throwable cause) {
             lock.lock();
             try {
                 if (state() == CLOSED) {
                     return;
                 }
                 setState(CLOSED);
-                exception = ex == null ? Belts.NULL_EXCEPTION : ex;
+                exception = cause == null ? Belts.NULL_EXCEPTION : cause;
                 readyForSink.signalAll();
                 readyForSource.signalAll();
             } finally {

@@ -5,6 +5,11 @@ import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
 
+/**
+ * This is a shim of the "Gatherer" API proposed in
+ * <a href="https://cr.openjdk.org/~vklang/Gatherers.html">https://cr.openjdk.org/~vklang/Gatherers.html</a>.
+ * This interface is intended to be superseded by the official API once available.
+ */
 interface Gatherer<T,A,R> {
     
     interface Sink<R> {
