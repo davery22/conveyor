@@ -89,7 +89,7 @@ Why no 'plain' variants of some operators
 
 Document:
 
-A Source that is replayable should either be plain or Supplier<Step>
+A Source that is replayable should either be plain or Supplier&lt;Step&gt;
 - The same StepSource's poll can't yield the same sequence at different times to different callers
 - ...If drainToSink can yield the same elements on subsequent calls, than #spill is naive...
 - ...If it can't, need Supplier<Step> for 'cold' flows...

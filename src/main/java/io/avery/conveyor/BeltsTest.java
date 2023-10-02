@@ -35,33 +35,31 @@ class BeltsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
-            var buffer = Belts.buffer(16);
-            var noCompleteBuffer = Belts.stepSink(buffer.sink()::offer);
-            
             lineSource()
-                .andThen(Belts
-                    .groupBy(
-                        (String line) -> {
-                            if (line.isEmpty()) return '*';
-                            if ("HALT".equals(line)) throw new IllegalStateException("HALTED!");
-                            return line.charAt(0);
-                        },
-                        true,
-                        t -> { },
-                        (k, v) -> Belts
-                            .flatMap(e -> Belts.source(Stream.of(k, e, v)), t -> { })
-                            .andThen(Belts.buffer(16))
-                            .andThen(Belts
-                                .gather(flatMap(e -> {
-                                    if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
-                                    return Stream.of(e);
-                                }))
-                                .andThen(noCompleteBuffer)
-                            )
+                .andThen(Belts.<String>buffer(16)
+                    .compose((Belt.StepSink<String> buffer) -> Belts
+                        .groupBy(
+                            (String line) -> {
+                                if (line.isEmpty()) return "*";
+                                if ("HALT".equals(line)) throw new IllegalStateException("HALTED!");
+                                return String.valueOf(line.charAt(0));
+                            },
+                            true,
+                            t -> { },
+                            (k, v) -> Belts
+                                .flatMap((String e) -> Belts.source(Stream.of(k, e, v)), t -> { })
+                                .andThen(Belts.buffer(16))
+                                .andThen(Belts
+                                    .gather(flatMap((String e) -> {
+                                        if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
+                                        return Stream.of(e);
+                                    }))
+                                    .andThen(Belts.stepSink(buffer::offer))
+                                )
+                        )
+                        .compose(Belts.alsoComplete(buffer))
                     )
-                    .compose(Belts.alsoComplete(buffer.sink()))
                 )
-                .andThen(buffer.source())
                 .andThen(Belts.sink(source -> { source.forEach(System.out::println); return true; }))
                 .run(Belts.scopeExecutor(scope));
             
@@ -72,8 +70,10 @@ class BeltsTest {
     static void testAdaptSinkOfSource() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
-                .andThen(Belts.adaptSinkOfSource(Belts.gather(BeltsTest.flatMap((String line) -> Stream.of(line.length()))),
-                                                    t -> { }))
+                .andThen(Belts.adaptSinkOfSource(
+                    Belts.gather(BeltsTest.flatMap((String line) -> Stream.of(line.length()))),
+                    t -> { }
+                ))
                 .andThen(Belts.stepSink(e -> { System.out.println(e); return true; }))
                 .run(Belts.scopeExecutor(scope));
             

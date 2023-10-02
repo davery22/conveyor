@@ -6,13 +6,19 @@ import java.util.function.Consumer;
 import java.util.stream.Collector;
 import java.util.stream.Stream;
 
+/**
+ * TODO: Stages, Segues, Operators
+ *  intermediate vs boundary vs terminal
+ *  fan-out vs fan-in
+ *  exception handling ('up' to nearest boundary, then 'down' across boundaries)
+ */
 public class Belt {
     private Belt() {}
     
     // --- Stages ---
     
     /**
-     *
+     * TODO
      */
     public sealed interface Stage {
         /**
@@ -25,13 +31,13 @@ public class Belt {
          *     <li>completes the sink abruptly if an exception was thrown, suppressing further exceptions
          * </ol>
          *
-         * <p>If any of steps 1-3 throw an exception, the initial exception will be wrapped in a
-         * {@link java.util.concurrent.CompletionException CompletionException} and thrown at the end of the task.
+         * <p>If any of steps 1-3 throw an exception, the initial exception will be caught and wrapped in a
+         * {@link java.util.concurrent.CompletionException CompletionException} thrown at the end of the task.
          *
          * <p>If the initial exception is an {@link InterruptedException}, or if any completions throw
          * {@code InterruptedException}, the thread interrupt status will be set when the exception is caught, and will
-         * remain set until just before any subsequent throw of {@code InterruptedException}. (This ensures that
-         * recovery operators see the interrupt, and do not unintentionally interfere with interrupt responsiveness.)
+         * remain set until any subsequent throw of {@code InterruptedException}. (This ensures that recovery operators
+         * see the interrupt, and do not unintentionally interfere with interrupt responsiveness.)
          *
          * <p>The given executor should ideally spawn a new thread for each task. An executor with insufficient threads
          * to run all encapsulated silos concurrently may cause deadlock.
@@ -39,10 +45,10 @@ public class Belt {
          * <p>If a silo has already started running on any executor, subsequent runs of that silo will short-circuit and
          * do nothing.
          *
-         * @implSpec A stage that delegates to other stages must call {@code run} on each stage before returning from this
-         * method.
+         * @implSpec A stage that delegates to other stages must call {@code run} on each stage before returning from
+         * this method.
          *
-         * <p>The default implementation does nothing.
+         * @implNote The default implementation does nothing.
          *
          * @param executor the executor to submit tasks to
          */
@@ -50,16 +56,18 @@ public class Belt {
     }
     
     /**
-     * A composition of {@link Source Source} and {@link Sink Sink} stages, that itself accepts no input and yields no
-     * output. A silo may encapsulate:
+     * A {@link Stage Stage} that represents connected {@link Source Source} and {@link Sink Sink} stages. A silo may
+     * encapsulate:
      * <ul>
      *     <li>A {@code StepSource} connected to a {@code Sink}
      *     <li>A {@code Source} connected to a {@code StepSink}
-     *     <li>A {@code StepSource} connected to a {@code StepSink}
      *     <li>A {@code Silo} connected to a {@code Silo} (and thereby, any sequence of {@code Silos})
      * </ul>
      *
-     * <p>The {@link #run run} method interacts with silos by draining encapsulated sources to sinks.
+     * <p>A silo itself accepts no input and yields no output. The {@link #run run} method interacts with silos by
+     * draining encapsulated sources to sinks.
+     *
+     * @see #run(Executor)
      */
     public sealed interface Silo extends Stage permits Belts.ClosedSilo, Belts.ChainSilo {
         // Stage/Segue chaining
@@ -72,9 +80,11 @@ public class Belt {
     }
     
     /**
-     * A stage that accepts input elements.
+     * A {@link Stage Stage} that accepts input elements.
      *
-     * <p>A sink may encapsulate a downstream silo, which will {@link #run run} when the sink runs.
+     * <p>A sink may encapsulate a downstream silo, which will {@link #run run} when the sink runs. Sinks generally
+     * should be run before accepting elements, in case the sink connects across a downstream boundary, to avoid
+     * unmitigated buffer saturation and consequent deadlock or dropped elements.
      *
      * @param <In> the input element type
      */
@@ -85,6 +95,9 @@ public class Belt {
          * thrown, this sink cancels, or this sink is unable to accept more elements from the source (which does not
          * necessarily mean the source drained). Returns {@code true} if the source definitely drained, meaning a call
          * to {@link StepSource#poll poll} returned {@code null}; else returns {@code false}.
+         *
+         * @implSpec Implementors should restrict to {@link StepSource#poll polling} from the source. Closing the source
+         * is the caller's responsibility, as the source may be reused after this method is called.
          *
          * @param source the source to drain from
          * @return {@code true} if the source drained
@@ -105,11 +118,11 @@ public class Belt {
          * returning from this method, unless this method throws before completing any sinks. If completing any sink
          * throws an exception, subsequent exceptions should be suppressed onto the first exception. If completing any
          * sink throws {@link InterruptedException}, the thread interrupt status should be set when the exception is
-         * caught, and remain set until just before any subsequent throw of {@code InterruptedException} (in accordance
-         * with {@link #run Stage.run}). The utility method {@link Belts#composedComplete(Stream)} is provided for
-         * common use cases.
+         * caught, and remain set until any subsequent throw of {@code InterruptedException} (in accordance with
+         * {@link #run Stage.run}). The utility method {@link Belts#composedComplete(Stream)} is provided for common use
+         * cases.
          *
-         * <p>The default implementation does nothing.
+         * @implNote The default implementation does nothing.
          *
          * @throws Exception if unable to complete
          */
@@ -129,11 +142,11 @@ public class Belt {
          * before returning from this method, <strong>even if this method throws</strong>. If completing any sink throws
          * an exception, subsequent exceptions should be suppressed onto the first exception. If completing any sink
          * throws {@link InterruptedException}, the thread interrupt status should be set when the exception is caught,
-         * and remain set until just before any subsequent throw of {@code InterruptedException} (in accordance with
+         * and remain set until any subsequent throw of {@code InterruptedException} (in accordance with
          * {@link #run Stage.run}). The utility method {@link Belts#composedCompleteAbruptly(Stream, Throwable)} is
          * provided for common use cases.
          *
-         * <p>The default implementation does nothing.
+         * @implNote The default implementation does nothing.
          *
          * @param cause the causal exception
          * @throws Exception if unable to complete
@@ -154,9 +167,11 @@ public class Belt {
     }
     
     /**
-     * A stage that yields output elements.
+     * A {@link Stage Stage} that yields output elements.
      *
-     * <p>A source may encapsulate an upstream silo, which will {@link #run run} when the source runs.
+     * <p>A source may encapsulate an upstream silo, which will {@link #run run} when the source runs. Sources generally
+     * should be run before yielding elements, in case the source connects across an upstream boundary, to avoid
+     * unmitigated buffer depletion and consequent deadlock or inserted elements.
      *
      * @param <Out> the output element type
      */
@@ -167,6 +182,9 @@ public class Belt {
          * thrown, this source is drained, or this source is unable to offer more elements to the sink (which does not
          * necessarily mean the sink cancelled). Returns {@code false} if the sink definitely cancelled, meaning a call
          * to {@link StepSink#offer offer} returned {@code false}; else returns {@code true}.
+         *
+         * @implSpec Implementors should restrict to {@link StepSink#offer offering} to the sink. Completing the sink is
+         * the caller's responsibility, as the sink may be reused after this method is called.
          *
          * @param sink the sink to drain to
          * @return {@code false} if the sink cancelled
@@ -188,7 +206,7 @@ public class Belt {
          * exception, subsequent exceptions should be suppressed onto the first exception. The utility method
          * {@link Belts#composedClose(Stream)} is provided for common use cases.
          *
-         * <p>The default implementation does nothing.
+         * @implNote The default implementation does nothing.
          *
          * @throws Exception if unable to close
          */
@@ -281,7 +299,7 @@ public class Belt {
         /**
          * {@inheritDoc}
          *
-         * @implSpec The default implementation loops, polling from the source and offering to this sink, until either
+         * @implNote The default implementation loops, polling from the source and offering to this sink, until either
          * the source drains or this sink cancels. This is equivalent to the default implementation of
          * {@link StepSource#drainToSink StepSource.drainToSink(StepSink)}.
          */
@@ -329,7 +347,7 @@ public class Belt {
         /**
          * {@inheritDoc}
          *
-         * @implSpec The default implementation loops, polling from this source and offering to the sink, until either
+         * @implNote The default implementation loops, polling from this source and offering to the sink, until either
          * this source drains or the sink cancels. This is equivalent to the default implementation of
          * {@link StepSink#drainFromSource StepSink.drainFromSource(StepSource)}.
          */
@@ -358,6 +376,12 @@ public class Belt {
     
     // --- Segues ---
     
+    /**
+     * TODO
+     *
+     * @param <In> the input element type
+     * @param <Out> the output element type
+     */
     public interface Segue<In, Out> {
         /**
          * Returns the {@link Sink sink} side of this segue.
@@ -386,6 +410,12 @@ public class Belt {
         default <T> SinkStepSource<In, T> andThen(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
+    /**
+     * A {@link Segue Segue} where the sink is a {@link StepSink StepSink}.
+     *
+     * @param <In> the input element type
+     * @param <Out> the output element type
+     */
     public interface StepSinkSource<In, Out> extends Segue<In, Out> {
         @Override StepSink<In> sink();
         
@@ -404,6 +434,12 @@ public class Belt {
         @Override default <T> StepSegue<In, T> andThen(SourceToStepOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
+    /**
+     * A {@link Segue Segue} where the source is a {@link StepSource StepSource}.
+     *
+     * @param <In> the input element type
+     * @param <Out> the output element type
+     */
     public interface SinkStepSource<In, Out> extends Segue<In, Out> {
         @Override StepSource<Out> source();
         
@@ -422,6 +458,12 @@ public class Belt {
         default <T> SinkStepSource<In, T> andThen(StepSourceOperator<Out, T> mapper) { return sink().andThen(mapper.compose(source())); }
     }
     
+    /**
+     * A {@link Segue Segue} where the sink is {@link StepSink StepSink} and the source is a {@link StepSource StepSource}.
+     *
+     * @param <In> the input element type
+     * @param <Out> the output element type
+     */
     public interface StepSegue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
         // Stage/Segue chaining
         @Override default StepSource<Out> compose(Source<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
@@ -450,10 +492,10 @@ public class Belt {
         default <Out> SinkStepSource<T, Out> andThen(SinkStepSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
         // Operator chaining
-        default <V> SinkOperator<T, V> compose(SinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkToStepOperator<T, V> compose(SinkToStepOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkOperator<V, U> andThen(SinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
-        default <V> StepToSinkOperator<V, U> andThen(StepToSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> SinkOperator<V, U> compose(SinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> StepToSinkOperator<V, U> compose(StepToSinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> SinkOperator<T, V> andThen(SinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
+        default <V> SinkToStepOperator<T, V> andThen(SinkToStepOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
     }
     
     @FunctionalInterface
@@ -464,10 +506,10 @@ public class Belt {
         default <Out> SinkStepSource<T, Out> andThen(StepSegue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
         // Operator chaining
-        default <V> SinkOperator<T, V> compose(StepToSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkToStepOperator<T, V> compose(StepSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkToStepOperator<V, U> andThen(SinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
-        default <V> StepSinkOperator<V, U> andThen(StepToSinkOperator<V, T> after) { return sink -> after.andThen(this.andThen(sink)); }
+        default <V> SinkToStepOperator<V, U> compose(SinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> StepSinkOperator<V, U> compose(StepToSinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> SinkOperator<T, V> andThen(StepToSinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
+        default <V> SinkToStepOperator<T, V> andThen(StepSinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
     }
     
     @FunctionalInterface
@@ -478,10 +520,10 @@ public class Belt {
         @Override default <Out> StepSegue<T, Out> andThen(SinkStepSource<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
         // Operator chaining
-        @Override default <V> StepToSinkOperator<T, V> compose(SinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        @Override default <V> StepSinkOperator<T, V> compose(SinkToStepOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkOperator<V, U> andThen(SinkToStepOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
-        default <V> StepToSinkOperator<V, U> andThen(StepSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> SinkOperator<V, U> compose(SinkToStepOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> StepToSinkOperator<V, U> compose(StepSinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        @Override default <V> StepToSinkOperator<T, V> andThen(SinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
+        @Override default <V> StepSinkOperator<T, V> andThen(SinkToStepOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
     }
     
     @FunctionalInterface
@@ -492,10 +534,10 @@ public class Belt {
         @Override default <Out> StepSegue<T, Out> andThen(StepSegue<U, Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
         
         // Operator chaining
-        @Override default <V> StepToSinkOperator<T, V> compose(StepToSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        @Override default <V> StepSinkOperator<T, V> compose(StepSinkOperator<U, V> before) { return sink -> andThen(before.andThen(sink)); }
-        default <V> SinkToStepOperator<V, U> andThen(SinkToStepOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
-        default <V> StepSinkOperator<V, U> andThen(StepSinkOperator<V, T> after) { return sink -> after.andThen(andThen(sink)); }
+        default <V> SinkToStepOperator<V, U> compose(SinkToStepOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        default <V> StepSinkOperator<V, U> compose(StepSinkOperator<V, T> before) { return sink -> before.andThen(andThen(sink)); }
+        @Override default <V> StepToSinkOperator<T, V> andThen(StepToSinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
+        @Override default <V> StepSinkOperator<T, V> andThen(StepSinkOperator<U, V> after) { return sink -> andThen(after.andThen(sink)); }
     }
 
     // --- Source Operators ---
