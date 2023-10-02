@@ -18,11 +18,23 @@ public class Belt {
     // --- Stages ---
     
     /**
-     * TODO
+     * Sealed interface over {@link Source Source}, {@link Sink Sink}, and {@link Silo Silo}. Stages have different
+     * input/output configurations, or "shapes", which can be connected to form a processing pipeline.
+     *
+     * <ul>
+     *     <li>{@code Source} - yields output elements
+     *     <li>{@code Sink} - accepts input elements
+     *     <li>{@code Silo} - connects {@code Sources} to {@code Sinks}
+     * </ul>
+     *
+     * (For a "stage" that accepts input elements and yields output elements, see {@link Segue Segue}.)
+     *
+     * <p>Stages can be {@link #run run}, which will traverse each silo encapsulated by the stage and execute the
+     * processing pipeline.
      */
     public sealed interface Stage {
         /**
-         * Runs each silo encapsulated by this stage, by recursively running the source and sink of the silo, and
+         * Traverses each silo encapsulated by this stage, recursively running the source and sink of the silo, and
          * submitting a task to the executor that:
          * <ol>
          *     <li>drains the source to the sink
@@ -45,7 +57,7 @@ public class Belt {
          * <p>If a silo has already started running on any executor, subsequent runs of that silo will short-circuit and
          * do nothing.
          *
-         * @implSpec A stage that delegates to other stages must call {@code run} on each stage before returning from
+         * @implSpec A stage that delegates to other stages should call {@code run} on each stage before returning from
          * this method.
          *
          * @implNote The default implementation does nothing.
@@ -70,12 +82,68 @@ public class Belt {
      * @see #run(Executor)
      */
     public sealed interface Silo extends Stage permits Belts.ClosedSilo, Belts.ChainSilo {
-        // Stage/Segue chaining
+        /**
+         * Returns a composed silo that, when {@link #run run}, runs this silo and the {@code before} silo. This method
+         * is effectively equivalent to {@link #andThen(Silo) Silo.andThen(Silo)}.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Silo compose(Silo before) { return new Belts.ChainSilo(before, this); }
+        
+        /**
+         * Returns a composed sink that behaves like the {@code before} sink, except that {@link #run running} it will
+         * also run this silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Sink<T> compose(Sink<T> before) { return new Belts.ChainSink<>(before, this); }
+        
+        /**
+         * Returns a composed sink that behaves like the {@code before} sink, except that {@link #run running} it will
+         * also run this silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSink<T> compose(StepSink<T> before) { return new Belts.ChainStepSink<>(before, this); }
+        
+        /**
+         * Returns a composed silo that, when {@link #run run}, runs this silo and the {@code after} silo. This method
+         * is effectively equivalent to {@link #compose(Silo) Silo.compose(Silo)}.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Silo andThen(Silo after) { return new Belts.ChainSilo(this, after); }
+        
+        /**
+         * Returns a composed source that behaves like the {@code after} source, except that {@link #run running} it
+         * will also run this silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Source<T> andThen(Source<T> after) { return new Belts.ChainSource<>(this, after); }
+        
+        /**
+         * Returns a composed source that behaves like the {@code after} source, except that {@link #run running} it
+         * will also run this silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> StepSource<T> andThen(StepSource<T> after) { return new Belts.ChainStepSource<>(this, after); }
     }
     
@@ -83,8 +151,8 @@ public class Belt {
      * A {@link Stage Stage} that accepts input elements.
      *
      * <p>A sink may encapsulate a downstream silo, which will {@link #run run} when the sink runs. Sinks generally
-     * should be run before accepting elements, in case the sink connects across a downstream boundary, to avoid
-     * unmitigated buffer saturation and consequent deadlock or dropped elements.
+     * should be run before accepting elements, in case the sink connects across a downstream boundary, to avoid the
+     * effects of unmitigated buffer saturation (including potential deadlock).
      *
      * @param <In> the input element type
      */
@@ -108,13 +176,13 @@ public class Belt {
         /**
          * Notifies any nearest downstream boundary sources to stop yielding elements that arrive after this signal.
          *
-         * @implSpec A boundary sink must implement its {@link StepSink#offer offer} and
+         * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
-         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source must return
+         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source should return
          * {@code null} from {@link StepSource#poll poll} and {@code false} from {@link Source#drainToSink drainToSink}
          * after yielding all values that arrived before it received this signal.
          *
-         * <p>A sink that delegates to downstream sinks must call {@code complete} on each downstream sink before
+         * <p>A sink that delegates to downstream sinks should call {@code complete} on each downstream sink before
          * returning from this method, unless this method throws before completing any sinks. If completing any sink
          * throws an exception, subsequent exceptions should be suppressed onto the first exception. If completing any
          * sink throws {@link InterruptedException}, the thread interrupt status should be set when the exception is
@@ -132,13 +200,13 @@ public class Belt {
          * Notifies any nearest downstream boundary sources to stop yielding elements and throw
          * {@link UpstreamException}.
          *
-         * @implSpec A boundary sink must implement its {@link StepSink#offer offer} and
+         * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
-         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source must throw an
+         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source should throw an
          * {@link UpstreamException}, wrapping the cause passed to this method, upon initiating any subsequent calls to
          * {@link StepSource#poll poll} or subsequent offers in {@link Source#drainToSink drainToSink}.
          *
-         * <p>A sink that delegates to downstream sinks must call {@code completeAbruptly} on each downstream sink
+         * <p>A sink that delegates to downstream sinks should call {@code completeAbruptly} on each downstream sink
          * before returning from this method, <strong>even if this method throws</strong>. If completing any sink throws
          * an exception, subsequent exceptions should be suppressed onto the first exception. If completing any sink
          * throws {@link InterruptedException}, the thread interrupt status should be set when the exception is caught,
@@ -153,12 +221,67 @@ public class Belt {
          */
         default void completeAbruptly(Throwable cause) throws Exception { }
         
-        // Stage/Segue chaining
+        /**
+         * Returns a silo that, when {@link #run run}, will drain from the {@code before} source to this sink.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Silo compose(StepSource<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
+         * segue to this sink.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Sink<T> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
+         * segue to this sink.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSink<T> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        
+        /**
+         * Returns a composed sink that behaves like this sink, except that {@link #run running} it will also run the
+         * {@code after} silo.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Sink<In> andThen(Silo after) { return new Belts.ChainSink<>(this, after); }
+        
+        /**
+         * Returns a segue that bundles this sink with the {@code after} source.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Segue<In, T> andThen(Source<T> after) { return new Belts.ChainSegue<>(this, after); }
+        
+        /**
+         * Returns a segue that bundles this sink with the {@code after} source.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> SinkStepSource<In, T> andThen(StepSource<T> after) { return new Belts.ChainSinkStepSource<>(this, after); }
         
         // Operator chaining
@@ -170,8 +293,8 @@ public class Belt {
      * A {@link Stage Stage} that yields output elements.
      *
      * <p>A source may encapsulate an upstream silo, which will {@link #run run} when the source runs. Sources generally
-     * should be run before yielding elements, in case the source connects across an upstream boundary, to avoid
-     * unmitigated buffer depletion and consequent deadlock or inserted elements.
+     * should be run before yielding elements, in case the source connects across an upstream boundary, to avoid the
+     * effects of unmitigated buffer depletion (including potential deadlock).
      *
      * @param <Out> the output element type
      */
@@ -197,11 +320,11 @@ public class Belt {
          *
          * @implSpec Calling this method may cause this source to stop yielding elements from
          * {@link StepSource#poll poll} and {@link #drainToSink drainToSink}. In that case, if this is a boundary
-         * source, the connected boundary sink must implement its {@link StepSink#offer offer} and
+         * source, the connected boundary sink should implement its {@link StepSink#offer offer} and
          * {@link Sink#drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock.
          *
-         * <p>A source that delegates to upstream sources must call {@code close} on each upstream source before
+         * <p>A source that delegates to upstream sources should call {@code close} on each upstream source before
          * returning from this method, <strong>even if this method throws</strong>. If closing any source throws an
          * exception, subsequent exceptions should be suppressed onto the first exception. The utility method
          * {@link Belts#composedClose(Stream)} is provided for common use cases.
@@ -263,12 +386,67 @@ public class Belt {
             return finisher.apply(acc);
         }
         
-        // Stage/Segue chaining
+        /**
+         * Returns a composed source that behaves like this source, except that {@link #run running} it will also run
+         * the {@code before} silo.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Source<Out> compose(Silo before) { return new Belts.ChainSource<>(before, this); }
+        
+        /**
+         * Returns a segue that bundles the {@code before} sink with this source.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Segue<T, Out> compose(Sink<T> before) { return new Belts.ChainSegue<>(before, this); }
+        
+        /**
+         * Returns a segue that bundles the {@code before} sink with this source.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSinkSource<T, Out> compose(StepSink<T> before) { return new Belts.ChainStepSinkSource<>(before, this); }
+        
+        /**
+         * Returns a silo that, when {@link #run run}, will drain from this source to the {@code after} sink.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Silo andThen(StepSink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        
+        /**
+         * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
+         * {@code after} segue.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Source<T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        
+        /**
+         * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
+         * {@code after} segue.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> StepSource<T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
         
         // Operator chaining
@@ -287,7 +465,7 @@ public class Belt {
          * Offers the input element to this sink for processing. Returns {@code false} if this sink cancelled during or
          * prior to this call, in which case the element may not have been fully processed.
          *
-         * @implSpec Once this method returns {@code false}, subsequent calls must also discard the input element and
+         * @implSpec Once this method returns {@code false}, subsequent calls should also discard the input element and
          * return {@code false}, to indicate the sink is permanently cancelled and no longer accepting elements.
          *
          * @param input the input element
@@ -313,10 +491,39 @@ public class Belt {
             return true;
         }
         
-        // Stage/Segue chaining
+        /**
+         * Returns a silo that, when {@link #run run}, will drain from the {@code before} source to this sink.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Silo compose(Source<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
+         * segue to this sink.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Sink<T> compose(Segue<T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
+         * segue to this sink.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        
         @Override default StepSink<In> andThen(Silo after) { return new Belts.ChainStepSink<>(this, after); }
         @Override default <T> StepSinkSource<In, T> andThen(Source<T> after) { return new Belts.ChainStepSinkSource<>(this, after); }
         @Override default <T> StepSegue<In, T> andThen(StepSource<T> after) { return new Belts.ChainStepSegue<>(this, after); }
@@ -336,7 +543,7 @@ public class Belt {
         /**
          * Polls this source for the next element. Returns {@code null} if this source is drained.
          *
-         * @implSpec Once this method returns {@code null}, subsequent calls must also return {@code null}, to indicate
+         * @implSpec Once this method returns {@code null}, subsequent calls should also return {@code null}, to indicate
          * the source is permanently drained and no longer yielding elements.
          *
          * @return the next element from this source, or {@code null} if this source is drained
@@ -361,12 +568,41 @@ public class Belt {
             return true;
         }
         
-        // Stage/Segue chaining
         @Override default StepSource<Out> compose(Silo before) { return new Belts.ChainStepSource<>(before, this); }
         @Override default <T> SinkStepSource<T, Out> compose(Sink<T> before) { return new Belts.ChainSinkStepSource<>(before, this); }
         @Override default <T> StepSegue<T, Out> compose(StepSink<T> before) { return new Belts.ChainStepSegue<>(before, this); }
+        
+        /**
+         * Returns a silo that, when {@link #run run}, will drain from this source to the {@code after} sink.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Silo andThen(Sink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        
+        /**
+         * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
+         * {@code after} segue.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Source<T> andThen(Segue<? super Out, T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        
+        /**
+         * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
+         * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
+         * {@code after} segue.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> StepSource<T> andThen(SinkStepSource<? super Out, T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
         
         // Operator chaining
@@ -377,7 +613,10 @@ public class Belt {
     // --- Segues ---
     
     /**
-     * TODO
+     * A bundled {@link Sink Sink} and {@link Source Source}. The sink and source need not be related. However, it is
+     * common for the sink and source to be internally connected, such that the elements input to the sink determine or
+     * influence the elements output from the source. This allows data to transition across the "asynchronous boundary"
+     * between threads, if the thread(s) draining to the sink differ from the thread(s) draining from the source.
      *
      * @param <In> the input element type
      * @param <Out> the output element type
@@ -395,12 +634,85 @@ public class Belt {
          */
         Source<Out> source();
         
-        // Stage/Segue chaining
+        /**
+         * Returns a composed source that behaves like the source-side of this segue, except that
+         * {@link Stage#run running} it will also run the silo formed by connecting the {@code before} source to the
+         * sink-side of this segue.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Source<Out> compose(StepSource<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        
+        /**
+         * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
+         * behaves like the source-side of this segue, as if by calling
+         * {@snippet :
+         * this.compose(before.source()).compose(before.sink())
+         * }
+         * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Segue<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        
+        /**
+         * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
+         * behaves like the source-side of this segue, as if by calling
+         * {@snippet :
+         * this.compose(before.source()).compose(before.sink())
+         * }
+         * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSinkSource<T, Out> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of this segue, except that {@link Stage#run running}
+         * it will also run the silo formed by connecting the source-side of this segue to the {@code after} sink.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Sink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        
+        /**
+         * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
+         * behaves like the sink-side of this segue, as if by calling
+         * {@snippet :
+         * this.andThen(after.sink()).andThen(after.source())
+         * }
+         * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Segue<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        
+        /**
+         * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
+         * behaves like the sink-side of this segue, as if by calling
+         * {@snippet :
+         * this.andThen(after.sink()).andThen(after.source())
+         * }
+         * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
@@ -419,10 +731,47 @@ public class Belt {
     public interface StepSinkSource<In, Out> extends Segue<In, Out> {
         @Override StepSink<In> sink();
         
-        // Stage/Segue chaining
+        /**
+         * Returns a composed source that behaves like the source-side of this segue, except that
+         * {@link Stage#run running} it will also run the silo formed by connecting the {@code before} source to the
+         * sink-side of this segue.
+         *
+         * @param before
+         * @return
+         * @throws NullPointerException if before is null
+         */
         default Source<Out> compose(Source<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        
+        /**
+         * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
+         * behaves like the source-side of this segue, as if by calling
+         * {@snippet :
+         * this.compose(before.source()).compose(before.sink())
+         * }
+         * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> Segue<T, Out> compose(Segue<T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        
+        /**
+         * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
+         * behaves like the source-side of this segue, as if by calling
+         * {@snippet :
+         * this.compose(before.source()).compose(before.sink())
+         * }
+         * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
+         *
+         * @param before
+         * @return
+         * @param <T>
+         * @throws NullPointerException if before is null
+         */
         default <T> StepSinkSource<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        
         @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
         @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, T> after) { return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         @Override default <T> StepSegue<In, T> andThen(StepSegue<? super Out, T> after) { return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
@@ -443,12 +792,48 @@ public class Belt {
     public interface SinkStepSource<In, Out> extends Segue<In, Out> {
         @Override StepSource<Out> source();
         
-        // Stage/Segue chaining
         @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
         @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
         @Override default <T> StepSegue<T, Out> compose(StepSegue<T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        
+        /**
+         * Returns a composed sink that behaves like the sink-side of this segue, except that {@link Stage#run running}
+         * it will also run the silo formed by connecting the source-side of this segue to the {@code after} sink.
+         *
+         * @param after
+         * @return
+         * @throws NullPointerException if after is null
+         */
         default Sink<In> andThen(Sink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        
+        /**
+         * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
+         * behaves like the sink-side of this segue, as if by calling
+         * {@snippet :
+         * this.andThen(after.sink()).andThen(after.source())
+         * }
+         * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> Segue<In, T> andThen(Segue<? super Out, T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        
+        /**
+         * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
+         * behaves like the sink-side of this segue, as if by calling
+         * {@snippet :
+         * this.andThen(after.sink()).andThen(after.source())
+         * }
+         * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
+         *
+         * @param after
+         * @return
+         * @param <T>
+         * @throws NullPointerException if after is null
+         */
         default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
         
         // Operator chaining
@@ -459,13 +844,13 @@ public class Belt {
     }
     
     /**
-     * A {@link Segue Segue} where the sink is {@link StepSink StepSink} and the source is a {@link StepSource StepSource}.
+     * A {@link Segue Segue} where the sink is a {@link StepSink StepSink} and the source is a
+     * {@link StepSource StepSource}.
      *
      * @param <In> the input element type
      * @param <Out> the output element type
      */
     public interface StepSegue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
-        // Stage/Segue chaining
         @Override default StepSource<Out> compose(Source<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
         @Override default <T> SinkStepSource<T, Out> compose(Segue<T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
         @Override default <T> StepSegue<T, Out> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
