@@ -32,10 +32,10 @@ public class Belts {
     
     public static <T> Belt.StepSourceOperator<T, T> synchronizeStepSource() {
         class SynchronizedStepSource implements Belt.StepSource<T> {
-            final Belt.StepSource<T> source;
+            final Belt.StepSource<? extends T> source;
             final ReentrantLock lock = new ReentrantLock();
             
-            SynchronizedStepSource(Belt.StepSource<T> source) {
+            SynchronizedStepSource(Belt.StepSource<? extends T> source) {
                 this.source = Objects.requireNonNull(source);
             }
             
@@ -70,10 +70,10 @@ public class Belts {
     
     public static <T> Belt.StepSinkOperator<T, T> synchronizeStepSink() {
         class SynchronizedStepSink implements Belt.StepSink<T> {
-            final Belt.StepSink<T> sink;
+            final Belt.StepSink<? super T> sink;
             final ReentrantLock lock = new ReentrantLock();
             
-            SynchronizedStepSink(Belt.StepSink<T> sink) {
+            SynchronizedStepSink(Belt.StepSink<? super T> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -122,9 +122,9 @@ public class Belts {
         Objects.requireNonNull(asyncExceptionHandler);
         
         class RecoverStep implements Belt.StepSink<T> {
-            final Belt.StepSink<T> sink;
+            final Belt.StepSink<? super T> sink;
             
-            RecoverStep(Belt.StepSink<T> sink) {
+            RecoverStep(Belt.StepSink<? super T> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -176,9 +176,9 @@ public class Belts {
         Objects.requireNonNull(asyncExceptionHandler);
         
         class Recover implements Belt.Sink<T> {
-            final Belt.Sink<T> sink;
+            final Belt.Sink<? super T> sink;
             
-            Recover(Belt.Sink<T> sink) {
+            Recover(Belt.Sink<? super T> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -228,9 +228,9 @@ public class Belts {
         Objects.requireNonNull(sourceToClose);
         
         class AlsoClose extends ProxySource<T> {
-            final Belt.Source<T> source;
+            final Belt.Source<? extends T> source;
             
-            AlsoClose(Belt.Source<T> source) {
+            AlsoClose(Belt.Source<? extends T> source) {
                 this.source = Objects.requireNonNull(source);
             }
             
@@ -252,9 +252,9 @@ public class Belts {
         Objects.requireNonNull(sinkToComplete);
         
         class AlsoComplete extends ProxySink<T> {
-            final Belt.Sink<T> sink;
+            final Belt.Sink<? super T> sink;
             
-            AlsoComplete(Belt.Sink<T> sink) {
+            AlsoComplete(Belt.Sink<? super T> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -287,7 +287,7 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("split-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    Belt.StepSink<? super T> subSink = Belts.stepSink(e -> true);
+                    Belt.StepSink<? super T> subSink = e -> true;
                     var exec = scopeExecutor(scope);
                     try {
                         boolean drained = true;
@@ -401,10 +401,10 @@ public class Belts {
         Objects.requireNonNull(asyncExceptionHandler);
         
         class FlatMap extends ProxySink<T> implements Belt.StepSink<T> {
-            final Belt.StepSink<U> sink;
+            final Belt.StepSink<? super U> sink;
             boolean draining = true;
             
-            FlatMap(Belt.StepSink<U> sink) {
+            FlatMap(Belt.StepSink<? super U> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -445,9 +445,9 @@ public class Belts {
         Objects.requireNonNull(asyncExceptionHandler);
         
         class SourceAdaptedSink extends ProxySink<T> {
-            final Belt.Sink<U> sink;
+            final Belt.Sink<? super U> sink;
             
-            SourceAdaptedSink(Belt.Sink<U> sink) {
+            SourceAdaptedSink(Belt.Sink<? super U> sink) {
                 this.sink = Objects.requireNonNull(sink);
             }
             
@@ -519,9 +519,9 @@ public class Belts {
         Objects.requireNonNull(asyncExceptionHandler);
         
         class SinkAdaptedSource extends ProxySource<U> {
-            final Belt.Source<T> source;
+            final Belt.Source<? extends T> source;
             
-            SinkAdaptedSource(Belt.Source<T> source) {
+            SinkAdaptedSource(Belt.Source<? extends T> source) {
                 this.source = Objects.requireNonNull(source);
             }
             
@@ -585,7 +585,7 @@ public class Belts {
         var finisher = gatherer.finisher();
         
         class Gather implements Belt.StepSink<T> {
-            final Belt.StepSink<R> sink;
+            final Belt.StepSink<? super R> sink;
             final Gatherer.Sink<R> gsink;
             A acc = null;
             int state = NEW;
@@ -595,7 +595,7 @@ public class Belts {
             static final int COMPLETED = 2;
             static final int CLOSED    = 3;
             
-            Gather(Belt.StepSink<R> sink) {
+            Gather(Belt.StepSink<? super R> sink) {
                 this.sink = Objects.requireNonNull(sink);
                 this.gsink = el -> {
                     try {
@@ -1161,7 +1161,7 @@ public class Belts {
         return new MapBalanceOrdered();
     }
     
-    public static <T, C extends Callable<T>> Belt.StepToSourceOperator<C, T> balanceMergeSource(int parallelism) {
+    public static <T> Belt.StepToSourceOperator<Callable<T>, T> balanceMergeSource(int parallelism) {
         if (parallelism < 1) {
             throw new IllegalArgumentException("parallelism must be positive");
         }
@@ -1169,7 +1169,7 @@ public class Belts {
         return source -> {
             Objects.requireNonNull(source);
             Belt.StepSource<T> worker = () -> {
-                for (C c; (c = source.poll()) != null; ) {
+                for (Callable<T> c; (c = source.poll()) != null; ) {
                     var t = c.call();
                     if (t != null) { // Skip nulls
                         return t;
@@ -1182,14 +1182,14 @@ public class Belts {
         };
     }
     
-    public static <T, C extends Callable<T>> Belt.SinkToStepOperator<C, T> balanceMergeSink(int parallelism) {
+    public static <T> Belt.SinkToStepOperator<Callable<T>, T> balanceMergeSink(int parallelism) {
         if (parallelism < 1) {
             throw new IllegalArgumentException("parallelism must be positive");
         }
         
         return sink -> {
             Objects.requireNonNull(sink);
-            Belt.StepSink<C> worker = c -> {
+            Belt.StepSink<Callable<T>> worker = c -> {
                 var t = c.call();
                 return t == null || sink.offer(t); // Skip nulls
             };
@@ -2119,7 +2119,7 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Belt.Source<T> source(Stream<? extends T> stream) {
+    public static <T> Belt.Source<T> streamSource(Stream<? extends T> stream) {
         Objects.requireNonNull(stream);
         
         class StreamSource implements Belt.Source<T> {
@@ -2163,11 +2163,11 @@ public class Belts {
         return new StreamSource();
     }
     
-    public static <T> Belt.StepSource<T> stepSource(Iterator<T> iterator) {
-        return stepSource(iterator, () -> { });
+    public static <T> Belt.StepSource<T> iteratorSource(Iterator<T> iterator) {
+        return iteratorSource(iterator, () -> { });
     }
     
-    public static <T> Belt.StepSource<T> stepSource(Iterator<T> iterator, AutoCloseable onClose) {
+    public static <T> Belt.StepSource<T> iteratorSource(Iterator<T> iterator, AutoCloseable onClose) {
         Objects.requireNonNull(iterator);
         Objects.requireNonNull(onClose);
         
@@ -2184,22 +2184,6 @@ public class Belts {
         }
         
         return new IteratorSource();
-    }
-    
-    public static <T> Belt.Source<T> source(Belt.Source<T> source) {
-        return Objects.requireNonNull(source);
-    }
-    
-    public static <T> Belt.Sink<T> sink(Belt.Sink<T> sink) {
-        return Objects.requireNonNull(sink);
-    }
-    
-    public static <T> Belt.StepSource<T> stepSource(Belt.StepSource<T> source) {
-        return Objects.requireNonNull(source);
-    }
-    
-    public static <T> Belt.StepSink<T> stepSink(Belt.StepSink<T> sink) {
-        return Objects.requireNonNull(sink);
     }
     
     public static Executor scopeExecutor(StructuredTaskScope<?> scope) {
@@ -2442,11 +2426,11 @@ public class Belts {
     }
     
     static sealed class ChainSink<In> extends Chain implements Belt.Sink<In> {
-        final Belt.Sink<In> sink;
+        final Belt.Sink<? super In> sink;
         
-        ChainSink(Belt.Sink<In> left, Belt.Silo right) {
+        ChainSink(Belt.Sink<? super In> left, Belt.Silo right) {
             super(left, right);
-            this.sink = left instanceof ChainSink<In> cs ? cs.sink : left;
+            this.sink = left instanceof ChainSink<? super In> cs ? cs.sink : left;
         }
         
         @Override
@@ -2466,11 +2450,11 @@ public class Belts {
     }
     
     static sealed class ChainSource<Out> extends Chain implements Belt.Source<Out> {
-        final Belt.Source<Out> source;
+        final Belt.Source<? extends Out> source;
         
-        ChainSource(Belt.Silo left, Belt.Source<Out> right) {
+        ChainSource(Belt.Silo left, Belt.Source<? extends Out> right) {
             super(left, right);
-            this.source = right instanceof ChainSource<Out> cs ? cs.source : right;
+            this.source = right instanceof ChainSource<? extends Out> cs ? cs.source : right;
         }
         
         @Override
@@ -2485,52 +2469,88 @@ public class Belts {
     }
     
     static final class ChainStepSink<In> extends ChainSink<In> implements Belt.StepSink<In> {
-        ChainStepSink(Belt.StepSink<In> left, Belt.Silo right) {
+        ChainStepSink(Belt.StepSink<? super In> left, Belt.Silo right) {
             super(left, right);
         }
         
         @Override
         public boolean offer(In input) throws Exception {
-            return ((Belt.StepSink<In>) sink).offer(input);
+            return ((Belt.StepSink<? super In>) sink).offer(input);
         }
     }
     
     static final class ChainStepSource<Out> extends ChainSource<Out> implements Belt.StepSource<Out> {
-        ChainStepSource(Belt.Silo left, Belt.StepSource<Out> right) {
+        ChainStepSource(Belt.Silo left, Belt.StepSource<? extends Out> right) {
             super(left, right);
         }
         
         @Override
         public Out poll() throws Exception {
-            return ((Belt.StepSource<Out>) source).poll();
+            return ((Belt.StepSource<? extends Out>) source).poll();
         }
     }
     
-    record ChainSegue<In, Out>(Belt.Sink<In> sink, Belt.Source<Out> source) implements Belt.Segue<In, Out> {
-        public ChainSegue {
-            Objects.requireNonNull(sink);
-            Objects.requireNonNull(source);
+    static class ChainSegue<In, Out> implements Belt.Segue<In, Out> {
+        final Belt.Sink<? super In> sink;
+        final Belt.Source<? extends Out> source;
+        
+        ChainSegue(Belt.Sink<? super In> sink, Belt.Source<? extends Out> source) {
+            this.sink = Objects.requireNonNull(sink);
+            this.source = Objects.requireNonNull(source);
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.Sink<In> sink() {
+            return (Belt.Sink<In>) sink;
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.Source<Out> source() {
+            return (Belt.Source<Out>) source;
         }
     }
     
-    record ChainStepSinkSource<In, Out>(Belt.StepSink<In> sink, Belt.Source<Out> source) implements Belt.StepSinkSource<In, Out> {
-        public ChainStepSinkSource {
-            Objects.requireNonNull(sink);
-            Objects.requireNonNull(source);
+    static class ChainStepSinkSource<In, Out> extends ChainSegue<In, Out> implements Belt.StepSinkSource<In, Out> {
+        ChainStepSinkSource(Belt.StepSink<? super In> sink, Belt.Source<? extends Out> source) {
+            super(sink, source);
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.StepSink<In> sink() {
+            return (Belt.StepSink<In>) sink;
         }
     }
     
-    record ChainSinkStepSource<In, Out>(Belt.Sink<In> sink, Belt.StepSource<Out> source) implements Belt.SinkStepSource<In, Out> {
-        public ChainSinkStepSource {
-            Objects.requireNonNull(sink);
-            Objects.requireNonNull(source);
+    static class ChainSinkStepSource<In, Out> extends ChainSegue<In, Out> implements Belt.SinkStepSource<In, Out> {
+        ChainSinkStepSource(Belt.Sink<? super In> sink, Belt.StepSource<? extends Out> source) {
+            super(sink, source);
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.StepSource<Out> source() {
+            return (Belt.StepSource<Out>) source;
         }
     }
     
-    record ChainStepSegue<In, Out>(Belt.StepSink<In> sink, Belt.StepSource<Out> source) implements Belt.StepSegue<In, Out> {
-        public ChainStepSegue {
-            Objects.requireNonNull(sink);
-            Objects.requireNonNull(source);
+    static class ChainStepSegue<In, Out> extends ChainSegue<In, Out> implements Belt.StepSegue<In, Out> {
+        ChainStepSegue(Belt.StepSink<? super In> sink, Belt.StepSource<? extends Out> source) {
+            super(sink, source);
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.StepSink<In> sink() {
+            return (Belt.StepSink<In>) sink;
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        public Belt.StepSource<Out> source() {
+            return (Belt.StepSource<Out>) source;
         }
     }
 }
