@@ -683,19 +683,16 @@ public class Belts {
                                                                             Function<? super T, ? extends K> classifier,
                                                                             BiFunction<? super T, ? super K, ? extends Callable<? extends U>> mapper) {
         // POLL:
-        // Worker polls element from source
-        // If completion buffer is full, worker waits until not full
-        // Worker offers element to completion buffer
-        // If element partition has permits, worker takes one and begins work (END)
-        // Worker offers element to partition buffer, goes to step 1
-        
-        // TODO^: If partition has no permits, then MAX other workers are already working the partition, so leave that be
-        //  But if those workers fail (and we recover), might we forget about the partition?
+        // 1. Worker polls element from source
+        // 2. If completion buffer is full, worker waits until not full
+        // 3. Worker offers element to completion buffer
+        // 4. If element partition has permits, worker takes one and begins work (END)
+        // 5. Worker offers element to partition buffer, goes to step 1
         
         // OFFER:
-        // Worker polls partition buffer, continues if not empty (END)
-        // Worker gives permit back to partition
-        // If partition has max permits, worker removes partition
+        // 1. Worker polls partition buffer, continues if not empty (END)
+        // 2. Worker gives permit back to partition
+        // 3. If partition has max permits, worker removes partition
         
         if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");

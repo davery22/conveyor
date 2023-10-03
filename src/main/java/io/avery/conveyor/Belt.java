@@ -86,65 +86,77 @@ public class Belt {
          * Returns a composed silo that, when {@link #run run}, runs this silo and the {@code before} silo. This method
          * is effectively equivalent to {@link #andThen(Silo) Silo.andThen(Silo)}.
          *
-         * @param before
-         * @return
+         * @param before the other silo
+         * @return a composed silo that runs this silo and the {@code before} silo
          * @throws NullPointerException if before is null
          */
-        default Silo compose(Silo before) { return new Belts.ChainSilo(before, this); }
+        default Silo compose(Silo before) {
+            return new Belts.ChainSilo(before, this);
+        }
         
         /**
          * Returns a composed sink that behaves like the {@code before} sink, except that {@link #run running} it will
          * also run this silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream sink
+         * @return a composed sink that also runs this silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Sink<T> compose(Sink<? super T> before) { return new Belts.ChainSink<>(before, this); }
+        default <T> Sink<T> compose(Sink<? super T> before) {
+            return new Belts.ChainSink<>(before, this);
+        }
         
         /**
          * Returns a composed sink that behaves like the {@code before} sink, except that {@link #run running} it will
          * also run this silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream sink
+         * @return a composed sink that also runs this silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSink<T> compose(StepSink<? super T> before) { return new Belts.ChainStepSink<>(before, this); }
+        default <T> StepSink<T> compose(StepSink<? super T> before) {
+            return new Belts.ChainStepSink<>(before, this);
+        }
         
         /**
          * Returns a composed silo that, when {@link #run run}, runs this silo and the {@code after} silo. This method
          * is effectively equivalent to {@link #compose(Silo) Silo.compose(Silo)}.
          *
-         * @param after
-         * @return
+         * @param after the other silo
+         * @return a composed silo that runs this silo and the {@code before} silo
          * @throws NullPointerException if after is null
          */
-        default Silo andThen(Silo after) { return new Belts.ChainSilo(this, after); }
+        default Silo andThen(Silo after) {
+            return new Belts.ChainSilo(this, after);
+        }
         
         /**
          * Returns a composed source that behaves like the {@code after} source, except that {@link #run running} it
          * will also run this silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream source
+         * @return a composed source that also runs this silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Source<T> andThen(Source<? extends T> after) { return new Belts.ChainSource<>(this, after); }
+        default <T> Source<T> andThen(Source<? extends T> after) {
+            return new Belts.ChainSource<>(this, after);
+        }
         
         /**
          * Returns a composed source that behaves like the {@code after} source, except that {@link #run running} it
          * will also run this silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream source
+         * @return a composed source that also runs this silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> StepSource<T> andThen(StepSource<? extends T> after) { return new Belts.ChainStepSource<>(this, after); }
+        default <T> StepSource<T> andThen(StepSource<? extends T> after) {
+            return new Belts.ChainStepSource<>(this, after);
+        }
     }
     
     /**
@@ -224,69 +236,103 @@ public class Belt {
         /**
          * Returns a silo that, when {@link #run run}, will drain from the {@code before} source to this sink.
          *
-         * @param before
-         * @return
+         * @param before the upstream source
+         * @return a silo that will drain from the source to this sink
          * @throws NullPointerException if before is null
          */
-        default Silo compose(StepSource<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        default Silo compose(StepSource<? extends In> before) {
+            return new Belts.ClosedSilo<>(before, this);
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
          * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
          * segue to this sink.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed sink that also runs a downstream silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Sink<T> compose(SinkStepSource<? super T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> Sink<T> compose(SinkStepSource<? super T, ? extends In> before) {
+            return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this));
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
          * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
          * segue to this sink.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed sink that also runs a downstream silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSink<T> compose(StepSegue<? super T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(StepSegue<? super T, ? extends In> before) {
+            return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this));
+        }
         
         /**
          * Returns a composed sink that behaves like this sink, except that {@link #run running} it will also run the
          * {@code after} silo.
          *
-         * @param after
-         * @return
+         * @param after the downstream silo
+         * @return a composed sink that also runs a downstream silo
          * @throws NullPointerException if after is null
          */
-        default Sink<In> andThen(Silo after) { return new Belts.ChainSink<>(this, after); }
+        default Sink<In> andThen(Silo after) {
+            return new Belts.ChainSink<>(this, after);
+        }
         
         /**
          * Returns a segue that bundles this sink with the {@code after} source.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream source
+         * @return a segue that bundles this sink with the {@code after} source
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Segue<In, T> andThen(Source<? extends T> after) { return new Belts.ChainSegue<>(this, after); }
+        default <T> Segue<In, T> andThen(Source<? extends T> after) {
+            return new Belts.ChainSegue<>(this, after);
+        }
         
         /**
          * Returns a segue that bundles this sink with the {@code after} source.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream source
+         * @return a segue that bundles this sink with the {@code after} source
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> SinkStepSource<In, T> andThen(StepSource<? extends T> after) { return new Belts.ChainSinkStepSource<>(this, after); }
+        default <T> SinkStepSource<In, T> andThen(StepSource<? extends T> after) {
+            return new Belts.ChainSinkStepSource<>(this, after);
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Sink<T> compose(SinkOperator<? super T, ? extends In> mapper) { return (Sink<T>) mapper.andThen(this); }
-        @SuppressWarnings("unchecked") default <T> StepSink<T> compose(StepToSinkOperator<? super T, ? extends In> mapper) { return (StepSink<T>) mapper.andThen(this); }
+        /**
+         * Returns an upstream sink obtained by applying the {@code mapper} to this sink.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return an upstream sink obtained by applying the {@code mapper} to this sink
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Sink<T> compose(SinkOperator<? super T, ? extends In> mapper) {
+            return (Sink<T>) mapper.andThen(this);
+        }
+        
+        /**
+         * Returns an upstream sink obtained by applying the {@code mapper} to this sink.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return an upstream sink obtained by applying the {@code mapper} to this sink
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSink<T> compose(StepToSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSink<T>) mapper.andThen(this);
+        }
     }
     
     /**
@@ -390,68 +436,102 @@ public class Belt {
          * Returns a composed source that behaves like this source, except that {@link #run running} it will also run
          * the {@code before} silo.
          *
-         * @param before
-         * @return
+         * @param before the upstream silo
+         * @return a composed source that also runs an upstream silo
          * @throws NullPointerException if before is null
          */
-        default Source<Out> compose(Silo before) { return new Belts.ChainSource<>(before, this); }
+        default Source<Out> compose(Silo before) {
+            return new Belts.ChainSource<>(before, this);
+        }
         
         /**
          * Returns a segue that bundles the {@code before} sink with this source.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream sink
+         * @return a segue that bundles the {@code before} sink with this source
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Segue<T, Out> compose(Sink<? super T> before) { return new Belts.ChainSegue<>(before, this); }
+        default <T> Segue<T, Out> compose(Sink<? super T> before) {
+            return new Belts.ChainSegue<>(before, this);
+        }
         
         /**
          * Returns a segue that bundles the {@code before} sink with this source.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream sink
+         * @return a segue that bundles the {@code before} sink with this source
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSinkSource<T, Out> compose(StepSink<? super T> before) { return new Belts.ChainStepSinkSource<>(before, this); }
+        default <T> StepSinkSource<T, Out> compose(StepSink<? super T> before) {
+            return new Belts.ChainStepSinkSource<>(before, this);
+        }
         
         /**
          * Returns a silo that, when {@link #run run}, will drain from this source to the {@code after} sink.
          *
-         * @param after
-         * @return
+         * @param after the downstream sink
+         * @return a silo that will drain from this source to the sink
          * @throws NullPointerException if after is null
          */
-        default Silo andThen(StepSink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        default Silo andThen(StepSink<? super Out> after) {
+            return new Belts.ClosedSilo<>(this, after);
+        }
         
         /**
          * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
          * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
          * {@code after} segue.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed source that also runs an upstream silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Source<T> andThen(StepSinkSource<? super Out, ? extends T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> Source<T> andThen(StepSinkSource<? super Out, ? extends T> after) {
+            return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source());
+        }
         
         /**
          * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
          * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
          * {@code after} segue.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed source that also runs an upstream silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> StepSource<T> andThen(StepSegue<? super Out, ? extends T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(StepSegue<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source());
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Source<T> andThen(SourceOperator<? super Out, ? extends T> mapper) { return (Source<T>) mapper.compose(this); }
-        @SuppressWarnings("unchecked") default <T> StepSource<T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) { return (StepSource<T>) mapper.compose(this); }
+        /**
+         * Returns a downstream source obtained by applying the {@code mapper} to this source.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a downstream source obtained by applying the {@code mapper} to this source
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Source<T> andThen(SourceOperator<? super Out, ? extends T> mapper) {
+            return (Source<T>) mapper.compose(this);
+        }
+        
+        /**
+         * Returns a downstream source obtained by applying the {@code mapper} to this source.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a downstream source obtained by applying the {@code mapper} to this source
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSource<T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) {
+            return (StepSource<T>) mapper.compose(this);
+        }
     }
     
     /**
@@ -477,8 +557,8 @@ public class Belt {
         /**
          * {@inheritDoc}
          *
-         * @implNote The default implementation loops, polling from the source and offering to this sink, until either
-         * the source drains or this sink cancels. This is equivalent to the default implementation of
+         * @implSpec The implementation loops, polling from the source and offering to this sink, until either the
+         * source drains or this sink cancels. This is equivalent to the implementation of
          * {@link StepSource#drainToSink StepSource.drainToSink(StepSink)}.
          */
         @Override
@@ -494,43 +574,82 @@ public class Belt {
         /**
          * Returns a silo that, when {@link #run run}, will drain from the {@code before} source to this sink.
          *
-         * @param before
-         * @return
+         * @param before the upstream source
+         * @return a silo that will drain from the source to this sink
          * @throws NullPointerException if before is null
          */
-        default Silo compose(Source<? extends In> before) { return new Belts.ClosedSilo<>(before, this); }
+        default Silo compose(Source<? extends In> before) {
+            return new Belts.ClosedSilo<>(before, this);
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
          * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
          * segue to this sink.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed sink that also runs a downstream silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Sink<T> compose(Segue<? super T, ? extends In> before) { return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> Sink<T> compose(Segue<? super T, ? extends In> before) {
+            return new Belts.ChainSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this));
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of the {@code before} segue, except that
          * {@link #run running} it will also run the silo formed by connecting the source-side of the {@code before}
          * segue to this sink.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed sink that also runs a downstream silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) { return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this)); }
+        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> before) {
+            return new Belts.ChainStepSink<>(before.sink(), new Belts.ClosedSilo<>(before.source(), this));
+        }
         
-        @Override default StepSink<In> andThen(Silo after) { return new Belts.ChainStepSink<>(this, after); }
-        @Override default <T> StepSinkSource<In, T> andThen(Source<? extends T> after) { return new Belts.ChainStepSinkSource<>(this, after); }
-        @Override default <T> StepSegue<In, T> andThen(StepSource<? extends T> after) { return new Belts.ChainStepSegue<>(this, after); }
+        @Override
+        default StepSink<In> andThen(Silo after) {
+            return new Belts.ChainStepSink<>(this, after);
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Sink<T> compose(SinkToStepOperator<? super T, ? extends In> mapper) { return (Sink<T>) mapper.andThen(this); }
-        @SuppressWarnings("unchecked") default <T> StepSink<T> compose(StepSinkOperator<? super T, ? extends In> mapper) { return (StepSink<T>) mapper.andThen(this); }
+        @Override
+        default <T> StepSinkSource<In, T> andThen(Source<? extends T> after) {
+            return new Belts.ChainStepSinkSource<>(this, after);
+        }
+        
+        @Override
+        default <T> StepSegue<In, T> andThen(StepSource<? extends T> after) {
+            return new Belts.ChainStepSegue<>(this, after);
+        }
+        
+        /**
+         * Returns an upstream sink obtained by applying the {@code mapper} to this sink.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return an upstream sink obtained by applying the {@code mapper} to this sink
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Sink<T> compose(SinkToStepOperator<? super T, ? extends In> mapper) {
+            return (Sink<T>) mapper.andThen(this);
+        }
+        
+        /**
+         * Returns an upstream sink obtained by applying the {@code mapper} to this sink.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return an upstream sink obtained by applying the {@code mapper} to this sink
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSink<T> compose(StepSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSink<T>) mapper.andThen(this);
+        }
     }
     
     /**
@@ -554,8 +673,8 @@ public class Belt {
         /**
          * {@inheritDoc}
          *
-         * @implNote The default implementation loops, polling from this source and offering to the sink, until either
-         * this source drains or the sink cancels. This is equivalent to the default implementation of
+         * @implSpec The implementation loops, polling from this source and offering to the sink, until either this
+         * source drains or the sink cancels. This is equivalent to the implementation of
          * {@link StepSink#drainFromSource StepSink.drainFromSource(StepSource)}.
          */
         @Override
@@ -568,46 +687,85 @@ public class Belt {
             return true;
         }
         
-        @Override default StepSource<Out> compose(Silo before) { return new Belts.ChainStepSource<>(before, this); }
-        @Override default <T> SinkStepSource<T, Out> compose(Sink<? super T> before) { return new Belts.ChainSinkStepSource<>(before, this); }
-        @Override default <T> StepSegue<T, Out> compose(StepSink<? super T> before) { return new Belts.ChainStepSegue<>(before, this); }
+        @Override
+        default StepSource<Out> compose(Silo before) {
+            return new Belts.ChainStepSource<>(before, this);
+        }
+        
+        @Override
+        default <T> SinkStepSource<T, Out> compose(Sink<? super T> before) {
+            return new Belts.ChainSinkStepSource<>(before, this);
+        }
+        
+        @Override
+        default <T> StepSegue<T, Out> compose(StepSink<? super T> before) {
+            return new Belts.ChainStepSegue<>(before, this);
+        }
         
         /**
          * Returns a silo that, when {@link #run run}, will drain from this source to the {@code after} sink.
          *
-         * @param after
-         * @return
+         * @param after the downstream sink
+         * @return a silo that will drain from this source to the sink
          * @throws NullPointerException if after is null
          */
-        default Silo andThen(Sink<? super Out> after) { return new Belts.ClosedSilo<>(this, after); }
+        default Silo andThen(Sink<? super Out> after) {
+            return new Belts.ClosedSilo<>(this, after);
+        }
         
         /**
          * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
          * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
          * {@code after} segue.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed source that also runs an upstream silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Source<T> andThen(Segue<? super Out, ? extends T> after) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> Source<T> andThen(Segue<? super Out, ? extends T> after) {
+            return new Belts.ChainSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source());
+        }
         
         /**
          * Returns a composed source that behaves like the source-side of the {@code after} segue, except that
          * {@link #run running} it will also run the silo formed by connecting this source to the sink-side of the
          * {@code after} segue.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed source that also runs an upstream silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> StepSource<T> andThen(SinkStepSource<? super Out, ? extends T> after) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source()); }
+        default <T> StepSource<T> andThen(SinkStepSource<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(this, after.sink()), after.source());
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Source<T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) { return (Source<T>) mapper.compose(this); }
-        @SuppressWarnings("unchecked") default <T> StepSource<T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) { return (StepSource<T>) mapper.compose(this); }
+        /**
+         * Returns a downstream source obtained by applying the {@code mapper} to this source.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a downstream source obtained by applying the {@code mapper} to this source
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Source<T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) {
+            return (Source<T>) mapper.compose(this);
+        }
+        
+        /**
+         * Returns a downstream source obtained by applying the {@code mapper} to this source.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a downstream source obtained by applying the {@code mapper} to this source
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSource<T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) {
+            return (StepSource<T>) mapper.compose(this);
+        }
     }
     
     // --- Segues ---
@@ -639,11 +797,13 @@ public class Belt {
          * {@link Stage#run running} it will also run the silo formed by connecting the {@code before} source to the
          * sink-side of this segue.
          *
-         * @param before
-         * @return
+         * @param before the upstream source
+         * @return a composed source that also runs an upstream silo
          * @throws NullPointerException if before is null
          */
-        default Source<Out> compose(StepSource<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        default Source<Out> compose(StepSource<? extends In> before) {
+            return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source());
+        }
         
         /**
          * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
@@ -653,12 +813,14 @@ public class Belt {
          * }
          * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed segue whose source also runs an interior silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Segue<T, Out> compose(SinkStepSource<? super T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> Segue<T, Out> compose(SinkStepSource<? super T, ? extends In> before) {
+            return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
         
         /**
          * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
@@ -668,22 +830,26 @@ public class Belt {
          * }
          * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed segue whose source also runs an interior silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSinkSource<T, Out> compose(StepSegue<? super T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(StepSegue<? super T, ? extends In> before) {
+            return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of this segue, except that {@link Stage#run running}
          * it will also run the silo formed by connecting the source-side of this segue to the {@code after} sink.
          *
-         * @param after
-         * @return
+         * @param after the downstream sink
+         * @return a composed sink that also runs a downstream silo
          * @throws NullPointerException if after is null
          */
-        default Sink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        default Sink<In> andThen(StepSink<? super Out> after) {
+            return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after));
+        }
         
         /**
          * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
@@ -693,12 +859,14 @@ public class Belt {
          * }
          * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed segue whose sink also runs an interior silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Segue<In, T> andThen(StepSinkSource<? super Out, ? extends T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> Segue<In, T> andThen(StepSinkSource<? super Out, ? extends T> after) {
+            return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
         
         /**
          * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
@@ -708,18 +876,68 @@ public class Belt {
          * }
          * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed segue whose sink also runs an interior silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, ? extends T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, ? extends T> after) {
+            return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Segue<T, Out> compose(SinkOperator<? super T, ? extends In> mapper) { return (Segue<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @SuppressWarnings("unchecked") default <T> StepSinkSource<T, Out> compose(StepToSinkOperator<? super T, ? extends In> mapper) { return (StepSinkSource<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        default <T> Segue<In, T> andThen(SourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
-        default <T> SinkStepSource<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
+        /**
+         * Returns a segue that bundles the source-side of this segue with the upstream sink obtained by applying the
+         * {@code mapper} to the sink-side of this segue.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return a new segue with sink transformed
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Segue<T, Out> compose(SinkOperator<? super T, ? extends In> mapper) {
+            return (Segue<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of this segue with the upstream sink obtained by applying the
+         * {@code mapper} to the sink-side of this segue.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return a new segue with sink transformed
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSinkSource<T, Out> compose(StepToSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSinkSource<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of this segue with the downstream source obtained by applying the
+         * {@code mapper} to the source-side of this segue.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a new segue with source transformed
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        default <T> Segue<In, T> andThen(SourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of this segue with the downstream source obtained by applying the
+         * {@code mapper} to the source-side of this segue.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a new segue with source transformed
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        default <T> SinkStepSource<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
     }
     
     /**
@@ -729,18 +947,21 @@ public class Belt {
      * @param <Out> the output element type
      */
     public interface StepSinkSource<In, Out> extends Segue<In, Out> {
-        @Override StepSink<In> sink();
+        @Override
+        StepSink<In> sink();
         
         /**
          * Returns a composed source that behaves like the source-side of this segue, except that
          * {@link Stage#run running} it will also run the silo formed by connecting the {@code before} source to the
          * sink-side of this segue.
          *
-         * @param before
-         * @return
+         * @param before the upstream source
+         * @return a composed source that also runs an upstream silo
          * @throws NullPointerException if before is null
          */
-        default Source<Out> compose(Source<? extends In> before) { return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
+        default Source<Out> compose(Source<? extends In> before) {
+            return new Belts.ChainSource<>(new Belts.ClosedSilo<>(before, sink()), source());
+        }
         
         /**
          * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
@@ -750,12 +971,14 @@ public class Belt {
          * }
          * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed segue whose source also runs an interior silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> Segue<T, Out> compose(Segue<? super T, ? extends In> before) { return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> Segue<T, Out> compose(Segue<? super T, ? extends In> before) {
+            return new Belts.ChainSegue<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
         
         /**
          * Returns a composed segue that bundles the sink-side of the {@code before} segue with a composed source that
@@ -765,22 +988,67 @@ public class Belt {
          * }
          * The composition is right-associative; the composed source {@link Stage#run runs} the interior silo.
          *
-         * @param before
-         * @return
-         * @param <T>
+         * @param before the upstream segue
+         * @return a composed segue whose source also runs an interior silo
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
-        default <T> StepSinkSource<T, Out> compose(StepSinkSource<? super T, ? extends In> before) { return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        default <T> StepSinkSource<T, Out> compose(StepSinkSource<? super T, ? extends In> before) {
+            return new Belts.ChainStepSinkSource<>(before.sink(), new Belts.ChainSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
         
-        @Override default StepSink<In> andThen(StepSink<? super Out> after) { return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
-        @Override default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, ? extends T> after) { return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
-        @Override default <T> StepSegue<In, T> andThen(StepSegue<? super Out, ? extends T> after) { return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        @Override
+        default StepSink<In> andThen(StepSink<? super Out> after) {
+            return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after));
+        }
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <T> Segue<T, Out> compose(SinkToStepOperator<? super T, ? extends In> mapper) { return (Segue<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @SuppressWarnings("unchecked") default <T> StepSinkSource<T, Out> compose(StepSinkOperator<? super T, ? extends In> mapper) { return (StepSinkSource<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @Override default <T> StepSinkSource<In, T> andThen(SourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
-        @Override default <T> StepSegue<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
+        @Override
+        default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
+        
+        @Override
+        default <T> StepSegue<In, T> andThen(StepSegue<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of this segue with the upstream sink obtained by applying the
+         * {@code mapper} to the sink-side of this segue.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return a new segue with sink transformed
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> Segue<T, Out> compose(SinkToStepOperator<? super T, ? extends In> mapper) {
+            return (Segue<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of this segue with the upstream sink obtained by applying the
+         * {@code mapper} to the sink-side of this segue.
+         *
+         * @param mapper a function that creates an upstream sink from a downstream sink
+         * @return a new segue with sink transformed
+         * @param <T> the upstream sink element type
+         * @throws NullPointerException if mapper is null
+         */
+        @SuppressWarnings("unchecked")
+        default <T> StepSinkSource<T, Out> compose(StepSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSinkSource<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        @Override
+        default <T> StepSinkSource<In, T> andThen(SourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
+        
+        @Override
+        default <T> StepSegue<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
     }
     
     /**
@@ -790,21 +1058,35 @@ public class Belt {
      * @param <Out> the output element type
      */
     public interface SinkStepSource<In, Out> extends Segue<In, Out> {
-        @Override StepSource<Out> source();
+        @Override
+        StepSource<Out> source();
         
-        @Override default StepSource<Out> compose(StepSource<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
-        @Override default <T> SinkStepSource<T, Out> compose(SinkStepSource<? super T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default <T> StepSegue<T, Out> compose(StepSegue<? super T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
+        @Override
+        default StepSource<Out> compose(StepSource<? extends In> before) {
+            return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source());
+        }
+        
+        @Override
+        default <T> SinkStepSource<T, Out> compose(SinkStepSource<? super T, ? extends In> before) {
+            return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
+        
+        @Override
+        default <T> StepSegue<T, Out> compose(StepSegue<? super T, ? extends In> before) {
+            return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
         
         /**
          * Returns a composed sink that behaves like the sink-side of this segue, except that {@link Stage#run running}
          * it will also run the silo formed by connecting the source-side of this segue to the {@code after} sink.
          *
-         * @param after
-         * @return
+         * @param after the downstream sink
+         * @return a composed sink that also runs a downstream silo
          * @throws NullPointerException if after is null
          */
-        default Sink<In> andThen(Sink<? super Out> after) { return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
+        default Sink<In> andThen(Sink<? super Out> after) {
+            return new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after));
+        }
         
         /**
          * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
@@ -814,12 +1096,14 @@ public class Belt {
          * }
          * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed segue whose sink also runs an interior silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> Segue<In, T> andThen(Segue<? super Out, ? extends T> after) { return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> Segue<In, T> andThen(Segue<? super Out, ? extends T> after) {
+            return new Belts.ChainSegue<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
         
         /**
          * Returns a composed segue that bundles the source-side of the {@code after} segue with a composed sink that
@@ -829,18 +1113,52 @@ public class Belt {
          * }
          * The composition is left-associative; the composed sink {@link Stage#run runs} the interior silo.
          *
-         * @param after
-         * @return
-         * @param <T>
+         * @param after the downstream segue
+         * @return a composed segue whose sink also runs an interior silo
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
-        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, ? extends T> after) { return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
+        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, ? extends T> after) {
+            return new Belts.ChainSinkStepSource<>(new Belts.ChainSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
         
-        // Operator chaining
-        @Override @SuppressWarnings("unchecked") default <T> SinkStepSource<T, Out> compose(SinkOperator<? super T, ? extends In> mapper) { return (SinkStepSource<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @Override @SuppressWarnings("unchecked") default <T> StepSegue<T, Out> compose(StepToSinkOperator<? super T, ? extends In> mapper) { return (StepSegue<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        default <T> Segue<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
-        default <T> SinkStepSource<In, T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
+        @Override
+        @SuppressWarnings("unchecked")
+        default <T> SinkStepSource<T, Out> compose(SinkOperator<? super T, ? extends In> mapper) {
+            return (SinkStepSource<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        default <T> StepSegue<T, Out> compose(StepToSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSegue<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of this segue with the downstream source obtained by applying the
+         * {@code mapper} to the source-side of this segue.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a new segue with source transformed
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        default <T> Segue<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of this segue with the downstream source obtained by applying the
+         * {@code mapper} to the source-side of this segue.
+         *
+         * @param mapper a function that creates a downstream source from an upstream source
+         * @return a new segue with source transformed
+         * @param <T> the downstream source element type
+         * @throws NullPointerException if mapper is null
+         */
+        default <T> SinkStepSource<In, T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
     }
     
     /**
@@ -851,135 +1169,919 @@ public class Belt {
      * @param <Out> the output element type
      */
     public interface StepSegue<In, Out> extends StepSinkSource<In, Out>, SinkStepSource<In, Out> {
-        @Override default StepSource<Out> compose(Source<? extends In> before) { return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source()); }
-        @Override default <T> SinkStepSource<T, Out> compose(Segue<? super T, ? extends In> before) { return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default <T> StepSegue<T, Out> compose(StepSinkSource<? super T, ? extends In> before) { return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source())); }
-        @Override default StepSink<In> andThen(Sink<? super Out> after) { return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after)); }
-        @Override default <T> StepSinkSource<In, T> andThen(Segue<? super Out, ? extends T> after) { return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
-        @Override default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, ? extends T> after) { return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source()); }
-        @Override @SuppressWarnings("unchecked") default <T> SinkStepSource<T, Out> compose(SinkToStepOperator<? super T, ? extends In> mapper) { return (SinkStepSource<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @Override @SuppressWarnings("unchecked") default <T> StepSegue<T, Out> compose(StepSinkOperator<? super T, ? extends In> mapper) { return (StepSegue<T, Out>) mapper.andThen(sink()).andThen(source()); }
-        @Override default <T> StepSinkSource<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
-        @Override default <T> StepSegue<In, T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) { return sink().andThen(mapper.compose(source())); }
+        @Override
+        default StepSource<Out> compose(Source<? extends In> before) {
+            return new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before, sink()), source());
+        }
+        
+        @Override
+        default <T> SinkStepSource<T, Out> compose(Segue<? super T, ? extends In> before) {
+            return new Belts.ChainSinkStepSource<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
+        
+        @Override
+        default <T> StepSegue<T, Out> compose(StepSinkSource<? super T, ? extends In> before) {
+            return new Belts.ChainStepSegue<>(before.sink(), new Belts.ChainStepSource<>(new Belts.ClosedSilo<>(before.source(), sink()), source()));
+        }
+        
+        @Override
+        default StepSink<In> andThen(Sink<? super Out> after) {
+            return new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after));
+        }
+        
+        @Override
+        default <T> StepSinkSource<In, T> andThen(Segue<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSinkSource<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
+        
+        @Override
+        default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, ? extends T> after) {
+            return new Belts.ChainStepSegue<>(new Belts.ChainStepSink<>(sink(), new Belts.ClosedSilo<>(source(), after.sink())), after.source());
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        default <T> SinkStepSource<T, Out> compose(SinkToStepOperator<? super T, ? extends In> mapper) {
+            return (SinkStepSource<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        @Override
+        @SuppressWarnings("unchecked")
+        default <T> StepSegue<T, Out> compose(StepSinkOperator<? super T, ? extends In> mapper) {
+            return (StepSegue<T, Out>) mapper.andThen(sink()).andThen(source());
+        }
+        
+        @Override
+        default <T> StepSinkSource<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
+        
+        @Override
+        default <T> StepSegue<In, T> andThen(StepSourceOperator<? super Out, ? extends T> mapper) {
+            return sink().andThen(mapper.compose(source()));
+        }
     }
     
     // --- Sink Operators ---
     // Sink<T> = SinkOperator<T, U> andThen Sink<U>
     //         = Sink<U> compose SinkOperator<T, U>
     
+    /**
+     * Represents an operation on a downstream {@link Sink Sink} that produces an upstream {@code Sink}.
+     *
+     * <p>Note that methods on this interface are named according to the direction of data flow, not the direction of
+     * function application. Methods named "andThen" take an argument that applies downstream of this operator. Methods
+     * named "compose" take an argument that applies upstream of this operator.
+     *
+     * <p>This is a functional interface whose functional method is {@link #andThen(Sink)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface SinkOperator<T, U> {
-        // Stage/Segue chaining
-        Sink<T> andThen(Sink<? super U> sink);
-        default <Out> Segue<T, Out> andThen(Segue<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
-        default <Out> SinkStepSource<T, Out> andThen(SinkStepSource<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        /**
+         * Returns an upstream {@link Sink Sink} from a downstream {@code Sink}.
+         *
+         * @implSpec The upstream sink is generally expected to internally delegate to the downstream sink in some way.
+         * This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param after the downstream sink
+         * @return the upstream sink
+         */
+        Sink<T> andThen(Sink<? super U> after);
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <V> SinkOperator<V, U> compose(SinkOperator<? super V, ? extends T> before) { return sink -> (Sink<V>) before.andThen(andThen(sink)); }
-        @SuppressWarnings("unchecked") default <V> StepToSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> before) { return sink -> (StepSink<V>) before.andThen(andThen(sink)); }
-        default <V> SinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
-        default <V> SinkToStepOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        default <Out> Segue<T, Out> andThen(Segue<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        default <Out> SinkStepSource<T, Out> andThen(SinkStepSource<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SinkOperator<V, U> compose(SinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (Sink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepToSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (StepSink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        default <V> SinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        default <V> SinkToStepOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
     }
     
+    /**
+     * Represents an operation on a downstream {@link StepSink StepSink} that produces an upstream {@link Sink Sink}.
+     *
+     * <p>Note that methods on this interface are named according to the direction of data flow, not the direction of
+     * function application. Methods named "andThen" take an argument that applies downstream of this operator. Methods
+     * named "compose" take an argument that applies upstream of this operator.
+     *
+     * <p>This is a functional interface whose functional method is {@link #andThen(StepSink)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface SinkToStepOperator<T, U> {
-        // Stage/Segue chaining
-        Sink<T> andThen(StepSink<? super U> sink);
-        default <Out> Segue<T, Out> andThen(StepSinkSource<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
-        default <Out> SinkStepSource<T, Out> andThen(StepSegue<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        /**
+         * Returns an upstream {@link Sink Sink} from a downstream {@link StepSink StepSink}.
+         *
+         * @implSpec The upstream sink is generally expected to internally delegate to the downstream sink in some way.
+         * This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param after the downstream sink
+         * @return the upstream sink
+         */
+        Sink<T> andThen(StepSink<? super U> after);
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <V> SinkToStepOperator<V, U> compose(SinkOperator<? super V, ? extends T> before) { return sink -> (Sink<V>) before.andThen(andThen(sink)); }
-        @SuppressWarnings("unchecked") default <V> StepSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> before) { return sink -> (StepSink<V>) before.andThen(andThen(sink)); }
-        default <V> SinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
-        default <V> SinkToStepOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        default <Out> Segue<T, Out> andThen(StepSinkSource<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        default <Out> SinkStepSource<T, Out> andThen(StepSegue<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SinkToStepOperator<V, U> compose(SinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (Sink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (StepSink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        default <V> SinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        default <V> SinkToStepOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
     }
     
+    /**
+     * Represents an operation on a downstream {@link Sink Sink} that produces an upstream {@link StepSink StepSink}.
+     *
+     * <p>Note that methods on this interface are named according to the direction of data flow, not the direction of
+     * function application. Methods named "andThen" take an argument that applies downstream of this operator. Methods
+     * named "compose" take an argument that applies upstream of this operator.
+     *
+     * <p>This is a functional interface whose functional method is {@link #andThen(Sink)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface StepToSinkOperator<T, U> extends SinkOperator<T, U> {
-        // Stage/Segue chaining
-        @Override StepSink<T> andThen(Sink<? super U> sink);
-        @Override default <Out> StepSinkSource<T, Out> andThen(Segue<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
-        @Override default <Out> StepSegue<T, Out> andThen(SinkStepSource<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        /**
+         * Returns an upstream {@link StepSink StepSink} from a downstream {@link Sink Sink}.
+         *
+         * @implSpec The upstream sink is generally expected to internally delegate to the downstream sink in some way.
+         * This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param after the downstream sink
+         * @return the upstream sink
+         */
+        @Override
+        StepSink<T> andThen(Sink<? super U> after);
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <V> SinkOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> before) { return sink -> (Sink<V>) before.andThen(andThen(sink)); }
-        @SuppressWarnings("unchecked") default <V> StepToSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> before) { return sink -> (StepSink<V>) before.andThen(andThen(sink)); }
-        @Override default <V> StepToSinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
-        @Override default <V> StepSinkOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <Out> StepSinkSource<T, Out> andThen(Segue<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <Out> StepSegue<T, Out> andThen(SinkStepSource<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SinkOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (Sink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepToSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (StepSink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <V> StepToSinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <V> StepSinkOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
     }
     
+    /**
+     * Represents an operation on a downstream {@link StepSink StepSink} that produces an upstream {@code StepSink}.
+     *
+     * <p>Note that methods on this interface are named according to the direction of data flow, not the direction of
+     * function application. Methods named "andThen" take an argument that applies downstream of this operator. Methods
+     * named "compose" take an argument that applies upstream of this operator.
+     *
+     * <p>This is a functional interface whose functional method is {@link #andThen(StepSink)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface StepSinkOperator<T, U> extends SinkToStepOperator<T, U> {
-        // Stage/Segue chaining
-        @Override StepSink<T> andThen(StepSink<? super U> sink);
-        @Override default <Out> StepSinkSource<T, Out> andThen(StepSinkSource<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
-        @Override default <Out> StepSegue<T, Out> andThen(StepSegue<? super U, ? extends Out> ss) { return andThen(ss.sink()).andThen(ss.source()); }
+        /**
+         * Returns an upstream {@link StepSink StepSink} from a downstream {@code StepSink}.
+         *
+         * @implSpec The upstream sink is generally expected to internally delegate to the downstream sink in some way.
+         * This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param after the downstream sink
+         * @return the upstream sink
+         */
+        @Override
+        StepSink<T> andThen(StepSink<? super U> after);
         
-        // Operator chaining
-        @SuppressWarnings("unchecked") default <V> SinkToStepOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> before) { return sink -> (Sink<V>) before.andThen(andThen(sink)); }
-        @SuppressWarnings("unchecked") default <V> StepSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> before) { return sink -> (StepSink<V>) before.andThen(andThen(sink)); }
-        @Override default <V> StepToSinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
-        @Override default <V> StepSinkOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> after) { return sink -> andThen(after.andThen(sink)); }
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <Out> StepSinkSource<T, Out> andThen(StepSinkSource<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a segue that bundles the source-side of the {@code after} segue with the sink obtained by applying
+         * this operator to the sink-side of the {@code after} segue.
+         *
+         * @param after the downstream segue
+         * @return a new segue with sink transformed
+         * @param <Out> the downstream source element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <Out> StepSegue<T, Out> andThen(StepSegue<? super U, ? extends Out> after) {
+            return andThen(after.sink()).andThen(after.source());
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SinkToStepOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (Sink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code before} operator to the result of this operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies the {@code before} operator to the result of this operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return sink -> (StepSink<V>) before.andThen(andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <V> StepToSinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code after} operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies this operator to the result of the {@code after} operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @Override
+        default <V> StepSinkOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return sink -> andThen(after.andThen(sink));
+        }
     }
 
     // --- Source Operators ---
     // Source<U> = SourceOperator<T, U> compose Source<T>
     //           = Source<T> andThen SourceOperator<T, U>
     
+    /**
+     * Represents an operation on an upstream {@link Source Source} that produces a downstream {@code Source}.
+     *
+     * <p>This is a functional interface whose functional method is {@link #compose(Source)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface SourceOperator<T, U> {
-        // Stage/Segue chaining
-        Source<U> compose(Source<? extends T> source);
-        default <In> Segue<In, U> compose(Segue<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
-        default <In> StepSinkSource<In, U> compose(StepSinkSource<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
+        /**
+         * Returns a downstream {@link Source Source} from an upstream {@code Source}.
+         *
+         * @implSpec The downstream source is generally expected to internally delegate to the upstream source in some
+         * way. This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param before the upstream source
+         * @return the downstream source
+         */
+        Source<U> compose(Source<? extends T> before);
         
-        // Operator chaining
-        default <V> StepToSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        default <V> SourceOperator<V, U> compose(SourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @SuppressWarnings("unchecked") default <V> SourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> after) { return source -> (Source<V>) after.compose(compose(source)); }
-        @SuppressWarnings("unchecked") default <V> SourceToStepOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> after) { return source -> (StepSource<V>) after.compose(compose(source)); }
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        default <In> Segue<In, U> compose(Segue<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        default <In> StepSinkSource<In, U> compose(StepSinkSource<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        default <V> StepToSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        default <V> SourceOperator<V, U> compose(SourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (Source<V>) after.compose(compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SourceToStepOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (StepSource<V>) after.compose(compose(source));
+        }
     }
     
+    /**
+     * Represents an operation on an upstream {@link StepSource StepSource} that produces a downstream
+     * {@link Source Source}.
+     *
+     * <p>This is a functional interface whose functional method is {@link #compose(StepSource)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface StepToSourceOperator<T, U> {
-        // Stage/Segue chaining
-        Source<U> compose(StepSource<? extends T> source);
-        default <In> Segue<In, U> compose(SinkStepSource<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
-        default <In> StepSinkSource<In, U> compose(StepSegue<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
+        /**
+         * Returns a downstream {@link Source Source} from an upstream {@link StepSource StepSource}.
+         *
+         * @implSpec The downstream source is generally expected to internally delegate to the upstream source in some
+         * way. This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param before the upstream source
+         * @return the downstream source
+         */
+        Source<U> compose(StepSource<? extends T> before);
         
-        // Operator chaining
-        default <V> SourceOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        default <V> StepToSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @SuppressWarnings("unchecked") default <V> StepToSourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> after) { return source -> (Source<V>) after.compose(compose(source)); }
-        @SuppressWarnings("unchecked") default <V> StepSourceOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> after) { return source -> (StepSource<V>) after.compose(compose(source)); }
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        default <In> Segue<In, U> compose(SinkStepSource<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        default <In> StepSinkSource<In, U> compose(StepSegue<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        default <V> SourceOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        default <V> StepToSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepToSourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (Source<V>) after.compose(compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepSourceOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (StepSource<V>) after.compose(compose(source));
+        }
     }
     
+    /**
+     * Represents an operation on an upstream {@link Source Source} that produces a downstream
+     * {@link StepSource StepSource}.
+     *
+     * <p>This is a functional interface whose functional method is {@link #compose(Source)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface SourceToStepOperator<T, U> extends SourceOperator<T, U> {
-        // Stage/Segue chaining
-        @Override StepSource<U> compose(Source<? extends T> source);
-        @Override default <In> SinkStepSource<In, U> compose(Segue<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
-        @Override default <In> StepSegue<In, U> compose(StepSinkSource<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
+        /**
+         * Returns a downstream {@link StepSource StepSource} from an upstream {@link Source Source}.
+         *
+         * @implSpec The downstream source is generally expected to internally delegate to the upstream source in some
+         * way. This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param before the upstream source
+         * @return the downstream source
+         */
+        @Override
+        StepSource<U> compose(Source<? extends T> before);
         
-        // Operator chaining
-        @Override default <V> SourceToStepOperator<V, U> compose(SourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @Override default <V> StepSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @SuppressWarnings("unchecked") default <V> SourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> after) { return source -> (Source<V>) after.compose(compose(source)); }
-        @SuppressWarnings("unchecked") default <V> SourceToStepOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> after) { return source -> (StepSource<V>) after.compose(compose(source)); }
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <In> SinkStepSource<In, U> compose(Segue<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <In> StepSegue<In, U> compose(StepSinkSource<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <V> SourceToStepOperator<V, U> compose(SourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <V> StepSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (Source<V>) after.compose(compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> SourceToStepOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (StepSource<V>) after.compose(compose(source));
+        }
     }
     
+    /**
+     * Represents an operation on an upstream {@link StepSource StepSource} that produces a downstream
+     * {@code StepSource}.
+     *
+     * <p>This is a functional interface whose functional method is {@link #compose(StepSource)}.
+     *
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     @FunctionalInterface
     public interface StepSourceOperator<T, U> extends StepToSourceOperator<T, U> {
-        // Stage/Segue chaining
-        @Override StepSource<U> compose(StepSource<? extends T> source);
-        @Override default <In> SinkStepSource<In, U> compose(SinkStepSource<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
-        @Override default <In> StepSegue<In, U> compose(StepSegue<? super In, ? extends T> ss) { return compose(ss.source()).compose(ss.sink()); }
+        /**
+         * Returns a downstream {@link StepSource StepSource} from an upstream {@code StepSource}.
+         *
+         * @implSpec The downstream source is generally expected to internally delegate to the upstream source in some
+         * way. This allows for transforming elements or signals as they travel from upstream to downstream.
+         *
+         * @param before the upstream source
+         * @return the downstream source
+         */
+        @Override
+        StepSource<U> compose(StepSource<? extends T> before);
         
-        // Operator chaining
-        @Override default <V> SourceToStepOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @Override default <V> StepSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> before) { return source -> compose(before.compose(source)); }
-        @SuppressWarnings("unchecked") default <V> StepToSourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> after) { return source -> (Source<V>) after.compose(compose(source)); }
-        @SuppressWarnings("unchecked") default <V> StepSourceOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> after) { return source -> (StepSource<V>) after.compose(compose(source)); }
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <In> SinkStepSource<In, U> compose(SinkStepSource<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a segue that bundles the sink-side of the {@code before} segue with the sink obtained by applying
+         * this operator to the source-side of the {@code after} segue.
+         *
+         * @param before the upstream segue
+         * @return a new segue with source transformed
+         * @param <In> the upstream sink element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <In> StepSegue<In, U> compose(StepSegue<? super In, ? extends T> before) {
+            return compose(before.source()).compose(before.sink());
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <V> SourceToStepOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies this operator to the result of the {@code before} operator.
+         *
+         * @param before the upstream operator
+         * @return a composed operator that applies this operator to the result of the {@code before} operator
+         * @param <V> the upstream element type
+         * @throws NullPointerException if before is null
+         */
+        @Override
+        default <V> StepSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> before) {
+            Objects.requireNonNull(before);
+            return source -> compose(before.compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepToSourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (Source<V>) after.compose(compose(source));
+        }
+        
+        /**
+         * Returns a composed operator that applies the {@code after} operator to the result of this operator.
+         *
+         * @param after the downstream operator
+         * @return a composed operator that applies the {@code after} operator to the result of this operator
+         * @param <V> the downstream element type
+         * @throws NullPointerException if after is null
+         */
+        @SuppressWarnings("unchecked")
+        default <V> StepSourceOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> after) {
+            Objects.requireNonNull(after);
+            return source -> (StepSource<V>) after.compose(compose(source));
+        }
     }
 }
