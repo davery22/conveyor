@@ -21,10 +21,10 @@ public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
         void latchSourceDeadline(Instant deadline);
     }
     
-    public sealed interface SourceController<T> {
+    public sealed interface SourceController<Out> {
         void latchSinkDeadline(Instant deadline);
         void latchSourceDeadline(Instant deadline);
-        void latchOutput(T output);
+        void latchOutput(Out output);
         void latchClose();
     }
     

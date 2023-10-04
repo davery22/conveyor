@@ -1267,8 +1267,8 @@ public class Belt {
     }
     
     // --- Sink Operators ---
-    // Sink<T> = SinkOperator<T, U> andThen Sink<U>
-    //         = Sink<U> compose SinkOperator<T, U>
+    // Sink<In> = SinkOperator<In, Out> andThen Sink<Out>
+    //          = Sink<Out> compose SinkOperator<In, Out>
     
     /**
      * Represents an operation on a downstream {@link Sink Sink} that produces an upstream {@code Sink}.
@@ -1279,11 +1279,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #andThen(Sink)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface SinkOperator<T, U> {
+    public interface SinkOperator<In, Out> {
         /**
          * Connects the {@code downstream} sink after this operator. Returns an upstream sink.
          *
@@ -1293,7 +1293,7 @@ public class Belt {
          * @param downstream the downstream sink
          * @return the upstream sink
          */
-        Sink<T> andThen(Sink<? super U> downstream);
+        Sink<In> andThen(Sink<? super Out> downstream);
         
         /**
          * Connects the {@code downstream} segue after this operator. Returns a new segue that pairs the
@@ -1302,10 +1302,10 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
-        default <Out> Segue<T, Out> andThen(Segue<? super U, ? extends Out> downstream) {
+        default <T> Segue<In, T> andThen(Segue<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1316,10 +1316,10 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
-        default <Out> SinkStepSource<T, Out> andThen(SinkStepSource<? super U, ? extends Out> downstream) {
+        default <T> SinkStepSource<In, T> andThen(SinkStepSource<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1329,13 +1329,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SinkOperator<V, U> compose(SinkOperator<? super V, ? extends T> upstream) {
+        default <T> SinkOperator<T, Out> compose(SinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (Sink<V>) upstream.andThen(andThen(sink));
+            return sink -> (Sink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1344,13 +1344,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepToSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> upstream) {
+        default <T> StepToSinkOperator<T, Out> compose(StepToSinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (StepSink<V>) upstream.andThen(andThen(sink));
+            return sink -> (StepSink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1359,10 +1359,10 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
-        default <V> SinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> downstream) {
+        default <T> SinkOperator<In, T> andThen(SinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1373,10 +1373,10 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
-        default <V> SinkToStepOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> downstream) {
+        default <T> SinkToStepOperator<In, T> andThen(SinkToStepOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1391,11 +1391,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #andThen(StepSink)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface SinkToStepOperator<T, U> {
+    public interface SinkToStepOperator<In, Out> {
         /**
          * Connects the {@code downstream} sink after this operator. Returns an upstream sink.
          *
@@ -1405,7 +1405,7 @@ public class Belt {
          * @param downstream the downstream sink
          * @return the upstream sink
          */
-        Sink<T> andThen(StepSink<? super U> downstream);
+        Sink<In> andThen(StepSink<? super Out> downstream);
         
         /**
          * Connects the {@code downstream} segue after this operator. Returns a new segue that pairs the
@@ -1414,10 +1414,10 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
-        default <Out> Segue<T, Out> andThen(StepSinkSource<? super U, ? extends Out> downstream) {
+        default <T> Segue<In, T> andThen(StepSinkSource<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1428,10 +1428,10 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
-        default <Out> SinkStepSource<T, Out> andThen(StepSegue<? super U, ? extends Out> downstream) {
+        default <T> SinkStepSource<In, T> andThen(StepSegue<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1441,13 +1441,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SinkToStepOperator<V, U> compose(SinkOperator<? super V, ? extends T> upstream) {
+        default <T> SinkToStepOperator<T, Out> compose(SinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (Sink<V>) upstream.andThen(andThen(sink));
+            return sink -> (Sink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1456,13 +1456,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepSinkOperator<V, U> compose(StepToSinkOperator<? super V, ? extends T> upstream) {
+        default <T> StepSinkOperator<T, Out> compose(StepToSinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (StepSink<V>) upstream.andThen(andThen(sink));
+            return sink -> (StepSink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1471,10 +1471,10 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
-        default <V> SinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> downstream) {
+        default <T> SinkOperator<In, T> andThen(StepToSinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1485,10 +1485,10 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
-        default <V> SinkToStepOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> downstream) {
+        default <T> SinkToStepOperator<In, T> andThen(StepSinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1503,11 +1503,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #andThen(Sink)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface StepToSinkOperator<T, U> extends SinkOperator<T, U> {
+    public interface StepToSinkOperator<In, Out> extends SinkOperator<In, Out> {
         /**
          * Connects the {@code downstream} sink after this operator. Returns an upstream sink.
          *
@@ -1518,7 +1518,7 @@ public class Belt {
          * @return the upstream sink
          */
         @Override
-        StepSink<T> andThen(Sink<? super U> downstream);
+        StepSink<In> andThen(Sink<? super Out> downstream);
         
         /**
          * Connects the {@code downstream} segue after this operator. Returns a new segue that pairs the
@@ -1527,11 +1527,11 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
         @Override
-        default <Out> StepSinkSource<T, Out> andThen(Segue<? super U, ? extends Out> downstream) {
+        default <T> StepSinkSource<In, T> andThen(Segue<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1542,11 +1542,11 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if after is null
          */
         @Override
-        default <Out> StepSegue<T, Out> andThen(SinkStepSource<? super U, ? extends Out> downstream) {
+        default <T> StepSegue<In, T> andThen(SinkStepSource<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1556,13 +1556,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SinkOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> upstream) {
+        default <T> SinkOperator<T, Out> compose(SinkToStepOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (Sink<V>) upstream.andThen(andThen(sink));
+            return sink -> (Sink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1571,13 +1571,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepToSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> upstream) {
+        default <T> StepToSinkOperator<T, Out> compose(StepSinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (StepSink<V>) upstream.andThen(andThen(sink));
+            return sink -> (StepSink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1586,11 +1586,11 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <V> StepToSinkOperator<T, V> andThen(SinkOperator<? super U, ? extends V> downstream) {
+        default <T> StepToSinkOperator<In, T> andThen(SinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1601,11 +1601,11 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <V> StepSinkOperator<T, V> andThen(SinkToStepOperator<? super U, ? extends V> downstream) {
+        default <T> StepSinkOperator<In, T> andThen(SinkToStepOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1620,11 +1620,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #andThen(StepSink)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface StepSinkOperator<T, U> extends SinkToStepOperator<T, U> {
+    public interface StepSinkOperator<In, Out> extends SinkToStepOperator<In, Out> {
         /**
          * Connects the {@code downstream} sink after this operator. Returns an upstream sink.
          *
@@ -1635,7 +1635,7 @@ public class Belt {
          * @return the upstream sink
          */
         @Override
-        StepSink<T> andThen(StepSink<? super U> downstream);
+        StepSink<In> andThen(StepSink<? super Out> downstream);
         
         /**
          * Connects the {@code downstream} segue after this operator. Returns a new segue that pairs the
@@ -1644,11 +1644,11 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <Out> StepSinkSource<T, Out> andThen(StepSinkSource<? super U, ? extends Out> downstream) {
+        default <T> StepSinkSource<In, T> andThen(StepSinkSource<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1659,11 +1659,11 @@ public class Belt {
          *
          * @param downstream the downstream segue
          * @return a new segue with sink transformed
-         * @param <Out> the downstream source element type
+         * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <Out> StepSegue<T, Out> andThen(StepSegue<? super U, ? extends Out> downstream) {
+        default <T> StepSegue<In, T> andThen(StepSegue<? super Out, ? extends T> downstream) {
             return andThen(downstream.sink()).andThen(downstream.source());
         }
         
@@ -1673,13 +1673,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SinkToStepOperator<V, U> compose(SinkToStepOperator<? super V, ? extends T> upstream) {
+        default <T> SinkToStepOperator<T, Out> compose(SinkToStepOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (Sink<V>) upstream.andThen(andThen(sink));
+            return sink -> (Sink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1688,13 +1688,13 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies the {@code upstream} operator to the result of this operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepSinkOperator<V, U> compose(StepSinkOperator<? super V, ? extends T> upstream) {
+        default <T> StepSinkOperator<T, Out> compose(StepSinkOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
-            return sink -> (StepSink<V>) upstream.andThen(andThen(sink));
+            return sink -> (StepSink<T>) upstream.andThen(andThen(sink));
         }
         
         /**
@@ -1703,11 +1703,11 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <V> StepToSinkOperator<T, V> andThen(StepToSinkOperator<? super U, ? extends V> downstream) {
+        default <T> StepToSinkOperator<In, T> andThen(StepToSinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
@@ -1718,30 +1718,30 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies this operator to the result of the {@code downstream} operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @Override
-        default <V> StepSinkOperator<T, V> andThen(StepSinkOperator<? super U, ? extends V> downstream) {
+        default <T> StepSinkOperator<In, T> andThen(StepSinkOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
             return sink -> andThen(downstream.andThen(sink));
         }
     }
 
     // --- Source Operators ---
-    // Source<U> = SourceOperator<T, U> compose Source<T>
-    //           = Source<T> andThen SourceOperator<T, U>
+    // Source<Out> = SourceOperator<In, Out> compose Source<In>
+    //             = Source<In> andThen SourceOperator<In, Out>
     
     /**
      * Represents an operation on an upstream {@link Source Source} that produces a downstream {@code Source}.
      *
      * <p>This is a functional interface whose functional method is {@link #compose(Source)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface SourceOperator<T, U> {
+    public interface SourceOperator<In, Out> {
         /**
          * Connects the {@code upstream} source before this operator. Returns a downstream source.
          *
@@ -1751,7 +1751,7 @@ public class Belt {
          * @param upstream the upstream source
          * @return the downstream source
          */
-        Source<U> compose(Source<? extends T> upstream);
+        Source<Out> compose(Source<? extends In> upstream);
         
         /**
          * Connects the {@code upstream} segue before this operator. Returns a new segue that pairs the {@code upstream}
@@ -1760,10 +1760,10 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
-        default <In> Segue<In, U> compose(Segue<? super In, ? extends T> upstream) {
+        default <T> Segue<T, Out> compose(Segue<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -1774,10 +1774,10 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
-        default <In> StepSinkSource<In, U> compose(StepSinkSource<? super In, ? extends T> upstream) {
+        default <T> StepSinkSource<T, Out> compose(StepSinkSource<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -1787,10 +1787,10 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code upstream} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
-        default <V> StepToSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> upstream) {
+        default <T> StepToSourceOperator<T, Out> compose(StepToSourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -1801,10 +1801,10 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code upstream} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
-        default <V> SourceOperator<V, U> compose(SourceOperator<? super V, ? extends T> upstream) {
+        default <T> SourceOperator<T, Out> compose(SourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -1815,13 +1815,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> downstream) {
+        default <T> SourceOperator<In, T> andThen(SourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (Source<V>) downstream.compose(compose(source));
+            return source -> (Source<T>) downstream.compose(compose(source));
         }
         
         /**
@@ -1830,13 +1830,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SourceToStepOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> downstream) {
+        default <T> SourceToStepOperator<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (StepSource<V>) downstream.compose(compose(source));
+            return source -> (StepSource<T>) downstream.compose(compose(source));
         }
     }
     
@@ -1846,11 +1846,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #compose(StepSource)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface StepToSourceOperator<T, U> {
+    public interface StepToSourceOperator<In, Out> {
         /**
          * Connects the {@code upstream} source upstream this operator. Returns a downstream source.
          *
@@ -1860,7 +1860,7 @@ public class Belt {
          * @param upstream the upstream source
          * @return the downstream source
          */
-        Source<U> compose(StepSource<? extends T> upstream);
+        Source<Out> compose(StepSource<? extends In> upstream);
         
         /**
          * Connects the {@code upstream} segue before this operator. Returns a new segue that pairs the {@code upstream}
@@ -1869,10 +1869,10 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
-        default <In> Segue<In, U> compose(SinkStepSource<? super In, ? extends T> upstream) {
+        default <T> Segue<T, Out> compose(SinkStepSource<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -1883,10 +1883,10 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
-        default <In> StepSinkSource<In, U> compose(StepSegue<? super In, ? extends T> upstream) {
+        default <T> StepSinkSource<T, Out> compose(StepSegue<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -1896,10 +1896,10 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code upstream} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
-        default <V> SourceOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> upstream) {
+        default <T> SourceOperator<T, Out> compose(SourceToStepOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -1910,10 +1910,10 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code upstream} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if upstream is null
          */
-        default <V> StepToSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> upstream) {
+        default <T> StepToSourceOperator<T, Out> compose(StepSourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -1924,13 +1924,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepToSourceOperator<T, V> andThen(SourceOperator<? super U, ? extends V> downstream) {
+        default <T> StepToSourceOperator<In, T> andThen(SourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (Source<V>) downstream.compose(compose(source));
+            return source -> (Source<T>) downstream.compose(compose(source));
         }
         
         /**
@@ -1939,13 +1939,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepSourceOperator<T, V> andThen(SourceToStepOperator<? super U, ? extends V> downstream) {
+        default <T> StepSourceOperator<In, T> andThen(SourceToStepOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (StepSource<V>) downstream.compose(compose(source));
+            return source -> (StepSource<T>) downstream.compose(compose(source));
         }
     }
     
@@ -1955,11 +1955,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #compose(Source)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface SourceToStepOperator<T, U> extends SourceOperator<T, U> {
+    public interface SourceToStepOperator<In, Out> extends SourceOperator<In, Out> {
         /**
          * Connects the {@code upstream} source upstream this operator. Returns a downstream source.
          *
@@ -1970,7 +1970,7 @@ public class Belt {
          * @return the downstream source
          */
         @Override
-        StepSource<U> compose(Source<? extends T> upstream);
+        StepSource<Out> compose(Source<? extends In> upstream);
         
         /**
          * Connects the {@code upstream} segue before this operator. Returns a new segue that pairs the {@code upstream}
@@ -1979,11 +1979,11 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <In> SinkStepSource<In, U> compose(Segue<? super In, ? extends T> upstream) {
+        default <T> SinkStepSource<T, Out> compose(Segue<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -1994,11 +1994,11 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <In> StepSegue<In, U> compose(StepSinkSource<? super In, ? extends T> upstream) {
+        default <T> StepSegue<T, Out> compose(StepSinkSource<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -2008,11 +2008,11 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code before} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <V> SourceToStepOperator<V, U> compose(SourceOperator<? super V, ? extends T> upstream) {
+        default <T> SourceToStepOperator<T, Out> compose(SourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -2023,11 +2023,11 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code before} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <V> StepSourceOperator<V, U> compose(StepToSourceOperator<? super V, ? extends T> upstream) {
+        default <T> StepSourceOperator<T, Out> compose(StepToSourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -2038,13 +2038,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> downstream) {
+        default <T> SourceOperator<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (Source<V>) downstream.compose(compose(source));
+            return source -> (Source<T>) downstream.compose(compose(source));
         }
         
         /**
@@ -2053,13 +2053,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> SourceToStepOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> downstream) {
+        default <T> SourceToStepOperator<In, T> andThen(StepSourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (StepSource<V>) downstream.compose(compose(source));
+            return source -> (StepSource<T>) downstream.compose(compose(source));
         }
     }
     
@@ -2069,11 +2069,11 @@ public class Belt {
      *
      * <p>This is a functional interface whose functional method is {@link #compose(StepSource)}.
      *
-     * @param <T> the upstream element type
-     * @param <U> the downstream element type
+     * @param <In> the upstream element type
+     * @param <Out> the downstream element type
      */
     @FunctionalInterface
-    public interface StepSourceOperator<T, U> extends StepToSourceOperator<T, U> {
+    public interface StepSourceOperator<In, Out> extends StepToSourceOperator<In, Out> {
         /**
          * Connects the {@code upstream} source upstream this operator. Returns a downstream source.
          *
@@ -2084,7 +2084,7 @@ public class Belt {
          * @return the downstream source
          */
         @Override
-        StepSource<U> compose(StepSource<? extends T> upstream);
+        StepSource<Out> compose(StepSource<? extends In> upstream);
         
         /**
          * Connects the {@code upstream} segue before this operator. Returns a new segue that pairs the {@code upstream}
@@ -2093,11 +2093,11 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <In> SinkStepSource<In, U> compose(SinkStepSource<? super In, ? extends T> upstream) {
+        default <T> SinkStepSource<T, Out> compose(SinkStepSource<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -2108,11 +2108,11 @@ public class Belt {
          *
          * @param upstream the upstream segue
          * @return a new segue with source transformed
-         * @param <In> the upstream sink element type
+         * @param <T> the upstream sink element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <In> StepSegue<In, U> compose(StepSegue<? super In, ? extends T> upstream) {
+        default <T> StepSegue<T, Out> compose(StepSegue<? super T, ? extends In> upstream) {
             return compose(upstream.source()).compose(upstream.sink());
         }
         
@@ -2122,11 +2122,11 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code before} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <V> SourceToStepOperator<V, U> compose(SourceToStepOperator<? super V, ? extends T> upstream) {
+        default <T> SourceToStepOperator<T, Out> compose(SourceToStepOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -2137,11 +2137,11 @@ public class Belt {
          *
          * @param upstream the upstream operator
          * @return a composed operator that applies this operator to the result of the {@code before} operator
-         * @param <V> the upstream element type
+         * @param <T> the upstream element type
          * @throws NullPointerException if before is null
          */
         @Override
-        default <V> StepSourceOperator<V, U> compose(StepSourceOperator<? super V, ? extends T> upstream) {
+        default <T> StepSourceOperator<T, Out> compose(StepSourceOperator<? super T, ? extends In> upstream) {
             Objects.requireNonNull(upstream);
             return source -> compose(upstream.compose(source));
         }
@@ -2152,13 +2152,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepToSourceOperator<T, V> andThen(StepToSourceOperator<? super U, ? extends V> downstream) {
+        default <T> StepToSourceOperator<In, T> andThen(StepToSourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (Source<V>) downstream.compose(compose(source));
+            return source -> (Source<T>) downstream.compose(compose(source));
         }
         
         /**
@@ -2167,13 +2167,13 @@ public class Belt {
          *
          * @param downstream the downstream operator
          * @return a composed operator that applies the {@code downstream} operator to the result of this operator
-         * @param <V> the downstream element type
+         * @param <T> the downstream element type
          * @throws NullPointerException if downstream is null
          */
         @SuppressWarnings("unchecked")
-        default <V> StepSourceOperator<T, V> andThen(StepSourceOperator<? super U, ? extends V> downstream) {
+        default <T> StepSourceOperator<In, T> andThen(StepSourceOperator<? super Out, ? extends T> downstream) {
             Objects.requireNonNull(downstream);
-            return source -> (StepSource<V>) downstream.compose(compose(source));
+            return source -> (StepSource<T>) downstream.compose(compose(source));
         }
     }
 }

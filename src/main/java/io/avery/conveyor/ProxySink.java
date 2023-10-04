@@ -3,7 +3,7 @@ package io.avery.conveyor;
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
-public abstract class ProxySink<T> implements Belt.Sink<T> {
+public abstract class ProxySink<In> implements Belt.Sink<In> {
     protected abstract Stream<? extends Belt.Sink<?>> sinks();
     
     @Override
