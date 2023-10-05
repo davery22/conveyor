@@ -181,6 +181,9 @@ public class Belt {
          * @implSpec Implementors should restrict to {@link StepSource#poll polling} from the source. Closing the source
          * is the caller's responsibility, as the source may be reused after this method is called.
          *
+         * <p>Implementors should document if they concurrently poll from the source, as this is not safe for all
+         * sources.
+         *
          * @param source the source to drain from
          * @return {@code true} if the source drained
          * @throws Exception if unable to drain
@@ -363,6 +366,8 @@ public class Belt {
          *
          * @implSpec Implementors should restrict to {@link StepSink#offer offering} to the sink. Completing the sink is
          * the caller's responsibility, as the sink may be reused after this method is called.
+         *
+         * <p>Implementors should document if they concurrently offer to the sink, as this is not safe for all sinks.
          *
          * @param sink the sink to drain to
          * @return {@code false} if the sink cancelled

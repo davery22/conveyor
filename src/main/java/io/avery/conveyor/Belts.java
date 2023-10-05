@@ -30,6 +30,14 @@ public class Belts {
     //  - close() MUST close each upstream before returning (normally or abruptly)
     //  - no violating structured concurrency - if a method forks threads, it must wait for them to finish
     
+    /**
+     * Returns an operator that synchronizes access to an upstream source's {@code poll} and {@code close} methods. The
+     * resultant downstream source can be safely polled concurrently, making it suitable for ad-hoc "balancing" use
+     * cases.
+     *
+     * @return an operator that synchronizes access to an upstream source
+     * @param <T> the source element type
+     */
     public static <T> Belt.StepSourceOperator<T, T> synchronizeStepSource() {
         class SynchronizedStepSource implements Belt.StepSource<T> {
             final Belt.StepSource<? extends T> source;
@@ -68,6 +76,14 @@ public class Belts {
         return SynchronizedStepSource::new;
     }
     
+    /**
+     * Returns an operator that synchronizes access to a downstream sink's {@code offer}, {@code complete}, and
+     * {@code completeAbruptly} methods. The resultant upstream sink can be safely offered to concurrently, making it
+     * suitable for ad-hoc "merging" use cases.
+     *
+     * @return an operator that synchronizes access to a downstream sink
+     * @param <T> the sink element type
+     */
     public static <T> Belt.StepSinkOperator<T, T> synchronizeStepSink() {
         class SynchronizedStepSink implements Belt.StepSink<T> {
             final Belt.StepSink<? super T> sink;
@@ -116,6 +132,16 @@ public class Belts {
         return SynchronizedStepSink::new;
     }
     
+    /**
+     * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
+     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
+     * which is then drained to the downstream sink.
+     *
+     * @param mapper
+     * @param asyncExceptionHandler
+     * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
+     * @param <T> the sink element type
+     */
     public static <T> Belt.StepSinkOperator<T, T> recoverStep(Function<? super Throwable, ? extends Belt.Source<? extends T>> mapper,
                                                               Consumer<? super Throwable> asyncExceptionHandler) {
         Objects.requireNonNull(mapper);
@@ -150,13 +176,15 @@ public class Belts {
                         running = true;
                         try (source) {
                             source.drainToSink(sink);
-                            sink.complete(); // Note: This may be the second time calling...
+                            sink.complete(); // Note: This may not be the first time calling...
                         }
                         scope.join();
                     }
                 } catch (Error | Exception e) {
-                    var exception = running ? e : cause;
-                    callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
+                    if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                    try { sink.completeAbruptly(running ? e : cause); }
+                    catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
+                    if (e instanceof InterruptedException) { Thread.interrupted(); }
                     throw e;
                 }
             }
@@ -170,6 +198,13 @@ public class Belts {
         return RecoverStep::new;
     }
     
+    /**
+     *
+     * @param mapper
+     * @param asyncExceptionHandler
+     * @return
+     * @param <T>
+     */
     public static <T> Belt.SinkOperator<T, T> recover(Function<? super Throwable, ? extends Belt.StepSource<? extends T>> mapper,
                                                       Consumer<? super Throwable> asyncExceptionHandler) {
         Objects.requireNonNull(mapper);
@@ -204,13 +239,15 @@ public class Belts {
                         running = true;
                         try (source) {
                             sink.drainFromSource(source);
-                            sink.complete(); // Note: This may be the second time calling...
+                            sink.complete(); // Note: This may not be the first time calling...
                         }
                         scope.join();
                     }
                 } catch (Error | Exception e) {
-                    var exception = running ? e : cause;
-                    callSuppressed(e, () -> { sink.completeAbruptly(exception); return null; });
+                    if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                    try { sink.completeAbruptly(running ? e : cause); }
+                    catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
+                    if (e instanceof InterruptedException) { Thread.interrupted(); }
                     throw e;
                 }
             }
@@ -312,8 +349,10 @@ public class Belts {
                         scope.join();
                         return drained;
                     } catch (Error | Exception e) {
-                        var s = subSink;
-                        callSuppressed(e, () -> { s.completeAbruptly(e); return null; });
+                        if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                        try { subSink.completeAbruptly(e); }
+                        catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
+                        if (e instanceof InterruptedException) { Thread.interrupted(); }
                         throw e;
                     }
                 }
@@ -385,7 +424,10 @@ public class Belts {
                         scope.join();
                         return drained;
                     } catch (Error | Exception e) {
-                        callSuppressed(e, () -> { composedCompleteAbruptly(sinks(scopedSinkByKey), e); return null; });
+                        if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                        try { composedCompleteAbruptly(sinks(scopedSinkByKey), e); }
+                        catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
+                        if (e instanceof InterruptedException) { Thread.interrupted(); }
                         throw e;
                     }
                 }
@@ -562,7 +604,10 @@ public class Belts {
                         newSink.complete();
                         scope.join();
                     } catch (Error | Exception e) {
-                        callSuppressed(e, () -> { newSink.completeAbruptly(e); return null; });
+                        if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                        try { newSink.completeAbruptly(e); }
+                        catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
+                        if (e instanceof InterruptedException) { Thread.interrupted(); }
                         throw e;
                     }
                 }
@@ -2252,56 +2297,11 @@ public class Belts {
         }
     }
     
-    private static void callSuppressed(Throwable exception, Callable<?> callable) {
-        if (exception instanceof InterruptedException) {
-            Thread.currentThread().interrupt();
-            try {
-                callable.call();
-            } catch (Throwable t) {
-                exception.addSuppressed(t);
-            }
-            Thread.interrupted();
-        } else {
-            try {
-                callable.call();
-            } catch (Throwable t) {
-                if (t instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                exception.addSuppressed(t);
-            }
-        }
-    }
+    private record Indexed<T>(T element, int index) { }
     
-    private static class Indexed<T> {
-        final T element;
-        final int index;
-        
-        Indexed(T element, int index) {
-            this.element = element;
-            this.index = index;
-        }
-    }
+    private record Weighted<T>(T element, long cost) { }
     
-    private static class Weighted<T> {
-        final T element;
-        final long cost;
-        
-        Weighted(T element, long cost) {
-            this.element = element;
-            this.cost = cost;
-        }
-    }
-    
-    private static class Expiring<T> implements Comparable<Expiring<T>> {
-        final T element;
-        final Instant deadline;
-        
-        Expiring(T element, Instant deadline) {
-            this.element = element;
-            this.deadline = deadline;
-        }
-        
+    private record Expiring<T>(T element, Instant deadline) implements Comparable<Expiring<T>> {
         public int compareTo(Expiring other) {
             return deadline.compareTo(other.deadline);
         }
@@ -2391,10 +2391,9 @@ public class Belts {
                     }
                     sink.complete();
                 } catch (Throwable ex) {
-                    callSuppressed(ex, () -> { sink.completeAbruptly(ex); return null; });
-                    if (ex instanceof InterruptedException) {
-                        Thread.currentThread().interrupt();
-                    }
+                    if (ex instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                    try { sink.completeAbruptly(ex); }
+                    catch (Throwable t) { if (t instanceof InterruptedException) Thread.currentThread().interrupt(); ex.addSuppressed(t); }
                     throw new CompletionException(ex);
                 }
             });
