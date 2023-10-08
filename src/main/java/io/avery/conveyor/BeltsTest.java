@@ -5,10 +5,12 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -16,7 +18,9 @@ class BeltsTest {
     
     // TODO: Remove
     public static void main(String[] args) throws Exception {
-        testGroupBy();
+//        testSynchronizeStepSource();
+//        testSynchronizeStepSink();
+//        testGroupBy();
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
 //        testSpeed();
@@ -31,6 +35,66 @@ class BeltsTest {
 //        }
     }
     
+    static void testSynchronizeStepSource() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+            Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+            Belt.StepSource<Integer> noCloseSource = source::poll;
+            
+            Belts
+                .merge(List.of(
+                    // These 2 sources will concurrently poll the same upstream, effectively "balancing"
+                    noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
+                    noCloseSource.andThen(Belts.filterMap(i -> i + 4))
+                ))
+                .andThen(Belts.alsoClose(source))
+                .andThen(sink)
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+            assertIn(
+                Set.of(
+                    "156", "516", "561", "246", "426", "462", "345", "435", "453", "456",
+                    "423", "243", "234", "513", "153", "135", "612", "162", "126", "123"
+                ),
+                result
+            );
+        }
+    }
+    
+    static void testSynchronizeStepSink() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+            Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+            Belt.StepSink<Integer> noCompleteSink = sink::offer;
+            
+            Belts
+                .balance(List.of(
+                    // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+                    noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
+                    noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
+                ))
+                .compose(Belts.alsoComplete(sink))
+                .compose(source)
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+            assertIn(
+                Set.of(
+                    "156", "516", "561", "246", "426", "462", "345", "435", "453", "456",
+                    "423", "243", "234", "513", "153", "135", "612", "162", "126", "123"
+                ),
+                result
+            );
+        }
+    }
+    
     static void testBalanceMerge() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
@@ -41,36 +105,6 @@ class BeltsTest {
                 .run(Belts.scopeExecutor(scope));
             scope.join();
         }
-    }
-    
-    static <T, U> Belt.StepSourceOperator<T, U> filterMap(Function<? super T, ? extends U> mapper) {
-        Objects.requireNonNull(mapper);
-        
-        class FilterMap extends ProxySource<U> implements Belt.StepSource<U> {
-            final Belt.StepSource<? extends T> source;
-            
-            FilterMap(Belt.StepSource<? extends T> source) {
-                this.source = Objects.requireNonNull(source);
-            }
-            
-            @Override
-            public U poll() throws Exception {
-                for (T t; (t = source.poll()) != null; ) {
-                    U u = mapper.apply(t);
-                    if (u != null) {
-                        return u;
-                    }
-                }
-                return null;
-            }
-            
-            @Override
-            protected Stream<? extends Belt.Source<?>> sources() {
-                return Stream.of(source);
-            }
-        }
-        
-        return FilterMap::new;
     }
     
     static void testGroupBy() throws Exception {
@@ -344,5 +378,40 @@ class BeltsTest {
                 return Set.of(Characteristics.GREEDY, Characteristics.STATELESS);
             }
         };
+    }
+    
+    private static <T, U> Gatherer<T, ?, U> map(Function<? super T, ? extends U> mapper) {
+        return new Gatherer<T, Void, U>() {
+            @Override
+            public Supplier<Void> supplier() {
+                return () -> (Void) null;
+            }
+            
+            @Override
+            public Integrator<Void, T, U> integrator() {
+                return (state, element, downstream) -> downstream.flush(mapper.apply(element));
+            }
+            
+            @Override
+            public BinaryOperator<Void> combiner() {
+                return (l, r) -> l;
+            }
+            
+            @Override
+            public BiConsumer<Void, Sink<? super U>> finisher() {
+                return (state, downstream) -> {};
+            }
+            
+            @Override
+            public Set<Characteristics> characteristics() {
+                return Set.of(Characteristics.GREEDY, Characteristics.STATELESS);
+            }
+        };
+    }
+    
+    public static void assertIn(Set<?> expected, Object actual) {
+        if (!expected.contains(actual)) {
+            throw new AssertionError("Expected one of <" + expected + "> but was <" + actual + ">");
+        }
     }
 }

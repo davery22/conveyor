@@ -211,9 +211,11 @@ Discuss:
 
 Why not implicit close/complete[Abruptly] (inside #drainX) for plain Sinks/Sources?
 1. Forcing Sinks to replicate the try-catch-complete-suppress dance is obnoxious & error-prone
-2. Some operators - like plain flatMap - need Sink.drainFromSource to NOT complete the Sink
+2. (X) Some operators - like plain flatMap - need Sink.drainFromSource to NOT complete the Sink
 3. If a sink throws, its fan-out siblings only see interrupt[edException], not original exception
 4. Default impls (ie 'do nothing') are already hands-off - only override if we need propagation
+5. If outer stage drain throws an exception before calling inner stage drain, nothing will close/complete inner stage
+6. There would be nowhere to put recovery operators, since completion would be a black-box in drain
 
 Discuss:
 

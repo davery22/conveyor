@@ -33,7 +33,34 @@ public class Belts {
     /**
      * Returns an operator that synchronizes access to an upstream source's {@code poll} and {@code close} methods. The
      * resultant downstream source can be safely polled concurrently, making it suitable for ad-hoc "balancing" use
-     * cases.
+     * cases. For example:
+     *
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+     *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+     *     Belt.StepSource<Integer> noCloseSource = source::poll;
+     *
+     *     Belts
+     *         .merge(List.of(
+     *             // These 2 sources will concurrently poll the same upstream, effectively "balancing"
+     *             noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
+     *             noCloseSource.andThen(Belts.filterMap(i -> i + 4))
+     *         ))
+     *         .andThen(Belts.alsoClose(source))
+     *         .andThen(sink)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 156; 516; 561; 246; 426; 462; 345; 435; 453; 456;
+     *     // 423; 243; 234; 513; 153; 135; 612; 162; 126; 123;
+     * }
+     * }
      *
      * @return an operator that synchronizes access to an upstream source
      * @param <T> the source element type
@@ -79,7 +106,34 @@ public class Belts {
     /**
      * Returns an operator that synchronizes access to a downstream sink's {@code offer}, {@code complete}, and
      * {@code completeAbruptly} methods. The resultant upstream sink can be safely offered to concurrently, making it
-     * suitable for ad-hoc "merging" use cases.
+     * suitable for ad-hoc "merging" use cases. For example:
+     *
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+     *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *
+     *     Belts
+     *         .balance(List.of(
+     *             // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+     *             noCompleteSink.compose(Belts.gather(Gatherers.map((Integer i) -> i + 1))),
+     *             noCompleteSink.compose(Belts.gather(Gatherers.map((Integer i) -> i + 4)))
+     *         ))
+     *         .compose(Belts.alsoComplete(sink))
+     *         .compose(source)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 156; 516; 561; 246; 426; 462; 345; 435; 453; 456;
+     *     // 423; 243; 234; 513; 153; 135; 612; 162; 126; 123;
+     * }
+     * }
      *
      * @return an operator that synchronizes access to a downstream sink
      * @param <T> the sink element type
@@ -259,6 +313,36 @@ public class Belts {
         }
         
         return Recover::new;
+    }
+    
+    public static <T, U> Belt.StepSourceOperator<T, U> filterMap(Function<? super T, ? extends U> mapper) {
+        Objects.requireNonNull(mapper);
+        
+        class FilterMap extends ProxySource<U> implements Belt.StepSource<U> {
+            final Belt.StepSource<? extends T> source;
+            
+            FilterMap(Belt.StepSource<? extends T> source) {
+                this.source = Objects.requireNonNull(source);
+            }
+            
+            @Override
+            public U poll() throws Exception {
+                for (T t; (t = source.poll()) != null; ) {
+                    U u = mapper.apply(t);
+                    if (u != null) {
+                        return u;
+                    }
+                }
+                return null;
+            }
+            
+            @Override
+            protected Stream<? extends Belt.Source<?>> sources() {
+                return Stream.of(source);
+            }
+        }
+        
+        return FilterMap::new;
     }
     
     public static <T> Belt.SourceOperator<T, T> alsoClose(Belt.Source<?> sourceToClose) {
