@@ -709,13 +709,13 @@ public class Belts {
     }
     
     public static <T, A, R> Belt.StepSinkOperator<T, R> gather(Gatherer<? super T, A, R> gatherer) {
-        var supplier = gatherer.supplier();
+        var supplier = gatherer.initializer();
         var integrator = gatherer.integrator();
         var finisher = gatherer.finisher();
         
         class Gather implements Belt.StepSink<T> {
             final Belt.StepSink<? super R> sink;
-            final Gatherer.Sink<R> gsink;
+            final Gatherer.Downstream<R> gsink;
             A acc = null;
             int state = NEW;
             

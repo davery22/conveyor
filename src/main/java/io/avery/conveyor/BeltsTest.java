@@ -3,9 +3,7 @@ package io.avery.conveyor;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.*;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -350,7 +348,7 @@ class BeltsTest {
     private static <T, R> Gatherer<T, ?, R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {
         return new Gatherer<T, Void, R>() {
             @Override
-            public Supplier<Void> supplier() {
+            public Supplier<Void> initializer() {
                 return () -> (Void) null;
             }
             
@@ -358,7 +356,7 @@ class BeltsTest {
             public Integrator<Void, T, R> integrator() {
                 return (state, element, downstream) -> {
                     try (var s = mapper.apply(element)) {
-                        return s == null || s.sequential().allMatch(downstream::flush);
+                        return s == null || s.sequential().allMatch(downstream::push);
                     }
                 };
             }
@@ -369,7 +367,7 @@ class BeltsTest {
             }
             
             @Override
-            public BiConsumer<Void, Sink<? super R>> finisher() {
+            public BiConsumer<Void, Downstream<R>> finisher() {
                 return (state, downstream) -> {};
             }
             
@@ -383,13 +381,13 @@ class BeltsTest {
     private static <T, U> Gatherer<T, ?, U> map(Function<? super T, ? extends U> mapper) {
         return new Gatherer<T, Void, U>() {
             @Override
-            public Supplier<Void> supplier() {
+            public Supplier<Void> initializer() {
                 return () -> (Void) null;
             }
             
             @Override
             public Integrator<Void, T, U> integrator() {
-                return (state, element, downstream) -> downstream.flush(mapper.apply(element));
+                return (state, element, downstream) -> downstream.push(mapper.apply(element));
             }
             
             @Override
@@ -398,7 +396,7 @@ class BeltsTest {
             }
             
             @Override
-            public BiConsumer<Void, Sink<? super U>> finisher() {
+            public BiConsumer<Void, Downstream<U>> finisher() {
                 return (state, downstream) -> {};
             }
             
@@ -413,5 +411,58 @@ class BeltsTest {
         if (!expected.contains(actual)) {
             throw new AssertionError("Expected one of <" + expected + "> but was <" + actual + ">");
         }
+    }
+    
+    public static <T, R> Gatherer<T, ?, R> mapConcurrent(int concurrency, Function<? super T, ? extends R> mapper) {
+        class MapConcurrent implements Gatherer<T, MapConcurrent.State, R> {
+            record Task<T, R>(T el, Downstream<R> downstream) { }
+            static class State {
+                final StructuredTaskScope.ShutdownOnFailure scope = new StructuredTaskScope.ShutdownOnFailure();
+                final LinkedBlockingQueue<Object> queue = new LinkedBlockingQueue<>();
+            }
+            
+            @Override
+            @SuppressWarnings({"unchecked", "raw"})
+            public Supplier<State> initializer() {
+                return () -> {
+                    var state = new State();
+                    for (int i = 0; i < concurrency; i++) {
+                        state.scope.fork(() -> {
+                            while (state.queue.take() instanceof Task task) {
+                                if (!task.downstream.push(mapper.apply((T) task.el))) {
+                                    state.scope.shutdown();
+                                    break;
+                                }
+                            }
+                            return null;
+                        });
+                    }
+                    return state;
+                };
+            }
+            
+            @Override
+            public Gatherer.Integrator<State, T, R> integrator() {
+                return (state, el, downstream) -> state.queue.offer(new Task<>(el, downstream));
+            }
+            
+            @Override
+            public BiConsumer<State, Downstream<R>> finisher() {
+                return (state, downstream) -> {
+                    try (var scope = state.scope) {
+                        var sentinel = new Object();
+                        for (int i = 0; i < concurrency; i++) {
+                            state.queue.offer(sentinel);
+                        }
+                        try {
+                            scope.join().throwIfFailed(CompletionException::new);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                };
+            }
+        }
+        return new MapConcurrent();
     }
 }

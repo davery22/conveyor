@@ -1,5 +1,6 @@
 package io.avery.conveyor;
 
+import java.util.EnumSet;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
@@ -12,12 +13,13 @@ import java.util.function.Supplier;
  */
 interface Gatherer<T,A,R> {
     
-    interface Sink<R> {
-        boolean flush(R element);
+    interface Downstream<R> {
+        boolean push(R element);
+        default boolean isRejecting() { return false; }
     }
     
     interface Integrator<A,T,R> {
-        boolean integrate(A state, T element, Sink<? super R> downstream);
+        boolean integrate(A state, T element, Downstream<? super R> downstream);
     }
     
     enum Characteristics {
@@ -26,11 +28,11 @@ interface Gatherer<T,A,R> {
         STATELESS;       // No need to initialize or combine state
     }
     
-    Supplier<A> supplier();
+    Supplier<A> initializer();
     Integrator<A, T, R> integrator();
-    BinaryOperator<A> combiner();
-    BiConsumer<A, Sink<? super R>> finisher();
-    Set<Characteristics> characteristics();
+    BiConsumer<A, Downstream<R>> finisher();
+    default BinaryOperator<A> combiner() { return null; };
+    default Set<Characteristics> characteristics() { return EnumSet.noneOf(Characteristics.class); }
     
 //    default <AA, RR> Gatherer<T,?,RR> andThen(Gatherer<R,AA,RR> that) {
 //        // Gatherers is analogous to Collectors
