@@ -33,8 +33,9 @@ public class Belts {
     /**
      * Returns an operator that synchronizes access to an upstream source's {@code poll} and {@code close} methods. The
      * resultant downstream source can be safely polled concurrently, making it suitable for ad-hoc "balancing" use
-     * cases. For example:
+     * cases.
      *
+     * <p>Example:
      * {@snippet :
      * try (var scope = new StructuredTaskScope<>()) {
      *     List<Integer> list = new ArrayList<>();
@@ -44,7 +45,7 @@ public class Belts {
      *
      *     Belts
      *         .merge(List.of(
-     *             // These 2 sources will concurrently poll the same upstream, effectively "balancing"
+     *             // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 4))
      *         ))
@@ -106,8 +107,9 @@ public class Belts {
     /**
      * Returns an operator that synchronizes access to a downstream sink's {@code offer}, {@code complete}, and
      * {@code completeAbruptly} methods. The resultant upstream sink can be safely offered to concurrently, making it
-     * suitable for ad-hoc "merging" use cases. For example:
+     * suitable for ad-hoc "merging" use cases.
      *
+     * <p>Example:
      * {@snippet :
      * try (var scope = new StructuredTaskScope<>()) {
      *     List<Integer> list = new ArrayList<>();
@@ -189,10 +191,45 @@ public class Belts {
     /**
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
      * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
-     * which is then drained to the downstream sink.
+     * which is then run and drained to the downstream sink. Then the downstream sink is completed normally.
      *
-     * @param mapper
-     * @param asyncExceptionHandler
+     * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
+     * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
+     * is completed abruptly with that exception as the cause.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.Source<Integer> source = Belts.streamSource(
+     *         Stream.iterate(1, i -> {
+     *             if (i < 3) {
+     *                 return i + 1;
+     *             }
+     *             throw new IllegalStateException();
+     *         })
+     *     );
+     *
+     *     source
+     *         .andThen(Belts
+     *             .recoverStep(
+     *                 cause -> Belts.streamSource(Stream.of(7, 8, 9)),
+     *                 Throwable::printStackTrace
+     *             )
+     *             .andThen((Belt.StepSink<Integer>) list::add)
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     System.out.println(list);
+     *     // Prints: [1, 2, 3, 7, 8, 9]
+     * }
+     * }
+     *
+     * @param mapper a function that creates a source from an exception
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by the created source
      * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
      * @param <T> the sink element type
      */
@@ -253,11 +290,51 @@ public class Belts {
     }
     
     /**
+     * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
+     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
+     * which is then run and drained to the downstream sink. Then the downstream sink is completed normally.
      *
-     * @param mapper
-     * @param asyncExceptionHandler
-     * @return
-     * @param <T>
+     * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
+     * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
+     * is completed abruptly with that exception as the cause.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Iterator<Integer> iter = List.of(1, 2, 3).iterator();
+     *     Belt.StepSource<Integer> source = () -> {
+     *         if (iter.hasNext()) {
+     *             return iter.next();
+     *         }
+     *         throw new IllegalStateException();
+     *     };
+     *
+     *     source
+     *         .andThen(Belts
+     *             .recover(
+     *                 cause -> Belts.iteratorSource(List.of(7, 8, 9).iterator()),
+     *                 Throwable::printStackTrace
+     *             )
+     *             .andThen((Belt.Sink<Integer>) src -> {
+     *                 src.forEach(list::add);
+     *                 return true;
+     *             })
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     System.out.println(list);
+     *     // Prints: [1, 2, 3, 7, 8, 9]
+     * }
+     * }
+     *
+     * @param mapper a function that creates a source from an exception
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by the created source
+     * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
+     * @param <T> the sink element type
      */
     public static <T> Belt.SinkOperator<T, T> recover(Function<? super Throwable, ? extends Belt.StepSource<? extends T>> mapper,
                                                       Consumer<? super Throwable> asyncExceptionHandler) {

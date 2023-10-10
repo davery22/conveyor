@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -16,6 +17,8 @@ class BeltsTest {
     
     // TODO: Remove
     public static void main(String[] args) throws Exception {
+        testRecoverStep();
+        testRecover();
 //        testSynchronizeStepSource();
 //        testSynchronizeStepSink();
 //        testGroupBy();
@@ -42,7 +45,7 @@ class BeltsTest {
             
             Belts
                 .merge(List.of(
-                    // These 2 sources will concurrently poll the same upstream, effectively "balancing"
+                    // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
                     noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
                     noCloseSource.andThen(Belts.filterMap(i -> i + 4))
                 ))
@@ -93,10 +96,75 @@ class BeltsTest {
         }
     }
     
+    static void testRecoverStep() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Belt.Source<Integer> source = Belts.streamSource(
+                Stream.iterate(1, i -> {
+                    if (i < 3) {
+                        return i + 1;
+                    }
+                    throw new IllegalStateException();
+                })
+            );
+            
+            source
+                .andThen(Belts
+                    .recoverStep(
+                        cause -> Belts.streamSource(Stream.of(7, 8, 9)),
+                        Throwable::printStackTrace
+                    )
+                    .andThen((Belt.StepSink<Integer>) list::add)
+                )
+                .run(Belts.scopeExecutor(scope));
+                
+            scope.join();
+            
+            assertEquals(List.of(1, 2, 3, 7, 8, 9), list);
+        }
+    }
+    
+    static void testRecover() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Iterator<Integer> iter = List.of(1, 2, 3).iterator();
+            Belt.StepSource<Integer> source = () -> {
+                if (iter.hasNext()) {
+                    return iter.next();
+                }
+                throw new IllegalStateException();
+            };
+            
+            source
+                .andThen(Belts
+                    .recover(
+                        cause -> Belts.iteratorSource(List.of(7, 8, 9).iterator()),
+                        Throwable::printStackTrace
+                    )
+                    .andThen((Belt.Sink<Integer>) src -> {
+                        src.forEach(list::add);
+                        return true;
+                    })
+                )
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            assertEquals(List.of(1, 2, 3, 7, 8, 9), list);
+        }
+    }
+    
+    static void testFilterMap() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<String> list = new ArrayList<>();
+            scope.join();
+        }
+    }
+    
     static void testBalanceMerge() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
-                .andThen(filterMap(s -> (Callable<String>) () -> s))
+                .andThen(Belts.filterMap(s -> (Callable<String>) () -> s))
                 .andThen(Belts.<String>balanceMergeSink(4)
                     .andThen(Belts.buffer(16))
                 )
@@ -413,56 +481,9 @@ class BeltsTest {
         }
     }
     
-    public static <T, R> Gatherer<T, ?, R> mapConcurrent(int concurrency, Function<? super T, ? extends R> mapper) {
-        class MapConcurrent implements Gatherer<T, MapConcurrent.State, R> {
-            record Task<T, R>(T el, Downstream<R> downstream) { }
-            static class State {
-                final StructuredTaskScope.ShutdownOnFailure scope = new StructuredTaskScope.ShutdownOnFailure();
-                final LinkedBlockingQueue<Object> queue = new LinkedBlockingQueue<>();
-            }
-            
-            @Override
-            @SuppressWarnings({"unchecked", "raw"})
-            public Supplier<State> initializer() {
-                return () -> {
-                    var state = new State();
-                    for (int i = 0; i < concurrency; i++) {
-                        state.scope.fork(() -> {
-                            while (state.queue.take() instanceof Task task) {
-                                if (!task.downstream.push(mapper.apply((T) task.el))) {
-                                    state.scope.shutdown();
-                                    break;
-                                }
-                            }
-                            return null;
-                        });
-                    }
-                    return state;
-                };
-            }
-            
-            @Override
-            public Gatherer.Integrator<State, T, R> integrator() {
-                return (state, el, downstream) -> state.queue.offer(new Task<>(el, downstream));
-            }
-            
-            @Override
-            public BiConsumer<State, Downstream<R>> finisher() {
-                return (state, downstream) -> {
-                    try (var scope = state.scope) {
-                        var sentinel = new Object();
-                        for (int i = 0; i < concurrency; i++) {
-                            state.queue.offer(sentinel);
-                        }
-                        try {
-                            scope.join().throwIfFailed(CompletionException::new);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-                };
-            }
+    public static void assertEquals(Object expected, Object actual) {
+        if (!Objects.equals(expected, actual)) {
+            throw new AssertionError("Expected <" + expected + "> but was <" + actual + ">");
         }
-        return new MapConcurrent();
     }
 }
