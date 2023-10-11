@@ -392,6 +392,33 @@ public class Belts {
         return Recover::new;
     }
     
+    /**
+     * Returns an operator that applies the {@code mapper} to adapt or discard elements from an upstream source. For
+     * each upstream element, the resultant downstream source yields the result of applying the {@code mapper} to that
+     * element, or discards the element if the {@code mapper} returned {@code null}.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *
+     *     Belts.iteratorSource(List.of(1, 2, 3, 4, 5, 6).iterator())
+     *         .andThen(Belts.filterMap(i -> i % 2 == 0 ? null : -i))
+     *         .andThen((Belt.StepSink<Integer>) list::add)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     System.out.println(list);
+     *     // Prints: [-1, -3, -5]
+     * }
+     * }
+     *
+     * @param mapper a function to be applied to the upstream elements
+     * @return an operator that applies the {@code mapper} to adapt or discard elements from an upstream source
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     public static <T, U> Belt.StepSourceOperator<T, U> filterMap(Function<? super T, ? extends U> mapper) {
         Objects.requireNonNull(mapper);
         
@@ -2322,6 +2349,19 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a source that yields the elements from the given {@code stream}, and closes the stream when closed.
+     * When the source is first drained, it will push as many elements as possible from the stream to the sink.
+     * Subsequent attempts to drain the source will short-circuit. If the stream ever yields {@code null}, the source
+     * will throw a {@link NullPointerException}.
+     *
+     * <p>The source does not adjust the parallelism setting of the stream. In particular, if the stream
+     * {@link Stream#isParallel() isParallel}, draining the source may issue concurrent offers to the sink.
+     *
+     * @param stream the stream to yield from
+     * @return a source that yields the elements from the given {@code stream}
+     * @param <T> the element type
+     */
     public static <T> Belt.Source<T> streamSource(Stream<? extends T> stream) {
         Objects.requireNonNull(stream);
         
@@ -2366,10 +2406,29 @@ public class Belts {
         return new StreamSource();
     }
     
+    /**
+     * Returns a source that yields the elements from the given {@code iterator}. Each time the source is polled, it
+     * will advance the iterator, until the iterator is depleted. If the iterator ever yields {@code null}, the source
+     * will throw a {@link NullPointerException}.
+     *
+     * @param iterator the iterator to yield from
+     * @return a source that yields the elements from the given {@code iterator}
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSource<T> iteratorSource(Iterator<T> iterator) {
         return iteratorSource(iterator, () -> { });
     }
     
+    /**
+     * Returns a source that yields the elements from the given {@code iterator}, and performs the given {@code onClose}
+     * operation when closed. Each time the source is polled, it will advance the iterator, until the iterator is
+     * depleted. If the iterator ever yields {@code null}, the source will throw a {@link NullPointerException}.
+     *
+     * @param iterator the iterator to yield from
+     * @param onClose the close operation
+     * @return a source that yields the elements from the given {@code iterator}
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSource<T> iteratorSource(Iterator<T> iterator, AutoCloseable onClose) {
         Objects.requireNonNull(iterator);
         Objects.requireNonNull(onClose);
@@ -2389,11 +2448,30 @@ public class Belts {
         return new IteratorSource();
     }
     
+    /**
+     * Returns an {@link Executor Executor} that delegates execution to the given {@code scope}.
+     *
+     * <p>The resulting executor behaves as if defined by:
+     * {@snippet :
+     * Executor executor = runnable -> scope.fork(Executors.callable(runnable, null));
+     * }
+     *
+     * @param scope the given scope
+     * @return an Executor that delegates to the given scope
+     * @throws NullPointerException if the scope is null
+     */
     public static Executor scopeExecutor(StructuredTaskScope<?> scope) {
         Objects.requireNonNull(scope);
         return runnable -> scope.fork(Executors.callable(runnable, null));
     }
     
+    /**
+     * Closes each source, in encounter order. If closing any source throws an exception, the first such exception will
+     * be caught and re-thrown before this method returns, with any subsequent exceptions suppressed onto it.
+     *
+     * @param sources the sources
+     * @throws Exception if closing any source throws an exception
+     */
     public static void composedClose(Stream<? extends Belt.Source<?>> sources) throws Exception {
         Throwable[] ex = { null };
         sources.sequential().forEach(source -> {
@@ -2410,6 +2488,15 @@ public class Belts {
         throwAsException(ex[0]);
     }
     
+    /**
+     * Completes each sink normally, in encounter order. If completing any sink throws an exception, the first such
+     * exception will be caught and re-thrown before this method returns, with any subsequent exceptions suppressed onto
+     * it. If completing any sink throws an {@link InterruptedException}, the thread interrupt status will be set before
+     * completing remaining sinks.
+     *
+     * @param sinks the sinks
+     * @throws Exception if completing any sink throws an exception
+     */
     public static void composedComplete(Stream<? extends Belt.Sink<?>> sinks) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {
@@ -2429,6 +2516,16 @@ public class Belts {
         throwAsException(ex[0]);
     }
     
+    /**
+     * Completes each sink abruptly, passing the given {@code cause}, in encounter order. If completing any sink throws
+     * an exception, the first such exception will be caught and re-thrown before this method returns, with any
+     * subsequent exceptions suppressed onto it. If completing any sink throws an {@link InterruptedException}, the
+     * thread interrupt status will be set before completing remaining sinks.
+     *
+     * @param sinks the sinks
+     * @param cause the cause of the abrupt completion
+     * @throws Exception if completing any sink throws an exception
+     */
     public static void composedCompleteAbruptly(Stream<? extends Belt.Sink<?>> sinks, Throwable cause) throws Exception {
         Throwable[] ex = { null };
         sinks.sequential().forEach(sink -> {

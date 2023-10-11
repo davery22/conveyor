@@ -3,8 +3,9 @@ package io.avery.conveyor;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.StructuredTaskScope;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
@@ -17,10 +18,11 @@ class BeltsTest {
     
     // TODO: Remove
     public static void main(String[] args) throws Exception {
+        testSynchronizeStepSource();
+        testSynchronizeStepSink();
         testRecoverStep();
         testRecover();
-//        testSynchronizeStepSource();
-//        testSynchronizeStepSink();
+        testFilterMap();
 //        testGroupBy();
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
@@ -156,8 +158,16 @@ class BeltsTest {
     
     static void testFilterMap() throws Exception {
         try (var scope = new StructuredTaskScope<>()) {
-            List<String> list = new ArrayList<>();
+            List<Integer> list = new ArrayList<>();
+            
+            Belts.iteratorSource(List.of(1, 2, 3, 4, 5, 6).iterator())
+                .andThen(Belts.filterMap(i -> i % 2 == 0 ? null : -i))
+                .andThen((Belt.StepSink<Integer>) list::add)
+                .run(Belts.scopeExecutor(scope));
+            
             scope.join();
+            
+            assertEquals(List.of(-1, -3, -5), list);
         }
     }
     
