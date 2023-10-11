@@ -11,7 +11,7 @@ import java.util.function.Supplier;
  * <a href="https://cr.openjdk.org/~vklang/Gatherers.html">https://cr.openjdk.org/~vklang/Gatherers.html</a>.
  * This interface is intended to be superseded by the official API once available.
  */
-interface Gatherer<T,A,R> {
+public interface Gatherer<T,A,R> {
     
     interface Downstream<R> {
         boolean push(R element);
@@ -33,14 +33,4 @@ interface Gatherer<T,A,R> {
     BiConsumer<A, Downstream<R>> finisher();
     default BinaryOperator<A> combiner() { return null; };
     default Set<Characteristics> characteristics() { return EnumSet.noneOf(Characteristics.class); }
-    
-//    default <AA, RR> Gatherer<T,?,RR> andThen(Gatherer<R,AA,RR> that) {
-//        // Gatherers is analogous to Collectors
-//        return Gatherers.Composite.of(this, that);
-//    }
-//
-//    default <RR> Collector<T,?,RR> collect(Collector<R, ?, RR> collector) {
-//        // Gatherers is analogous to Collectors
-//        return Gatherers.GathererCollector.of(this, collector);
-//    }
 }

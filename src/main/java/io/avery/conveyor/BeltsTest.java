@@ -23,6 +23,8 @@ class BeltsTest {
         testRecoverStep();
         testRecover();
         testFilterMap();
+        testAlsoClose();
+        testAlsoComplete();
 //        testGroupBy();
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
@@ -171,6 +173,73 @@ class BeltsTest {
         }
     }
     
+    static void testAlsoClose() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Iterator<Integer> iter = List.of(0, 1, 2).iterator();
+            Belt.StepSource<Integer> source = new Belt.StepSource<Integer>() {
+                @Override public Integer poll() { return iter.hasNext() ? iter.next() : null; }
+                @Override public void close() { list.addAll(List.of(0, 0, 0)); }
+            }.andThen(Belts.synchronizeStepSource());
+            Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+            Belt.StepSource<Integer> noCloseSource = source::poll;
+            
+            Belts
+                .merge(List.of(
+                    // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+                    noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
+                    noCloseSource.andThen(Belts.filterMap(i -> i + 4))
+                ))
+                .andThen(Belts.alsoClose(source))
+                .andThen(sink)
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+            assertIn(
+                Set.of(
+                    "156000", "516000", "561000", "246000", "426000", "462000", "345000", "435000", "453000", "456000",
+                    "423000", "243000", "234000", "513000", "153000", "135000", "612000", "162000", "126000", "123000"
+                ),
+                result
+            );
+        }
+    }
+    
+    static void testAlsoComplete() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+            Belt.StepSink<Integer> sink = new Belt.StepSink<Integer>() {
+                @Override public boolean offer(Integer input) { return list.add(input); }
+                @Override public void complete() { list.addAll(List.of(0, 0, 0)); }
+            }.compose(Belts.synchronizeStepSink());
+            Belt.StepSink<Integer> noCompleteSink = sink::offer;
+            
+            Belts
+                .balance(List.of(
+                    // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+                    noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
+                    noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
+                ))
+                .compose(Belts.alsoComplete(sink))
+                .compose(source)
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+            assertIn(
+                Set.of(
+                    "156000", "516000", "561000", "246000", "426000", "462000", "345000", "435000", "453000", "456000",
+                    "423000", "243000", "234000", "513000", "153000", "135000", "612000", "162000", "126000", "123000"
+                ),
+                result
+            );
+        }
+    }
+    
     static void testBalanceMerge() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
@@ -185,32 +254,32 @@ class BeltsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
+            Belt.StepSegue<String, String> buffer = Belts.buffer(256);
+            
             lineSource()
-                .andThen(
-                    ((Belt.SinkToStepOperator<String, String>) buffer -> Belts
-                        .groupBy(
-                            (String line) -> {
-                                if (line.isEmpty()) return "*";
-                                if ("HALT".equals(line)) throw new IllegalStateException("HALTED!");
-                                return String.valueOf(line.charAt(0));
-                            },
-                            true,
-                            t -> { },
-                            (k, v) -> Belts
-                                .flatMap((String e) -> Belts.streamSource(Stream.of(k, e, v)), t -> { })
-                                .andThen(Belts.buffer(16))
-                                .andThen(Belts
-                                    .gather(flatMap((String e) -> {
-                                        if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
-                                        return Stream.of(e);
-                                    }))
-                                    .andThen(buffer::offer)
-                                )
-                        )
-                        .compose(Belts.alsoComplete(buffer))
+                .andThen(Belts
+                    .groupBy(
+                        (String line) -> {
+                            if (line.isEmpty()) return "*";
+                            if ("HALT".equals(line)) throw new IllegalStateException("HALTED!");
+                            return String.valueOf(line.charAt(0));
+                        },
+                        true,
+                        t -> { },
+                        (k, v) -> Belts
+                            .flatMap((String e) -> Belts.streamSource(Stream.of(k, e, v)), t -> { })
+                            .andThen(Belts.buffer(16))
+                            .andThen(Belts
+                                .gather(flatMap((String e) -> {
+                                    if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
+                                    return Stream.of(e);
+                                }))
+                                .andThen(buffer.sink()::offer)
+                            )
                     )
-                    .andThen(Belts.buffer(16))
+                    .compose(Belts.alsoComplete(buffer.sink()))
                 )
+                .andThen(buffer.source())
                 .andThen((Belt.Sink<String>) source -> { source.forEach(System.out::println); return true; })
                 .run(Belts.scopeExecutor(scope));
             

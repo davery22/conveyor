@@ -449,6 +449,53 @@ public class Belts {
         return FilterMap::new;
     }
     
+    /**
+     * Returns an operator that also closes the given {@code sourceToClose} when an upstream source closes. The
+     * resultant downstream source will delegate to the upstream source, but also close the {@code sourceToClose} when
+     * closed, and run the {@code sourceToClose} when run.
+     *
+     * <p>This is useful when a source is shared among several downstream sources: Instead of each downstream source
+     * attempting to close the shared source when it closes - and potentially interfering with others - this operator
+     * allows a common parent of the downstream sources to handle closing the shared source when all are done using it.
+     * This is particularly important when the downstream sources may be closed at different times, or when closing the
+     * shared source is not idempotent.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Iterator<Integer> iter = List.of(0, 1, 2).iterator();
+     *     Belt.StepSource<Integer> source = new Belt.StepSource<Integer>() {
+     *         @Override public Integer poll() { return iter.hasNext() ? iter.next() : null; }
+     *         @Override public void close() { System.out.print("000"); }
+     *     }.andThen(Belts.synchronizeStepSource());
+     *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+     *     Belt.StepSource<Integer> noCloseSource = source::poll;
+     *
+     *     Belts
+     *         .merge(List.of(
+     *             // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+     *             noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
+     *             noCloseSource.andThen(Belts.filterMap(i -> i + 4))
+     *         ))
+     *         .andThen(Belts.alsoClose(source))
+     *         .andThen(sink)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 000156; 000516; 000561; 000246; 000426; 000462; 000345; 000435; 000453; 000456;
+     *     // 000423; 000243; 000234; 000513; 000153; 000135; 000612; 000162; 000126; 000123
+     * }
+     * }
+     *
+     * @param sourceToClose the additional source to close
+     * @return an operator that also closes the given {@code sourceToClose} when an upstream source closes
+     * @param <T> the element type
+     */
     public static <T> Belt.SourceOperator<T, T> alsoClose(Belt.Source<?> sourceToClose) {
         Objects.requireNonNull(sourceToClose);
         
@@ -473,6 +520,52 @@ public class Belts {
         return AlsoClose::new;
     }
     
+    /**
+     * Returns an operator that also completes the given {@code sinkToComplete} when a downstream sink completes. The
+     * resultant upstream sink will delegate to the downstream sink, but also complete the {@code sinkToComplete} when
+     * completed (normally or abruptly), and run the {@code sinkToComplete} when run.
+     *
+     * <p>This is useful when a sink is shared among several upstream sinks: Instead of each upstream sink attempting to
+     * complete the shared sink when it completes - and potentially interfering with others - this operator allows a
+     * common parent of the upstream sinks to handle closing the shared sink when all are done using it. This is
+     * particularly important when the upstream sinks may be completed at different times, or when completing the shared
+     * sink is not idempotent.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
+     *     Belt.StepSink<Integer> sink = new Belt.StepSink<Integer>() {
+     *         @Override public boolean offer(Integer input) { return list.add(input); }
+     *         @Override public void complete() { list.addAll(List.of(0, 0, 0)); }
+     *     }.compose(Belts.synchronizeStepSink());
+     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *
+     *     Belts
+     *         .balance(List.of(
+     *             // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+     *             noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
+     *             noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
+     *         ))
+     *         .compose(Belts.alsoComplete(sink))
+     *         .compose(source)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 156000; 516000; 561000; 246000; 426000; 462000; 345000; 435000; 453000; 456000;
+     *     // 423000; 243000; 234000; 513000; 153000; 135000; 612000; 162000; 126000; 123000
+     * }
+     * }
+     *
+     * @param sinkToComplete the additional sink to complete
+     * @return an operator that also completes the given {@code sinkToComplete} when a downstream sink completes
+     * @param <T> the element type
+     */
     public static <T> Belt.SinkOperator<T, T> alsoComplete(Belt.Sink<?> sinkToComplete) {
         Objects.requireNonNull(sinkToComplete);
         
