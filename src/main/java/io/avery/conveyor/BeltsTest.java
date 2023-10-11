@@ -374,7 +374,7 @@ class BeltsTest {
             lineSource()
                 .andThen(Belts
                     .gather(BeltsTest.flatMap((String s) -> IntStream.range(0, 3).mapToObj(i -> s)))
-                    .andThen(Belts.tokenBucket(
+                    .andThen(Belts.throttle(
                         Duration.ofSeconds(1),
                         String::length,
                         10,

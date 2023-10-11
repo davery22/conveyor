@@ -1865,10 +1865,10 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
-    public static <T> Belt.StepSegue<T, T> tokenBucket(Duration tokenInterval,
-                                                       ToLongFunction<? super T> costMapper,
-                                                       long tokenLimit,
-                                                       long bufferLimit) {
+    public static <T> Belt.StepSegue<T, T> throttle(Duration tokenInterval,
+                                                    ToLongFunction<? super T> costMapper,
+                                                    long tokenLimit,
+                                                    long bufferLimit) {
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
         if (tokenLimit < 0) {
