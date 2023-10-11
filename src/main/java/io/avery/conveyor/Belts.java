@@ -1532,54 +1532,6 @@ public class Belts {
         return new Route();
     }
     
-    public static <T> Belt.StepSink<T> spillStep(Collection<? extends Belt.StepSink<? super T>> sinks) {
-        var theSinks = List.copyOf(sinks);
-        
-        class SpillStep extends ProxySink<T> implements Belt.StepSink<T> {
-            int i = 0;
-            
-            @Override
-            public boolean offer(T input) throws Exception {
-                for (; i < theSinks.size(); i++) {
-                    if (theSinks.get(i).offer(input)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            
-            @Override
-            protected Stream<? extends Belt.Sink<?>> sinks() {
-                return theSinks.stream();
-            }
-        }
-        
-        return new SpillStep();
-    }
-    
-    public static <T> Belt.Sink<T> spill(Collection<? extends Belt.Sink<? super T>> sinks) {
-        var theSinks = List.copyOf(sinks);
-        
-        class Spill extends ProxySink<T> {
-            @Override
-            public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
-                for (var sink : theSinks) {
-                    if (sink.drainFromSource(source)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            
-            @Override
-            protected Stream<? extends Belt.Sink<?>> sinks() {
-                return theSinks.stream();
-            }
-        }
-        
-        return new Spill();
-    }
-    
     public static <T> Belt.StepSource<T> concatStep(Collection<? extends Belt.StepSource<? extends T>> sources) {
         var theSources = List.copyOf(sources);
         
@@ -1806,7 +1758,260 @@ public class Belts {
         return new ZipLatest();
     }
     
-    // --- Segues ---
+    public static <T> Belt.StepSegue<T, T> rendezvous() {
+        class Rendezvous implements Belt.StepSegue<T, T> {
+            final ReentrantLock sinkLock = new ReentrantLock();
+            final ReentrantLock lock = new ReentrantLock();
+            final Condition given = lock.newCondition();
+            final Condition taken = lock.newCondition();
+            Throwable exception = null;
+            T element = null;
+            int state = RUNNING;
+            
+            private static final int RUNNING    = 0;
+            private static final int COMPLETING = 1;
+            private static final int CLOSED     = 2;
+            
+            class Sink implements Belt.StepSink<T> {
+                @Override
+                public boolean offer(T input) throws Exception {
+                    Objects.requireNonNull(input);
+                    sinkLock.lockInterruptibly(); // Prevent overwriting offers
+                    try {
+                        lock.lockInterruptibly();
+                        try {
+                            if (state >= COMPLETING) {
+                                return false;
+                            }
+                            element = input;
+                            given.signal();
+                            do {
+                                taken.await();
+                                if (state >= COMPLETING) {
+                                    return element == null;
+                                }
+                            } while (element != null);
+                            return true;
+                        } finally {
+                            lock.unlock();
+                        }
+                    } finally {
+                        sinkLock.unlock();
+                    }
+                }
+                
+                @Override
+                public void complete() throws Exception {
+                    lock.lockInterruptibly();
+                    try {
+                        if (state >= COMPLETING) {
+                            return;
+                        }
+                        state = COMPLETING;
+                        taken.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void completeAbruptly(Throwable cause) {
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        exception = cause == null ? NULL_EXCEPTION : cause;
+                        taken.signalAll();
+                        given.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            class Source implements Belt.StepSource<T> {
+                @Override
+                public T poll() throws Exception {
+                    lock.lockInterruptibly();
+                    try {
+                        if (state == CLOSED) {
+                            if (exception != null) {
+                                throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                            }
+                            return null;
+                        }
+                        while (element == null) {
+                            given.await();
+                            if (state == CLOSED) {
+                                if (exception != null) {
+                                    throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                                }
+                                return null;
+                            }
+                        }
+                        T ret = element;
+                        element = null;
+                        taken.signal();
+                        return ret;
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+                
+                @Override
+                public void close() {
+                    lock.lock();
+                    try {
+                        if (state == CLOSED) {
+                            return;
+                        }
+                        state = CLOSED;
+                        taken.signalAll();
+                        given.signalAll();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            @Override
+            public Belt.StepSink<T> sink() {
+                return new Sink();
+            }
+            
+            @Override
+            public Belt.StepSource<T> source() {
+                return new Source();
+            }
+        }
+        
+        return new Rendezvous();
+    }
+    
+    public static <T> Belt.StepSegue<T ,T> buffer(int bufferLimit) {
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        
+        class Buffer implements TimedSegue.Core<T, T> {
+            Deque<T> queue = null;
+            boolean done = false;
+            
+            @Override
+            public void onInit(TimedSegue.SinkController ctl) {
+                queue = new ArrayDeque<>(bufferLimit);
+            }
+            
+            @Override
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
+                queue.offer(input);
+                ctl.latchSourceDeadline(Instant.MIN);
+                if (queue.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
+            }
+            
+            @Override
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
+                T head = queue.poll();
+                if (head != null) {
+                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOutput(head);
+                    if (queue.peek() != null) {
+                        return;
+                    } else if (!done) {
+                        ctl.latchSourceDeadline(Instant.MAX);
+                        return;
+                    } // else fall-through
+                }
+                ctl.latchClose();
+            }
+            
+            @Override
+            public void onComplete(TimedSegue.SinkController ctl) {
+                done = true;
+                ctl.latchSourceDeadline(Instant.MIN);
+            }
+        }
+        
+        var core = new Buffer();
+        return new TimedSegue<>(core);
+    }
+    
+    public static <T> Belt.StepSegue<T, T> extrapolate(T initial,
+                                                       Function<? super T, ? extends Iterator<? extends T>> mapper,
+                                                       int bufferLimit) {
+        Objects.requireNonNull(mapper);
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
+        }
+        
+        class Extrapolate implements TimedSegue.Core<T, T> {
+            T prev = null;
+            Deque<T> queue = null;
+            Iterator<? extends T> iter = Collections.emptyIterator();
+            boolean done = false;
+            
+            @Override
+            public void onInit(TimedSegue.SinkController ctl) {
+                queue = new ArrayDeque<>(bufferLimit);
+                if (initial != null) {
+                    queue.offer(initial);
+                    ctl.latchSourceDeadline(Instant.MIN);
+                } else {
+                    ctl.latchSourceDeadline(Instant.MAX);
+                }
+            }
+            
+            @Override
+            public void onOffer(TimedSegue.SinkController ctl, T input) {
+                prev = null;
+                iter = Collections.emptyIterator();
+                queue.offer(input);
+                ctl.latchSourceDeadline(Instant.MIN);
+                if (queue.size() >= bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
+                }
+            }
+            
+            @Override
+            public void onPoll(TimedSegue.SourceController<T> ctl) {
+                T head = queue.poll();
+                if (head != null) {
+                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOutput(head);
+                    if (!done) {
+                        prev = head;
+                    } else {
+                        ctl.latchClose();
+                    }
+                } else if (!done) {
+                    if ((head = prev) != null) {
+                        prev = null;
+                        iter = Objects.requireNonNull(mapper.apply(head));
+                    }
+                    if (iter.hasNext()) {
+                        ctl.latchOutput(iter.next());
+                    } else {
+                        ctl.latchSourceDeadline(Instant.MAX);
+                    }
+                } else {
+                    ctl.latchClose();
+                }
+            }
+            
+            @Override
+            public void onComplete(TimedSegue.SinkController ctl) {
+                done = true;
+                ctl.latchSourceDeadline(Instant.MIN);
+            }
+        }
+        
+        var core = new Extrapolate();
+        return new TimedSegue<>(core);
+    }
     
     public static <T, A> Belt.StepSegue<T, A> batch(Supplier<? extends A> batchSupplier,
                                                     BiConsumer<? super A, ? super T> accumulator,
@@ -1869,7 +2074,6 @@ public class Belts {
                                                     ToLongFunction<? super T> costMapper,
                                                     long tokenLimit,
                                                     long bufferLimit) {
-        Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
         if (tokenLimit < 0) {
             throw new IllegalArgumentException("tokenLimit must be non-negative");
@@ -2094,261 +2298,6 @@ public class Belts {
         }
         
         var core = new KeepAlive();
-        return new TimedSegue<>(core);
-    }
-    
-    public static <T> Belt.StepSegue<T, T> rendezvous() {
-        class Rendezvous implements Belt.StepSegue<T, T> {
-            final ReentrantLock sinkLock = new ReentrantLock();
-            final ReentrantLock lock = new ReentrantLock();
-            final Condition given = lock.newCondition();
-            final Condition taken = lock.newCondition();
-            Throwable exception = null;
-            T element = null;
-            int state = RUNNING;
-            
-            private static final int RUNNING    = 0;
-            private static final int COMPLETING = 1;
-            private static final int CLOSED     = 2;
-            
-            class Sink implements Belt.StepSink<T> {
-                @Override
-                public boolean offer(T input) throws Exception {
-                    Objects.requireNonNull(input);
-                    sinkLock.lockInterruptibly(); // Prevent overwriting offers
-                    try {
-                        lock.lockInterruptibly();
-                        try {
-                            if (state >= COMPLETING) {
-                                return false;
-                            }
-                            element = input;
-                            given.signal();
-                            do {
-                                taken.await();
-                                if (state >= COMPLETING) {
-                                    return element == null;
-                                }
-                            } while (element != null);
-                            return true;
-                        } finally {
-                            lock.unlock();
-                        }
-                    } finally {
-                        sinkLock.unlock();
-                    }
-                }
-                
-                @Override
-                public void complete() throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return;
-                        }
-                        state = COMPLETING;
-                        taken.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                
-                @Override
-                public void completeAbruptly(Throwable cause) {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        exception = cause == null ? NULL_EXCEPTION : cause;
-                        taken.signalAll();
-                        given.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-            }
-            
-            class Source implements Belt.StepSource<T> {
-                @Override
-                public T poll() throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state == CLOSED) {
-                            if (exception != null) {
-                                throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
-                            }
-                            return null;
-                        }
-                        while (element == null) {
-                            given.await();
-                            if (state == CLOSED) {
-                                if (exception != null) {
-                                    throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
-                                }
-                                return null;
-                            }
-                        }
-                        T ret = element;
-                        element = null;
-                        taken.signal();
-                        return ret;
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                
-                @Override
-                public void close() {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        taken.signalAll();
-                        given.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-            }
-            
-            @Override
-            public Belt.StepSink<T> sink() {
-                return new Sink();
-            }
-            
-            @Override
-            public Belt.StepSource<T> source() {
-                return new Source();
-            }
-        }
-        
-        return new Rendezvous();
-    }
-    
-    public static <T> Belt.StepSegue<T ,T> buffer(int bufferLimit) {
-        if (bufferLimit < 1) {
-            throw new IllegalArgumentException("bufferLimit must be positive");
-        }
-        
-        class Buffer implements TimedSegue.Core<T, T> {
-            Deque<T> queue = null;
-            boolean done = false;
-            
-            @Override
-            public void onInit(TimedSegue.SinkController ctl) {
-                queue = new ArrayDeque<>(bufferLimit);
-            }
-            
-            @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
-                queue.offer(input);
-                ctl.latchSourceDeadline(Instant.MIN);
-                if (queue.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
-                }
-            }
-            
-            @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
-                T head = queue.poll();
-                if (head != null) {
-                    ctl.latchSinkDeadline(Instant.MIN);
-                    ctl.latchOutput(head);
-                    if (queue.peek() != null) {
-                        return;
-                    } else if (!done) {
-                        ctl.latchSourceDeadline(Instant.MAX);
-                        return;
-                    } // else fall-through
-                }
-                ctl.latchClose();
-            }
-            
-            @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
-                done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
-            }
-        }
-        
-        var core = new Buffer();
-        return new TimedSegue<>(core);
-    }
-
-    public static <T> Belt.StepSegue<T, T> extrapolate(T initial,
-                                                       Function<? super T, ? extends Iterator<? extends T>> mapper,
-                                                       int bufferLimit) {
-        Objects.requireNonNull(mapper);
-        if (bufferLimit < 1) {
-            throw new IllegalArgumentException("bufferLimit must be positive");
-        }
-        
-        class Extrapolate implements TimedSegue.Core<T, T> {
-            T prev = null;
-            Deque<T> queue = null;
-            Iterator<? extends T> iter = Collections.emptyIterator();
-            boolean done = false;
-            
-            @Override
-            public void onInit(TimedSegue.SinkController ctl) {
-                queue = new ArrayDeque<>(bufferLimit);
-                if (initial != null) {
-                    queue.offer(initial);
-                    ctl.latchSourceDeadline(Instant.MIN);
-                } else {
-                    ctl.latchSourceDeadline(Instant.MAX);
-                }
-            }
-            
-            @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
-                prev = null;
-                iter = Collections.emptyIterator();
-                queue.offer(input);
-                ctl.latchSourceDeadline(Instant.MIN);
-                if (queue.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
-                }
-            }
-            
-            @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
-                T head = queue.poll();
-                if (head != null) {
-                    ctl.latchSinkDeadline(Instant.MIN);
-                    ctl.latchOutput(head);
-                    if (!done) {
-                        prev = head;
-                    } else {
-                        ctl.latchClose();
-                    }
-                } else if (!done) {
-                    if ((head = prev) != null) {
-                        prev = null;
-                        iter = Objects.requireNonNull(mapper.apply(head));
-                    }
-                    if (iter.hasNext()) {
-                        ctl.latchOutput(iter.next());
-                    } else {
-                        ctl.latchSourceDeadline(Instant.MAX);
-                    }
-                } else {
-                    ctl.latchClose();
-                }
-            }
-            
-            @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
-                done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
-            }
-        }
-        
-        var core = new Extrapolate();
         return new TimedSegue<>(core);
     }
     
