@@ -271,7 +271,7 @@ public class Belts {
                         }
                         scope.join();
                     }
-                } catch (Error | Exception e) {
+                } catch (Throwable e) {
                     if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                     try { sink.completeAbruptly(running ? e : cause); }
                     catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
@@ -374,7 +374,7 @@ public class Belts {
                         }
                         scope.join();
                     }
-                } catch (Error | Exception e) {
+                } catch (Throwable e) {
                     if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                     try { sink.completeAbruptly(running ? e : cause); }
                     catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
@@ -629,7 +629,7 @@ public class Belts {
                         subSink.complete();
                         scope.join();
                         return drained;
-                    } catch (Error | Exception e) {
+                    } catch (Throwable e) {
                         if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                         try { subSink.completeAbruptly(e); }
                         catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
@@ -704,7 +704,7 @@ public class Belts {
                         composedComplete(sinks(scopedSinkByKey));
                         scope.join();
                         return drained;
-                    } catch (Error | Exception e) {
+                    } catch (Throwable e) {
                         if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                         try { composedCompleteAbruptly(sinks(scopedSinkByKey), e); }
                         catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
@@ -884,7 +884,7 @@ public class Belts {
                         source.drainToSink(newSink);
                         newSink.complete();
                         scope.join();
-                    } catch (Error | Exception e) {
+                    } catch (Throwable e) {
                         if (e instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                         try { newSink.completeAbruptly(e); }
                         catch (Throwable t) { if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); } e.addSuppressed(t); }
@@ -1112,7 +1112,7 @@ public class Belts {
                                 }
                             }
                             item.out = callable.call();
-                        } catch (Error | Exception e) {
+                        } catch (Throwable e) {
                             exception = e;
                         } finally {
                             if (item != null) {
@@ -1132,7 +1132,7 @@ public class Belts {
                                             K k = key = (K) item.out;
                                             try {
                                                 callable = mapper.apply(item.in, key);
-                                            } catch (Error | Exception e) {
+                                            } catch (Throwable e) {
                                                 exception = e;
                                                 continue;
                                             }
@@ -1162,7 +1162,7 @@ public class Belts {
                             .toList();
                         scope.join().throwIfFailed();
                         return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
-                    } catch (Error | Exception e) {
+                    } catch (Throwable e) {
                         // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
                         // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
                         // processed items that were behind unprocessed items, to avoid violating order.
@@ -1372,7 +1372,7 @@ public class Belts {
                             .toList();
                         scope.join().throwIfFailed();
                         return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
-                    } catch (Error | Exception e) {
+                    } catch (Throwable e) {
                         // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
                         // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
                         // processed items that were behind unprocessed items, to avoid violating order.
@@ -2425,13 +2425,13 @@ public class Belts {
                         Objects.requireNonNull(el);
                         try {
                             return sink.offer(el);
-                        } catch (Error | RuntimeException ex) {
-                            throw ex;
-                        } catch (Exception ex) {
-                            if (ex instanceof InterruptedException) {
+                        } catch (Error | RuntimeException e) {
+                            throw e;
+                        } catch (Exception e) {
+                            if (e instanceof InterruptedException) {
                                 Thread.currentThread().interrupt();
                             }
-                            throw new WrappingException(ex);
+                            throw new WrappingException(e);
                         }
                     });
                 } catch (WrappingException e) {
@@ -2522,7 +2522,7 @@ public class Belts {
         sources.sequential().forEach(source -> {
             try {
                 source.close();
-            } catch (Error | Exception e) {
+            } catch (Throwable e) {
                 if (ex[0] == null) {
                     ex[0] = e;
                 } else {
@@ -2547,7 +2547,7 @@ public class Belts {
         sinks.sequential().forEach(sink -> {
             try {
                 sink.complete();
-            } catch (Error | Exception e) {
+            } catch (Throwable e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
@@ -2576,7 +2576,7 @@ public class Belts {
         sinks.sequential().forEach(sink -> {
             try {
                 sink.completeAbruptly(cause);
-            } catch (Error | Exception e) {
+            } catch (Throwable e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
@@ -2646,7 +2646,7 @@ public class Belts {
                         phaser.arriveAndDeregister();
                     }
                 });
-            } catch (Error | RuntimeException e) {
+            } catch (Throwable e) {
                 // Task was not forked
                 phaser.arriveAndDeregister();
                 throw e;
