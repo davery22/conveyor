@@ -1868,11 +1868,14 @@ public class Belts {
     public static <T> Belt.StepSegue<T, T> tokenBucket(Duration tokenInterval,
                                                        ToLongFunction<? super T> costMapper,
                                                        long tokenLimit,
-                                                       long costLimit) { // TODO: Obviate costLimit?
+                                                       long bufferLimit) {
         Objects.requireNonNull(tokenInterval);
         Objects.requireNonNull(costMapper);
-        if ((tokenLimit | costLimit) < 0) {
-            throw new IllegalArgumentException("tokenLimit and costLimit must be non-negative");
+        if (tokenLimit < 0) {
+            throw new IllegalArgumentException("tokenLimit must be non-negative");
+        }
+        if (bufferLimit < 1) {
+            throw new IllegalArgumentException("bufferLimit must be positive");
         }
         if (!tokenInterval.isPositive()) {
             throw new IllegalArgumentException("tokenInterval must be positive");
@@ -1906,14 +1909,14 @@ public class Belts {
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
-                if ((cost = Math.addExact(cost, elementCost)) >= costLimit) {
-                    // Optional blocking for boundedness, here based on cost rather than queue size
-                    ctl.latchSinkDeadline(Instant.MAX);
-                }
+                cost = Math.addExact(cost, elementCost);
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
                     ctl.latchSourceDeadline(Instant.MIN); // Let source-side do token math
+                }
+                if (queue.size() == bufferLimit) {
+                    ctl.latchSinkDeadline(Instant.MAX);
                 }
             }
             
@@ -1939,7 +1942,7 @@ public class Belts {
                     tokens -= head.cost;
                     cost -= head.cost;
                     queue.poll();
-                    ctl.latchSinkDeadline(Instant.MIN); // TODO: Might not be below costLimit yet
+                    ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head == null) {
