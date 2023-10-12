@@ -1143,7 +1143,164 @@ public class Belts {
         return Gather::new;
     }
     
-    public static <T, K, U> Belt.SinkStepSource<T, U> mapBalancePartitioned(int parallelism,
+    private abstract static class MapBalance<T, U> implements Belt.SinkStepSource<T, U> {
+        final int concurrency;
+        final int bufferLimit;
+        final Deque<Item<T>> completionBuffer;
+        final ReentrantLock sourceLock = new ReentrantLock();
+        final ReentrantLock lock = new ReentrantLock();
+        final Condition completionNotFull = lock.newCondition();
+        final Condition outputReady = lock.newCondition();
+        int state = RUNNING;
+        Throwable exception = null;
+        
+        static final int RUNNING    = 0;
+        static final int COMPLETING = 1;
+        static final int CLOSED     = 2;
+        
+        MapBalance(int concurrency, int bufferLimit) {
+            this.concurrency = concurrency;
+            this.bufferLimit = bufferLimit;
+            this.completionBuffer = new ArrayDeque<>(bufferLimit);
+        }
+        
+        abstract Belt.Sink<T> newWorker();
+        
+        static class Item<T> {
+            // Value of out is initially partition key (or null if not partitioned)
+            // When output is computed, output replaces partition key, and null replaces input
+            Object out;
+            T in;
+            
+            Item(Object out, T in) {
+                this.out = out;
+                this.in = in;
+            }
+        }
+        
+        class Sink implements Belt.Sink<T> {
+            @Override
+            public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
+                try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapBalancePartitioned-drainFromSource",
+                                                                           Thread.ofVirtual().name("thread-", 0).factory())) {
+                    var tasks = IntStream.range(0, concurrency)
+                        .mapToObj(i -> newWorker())
+                        .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
+                        .toList();
+                    scope.join().throwIfFailed();
+                    return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
+                } catch (Throwable e) {
+                    // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
+                    // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
+                    // processed items that were behind unprocessed items, to avoid violating order.
+                    lock.lock();
+                    try {
+                        var reachable = new LinkedList<Item<T>>();
+                        for (Item<T> i; (i = completionBuffer.poll()) != null && i.in == null; ) {
+                            reachable.offer(i);
+                        }
+                        completionBuffer.clear();
+                        completionBuffer.addAll(reachable);
+                    } finally {
+                        lock.unlock();
+                    }
+                    throw e;
+                }
+            }
+            
+            @Override
+            public void complete() throws Exception {
+                lock.lockInterruptibly();
+                try {
+                    if (state >= COMPLETING) {
+                        return;
+                    }
+                    state = COMPLETING;
+                    if (completionBuffer.isEmpty()) {
+                        outputReady.signalAll();
+                    }
+                } finally {
+                    lock.unlock();
+                }
+            }
+            
+            @Override
+            public void completeAbruptly(Throwable cause) {
+                lock.lock();
+                try {
+                    if (state == CLOSED) {
+                        return;
+                    }
+                    state = CLOSED;
+                    exception = cause == null ? NULL_EXCEPTION : cause;
+                    completionNotFull.signalAll();
+                    outputReady.signalAll();
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+        
+        class Source implements Belt.StepSource<U> {
+            @Override
+            public U poll() throws Exception {
+                for (;;) {
+                    lock.lockInterruptibly();
+                    try {
+                        Item<T> item;
+                        for (;;) {
+                            item = completionBuffer.peek();
+                            if (state >= COMPLETING) {
+                                if (exception != null) {
+                                    throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
+                                } else if (state == CLOSED || item == null) {
+                                    return null;
+                                }
+                            }
+                            if (item != null && item.in == null) {
+                                break;
+                            }
+                            outputReady.await();
+                        }
+                        completionBuffer.poll();
+                        completionNotFull.signal();
+                        if (item.out == null) { // Skip nulls
+                            continue;
+                        }
+                        Item<T> nextItem = completionBuffer.peek();
+                        if (nextItem != null && nextItem.in == null) {
+                            outputReady.signal();
+                        }
+                        @SuppressWarnings("unchecked")
+                        U out = (U) item.out;
+                        return out;
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            }
+            
+            @Override
+            public void close() {
+                lock.lock();
+                try {
+                    if (state == CLOSED) {
+                        return;
+                    }
+                    state = CLOSED;
+                    completionNotFull.signalAll();
+                    outputReady.signalAll();
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+        
+        @Override public Belt.Sink<T> sink() { return new Sink(); }
+        @Override public Belt.StepSource<U> source() { return new Source(); }
+    }
+    
+    public static <T, K, U> Belt.SinkStepSource<T, U> mapBalancePartitioned(int concurrency,
                                                                             int permitsPerPartition,
                                                                             int bufferLimit,
                                                                             Function<? super T, ? extends K> classifier,
@@ -1160,53 +1317,34 @@ public class Belts {
         // 2. Worker gives permit back to partition
         // 3. If partition has max permits, worker removes partition
         
-        if (parallelism < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
-            throw new IllegalArgumentException("parallelism, permitsPerPartition, and bufferLimit must be positive");
+        if (concurrency < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
+            throw new IllegalArgumentException("concurrency, permitsPerPartition, and bufferLimit must be positive");
         }
         Objects.requireNonNull(classifier);
         Objects.requireNonNull(mapper);
         
-        if (permitsPerPartition >= parallelism) {
-            return mapBalanceOrdered(parallelism, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
-        }
-        
-        class Item {
-            // Value of out is initially partition key
-            // When output is computed, output replaces partition key, and null replaces input
-            Object out;
-            T in;
-            
-            Item(K key, T in) {
-                this.out = key;
-                this.in = in;
-            }
+        if (permitsPerPartition >= concurrency) {
+            return mapBalanceOrdered(concurrency, bufferLimit, t -> mapper.apply(t, classifier.apply(t)));
         }
         
         class Partition {
             // Only use buffer if we have no permits left
-            final Deque<Item> buffer = new LinkedList<>();
+            final Deque<MapBalance.Item<T>> buffer = new LinkedList<>();
             int permits = permitsPerPartition;
         }
         
-        class MapBalancePartitioned implements Belt.SinkStepSource<T, U> {
-            final ReentrantLock sourceLock = new ReentrantLock();
-            final ReentrantLock lock = new ReentrantLock();
-            final Condition completionNotFull = lock.newCondition();
-            final Condition outputReady = lock.newCondition();
-            final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
+        class MapBalancePartitioned extends MapBalance<T, U> {
             final Map<K, Partition> partitionByKey = new HashMap<>();
-            int state = RUNNING;
-            Throwable exception = null;
             
-            static final int RUNNING    = 0;
-            static final int COMPLETING = 1;
-            static final int CLOSED     = 2;
+            MapBalancePartitioned(int concurrency, int bufferLimit) {
+                super(concurrency, bufferLimit);
+            }
             
             class Worker implements Belt.Sink<T> {
                 @Override
                 public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
                     K key = null;
-                    Item item = null;
+                    Item<T> item = null;
                     Callable<? extends U> callable = null;
                     Throwable exception = null;
                     
@@ -1220,7 +1358,7 @@ public class Belts {
                                         return true;
                                     }
                                     key = Objects.requireNonNull(classifier.apply(in));
-                                    item = new Item(key, in);
+                                    item = new Item<>(key, in);
                                     
                                     lock.lockInterruptibly();
                                     try {
@@ -1291,168 +1429,33 @@ public class Belts {
                 }
             }
             
-            class Sink implements Belt.Sink<T> {
-                @Override
-                public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapBalancePartitioned-drainFromSource",
-                                                                               Thread.ofVirtual().name("thread-", 0).factory())) {
-                        var tasks = IntStream.range(0, parallelism)
-                            .mapToObj(i -> new Worker())
-                            .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
-                            .toList();
-                        scope.join().throwIfFailed();
-                        return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
-                    } catch (Throwable e) {
-                        // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
-                        // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
-                        // processed items that were behind unprocessed items, to avoid violating order.
-                        lock.lock();
-                        try {
-                            var reachable = new LinkedList<Item>();
-                            for (Item i; (i = completionBuffer.poll()) != null && i.in == null; ) {
-                                reachable.offer(i);
-                            }
-                            completionBuffer.clear();
-                            completionBuffer.addAll(reachable);
-                        } finally {
-                            lock.unlock();
-                        }
-                        throw e;
-                    }
-                }
-                
-                @Override
-                public void complete() throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return;
-                        }
-                        state = COMPLETING;
-                        if (completionBuffer.isEmpty()) {
-                            outputReady.signalAll();
-                        }
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                
-                @Override
-                public void completeAbruptly(Throwable cause) {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        exception = cause == null ? NULL_EXCEPTION : cause;
-                        completionNotFull.signalAll();
-                        outputReady.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
+            @Override
+            Belt.Sink<T> newWorker() {
+                return new Worker();
             }
-            
-            class Source implements Belt.StepSource<U> {
-                @Override
-                public U poll() throws Exception {
-                    for (;;) {
-                        lock.lockInterruptibly();
-                        try {
-                            Item item;
-                            for (;;) {
-                                item = completionBuffer.peek();
-                                if (state >= COMPLETING) {
-                                    if (exception != null) {
-                                        throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
-                                    } else if (state == CLOSED || item == null) {
-                                        return null;
-                                    }
-                                }
-                                if (item != null && item.in == null) {
-                                    break;
-                                }
-                                outputReady.await();
-                            }
-                            completionBuffer.poll();
-                            completionNotFull.signal();
-                            if (item.out == null) { // Skip nulls
-                                continue;
-                            }
-                            Item nextItem = completionBuffer.peek();
-                            if (nextItem != null && nextItem.in == null) {
-                                outputReady.signal();
-                            }
-                            @SuppressWarnings("unchecked")
-                            U out = (U) item.out;
-                            return out;
-                        } finally {
-                            lock.unlock();
-                        }
-                    }
-                }
-                
-                @Override
-                public void close() {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        completionNotFull.signalAll();
-                        outputReady.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-            }
-            
-            @Override public Belt.Sink<T> sink() { return new Sink(); }
-            @Override public Belt.StepSource<U> source() { return new Source(); }
         }
         
-        return new MapBalancePartitioned();
+        return new MapBalancePartitioned(concurrency, bufferLimit);
     }
     
-    public static <T, U> Belt.SinkStepSource<T, U> mapBalanceOrdered(int parallelism,
+    public static <T, U> Belt.SinkStepSource<T, U> mapBalanceOrdered(int concurrency,
                                                                      int bufferLimit,
                                                                      Function<? super T, ? extends Callable<? extends U>> mapper) {
-        if (parallelism < 1 || bufferLimit < 1) {
-            throw new IllegalArgumentException("parallelism and bufferLimit must be positive");
+        if (concurrency < 1 || bufferLimit < 1) {
+            throw new IllegalArgumentException("concurrency and bufferLimit must be positive");
         }
         Objects.requireNonNull(mapper);
-
-        class Item {
-            // Value of out is initially null
-            // When output is computed, output replaces null, and null replaces input
-            U out = null;
-            T in;
-            
-            Item(T in) {
-                this.in = in;
-            }
-        }
         
-        class MapBalanceOrdered implements Belt.SinkStepSource<T, U> {
-            final ReentrantLock sourceLock = new ReentrantLock();
-            final ReentrantLock lock = new ReentrantLock();
-            final Condition completionNotFull = lock.newCondition();
-            final Condition outputReady = lock.newCondition();
-            final Deque<Item> completionBuffer = new ArrayDeque<>(bufferLimit);
-            int state = RUNNING;
-            Throwable exception = null;
-            
-            static final int RUNNING    = 0;
-            static final int COMPLETING = 1;
-            static final int CLOSED     = 2;
+        class MapBalanceOrdered extends MapBalance<T, U> {
+            MapBalanceOrdered(int concurrency, int bufferLimit) {
+                super(concurrency, bufferLimit);
+            }
             
             class Worker implements Belt.Sink<T> {
                 @Override
                 public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
                     for (;;) {
-                        Item item = null;
+                        Item<T> item = null;
                         Callable<? extends U> callable;
                         
                         try {
@@ -1462,7 +1465,7 @@ public class Belts {
                                 if (in == null) {
                                     return true;
                                 }
-                                item = new Item(in);
+                                item = new Item<>(null, in);
                                 
                                 lock.lockInterruptibly();
                                 try {
@@ -1501,132 +1504,18 @@ public class Belts {
                 }
             }
             
-            class Sink implements Belt.Sink<T> {
-                @Override
-                public boolean drainFromSource(Belt.StepSource<? extends T> source) throws Exception {
-                    try (var scope = new StructuredTaskScope.ShutdownOnFailure("mapBalanceOrdered-drainFromSource",
-                                                                               Thread.ofVirtual().name("thread-", 0).factory())) {
-                        var tasks = IntStream.range(0, parallelism)
-                            .mapToObj(i -> new Worker())
-                            .map(sink -> scope.fork(() -> sink.drainFromSource(source)))
-                            .toList();
-                        scope.join().throwIfFailed();
-                        return tasks.stream().anyMatch(StructuredTaskScope.Subtask::get);
-                    } catch (Throwable e) {
-                        // Anything after the first unprocessed item is now unreachable, meaning we would deadlock if we
-                        // tried to recover this sink. To make recovery safe, we remove unreachable items. This includes
-                        // processed items that were behind unprocessed items, to avoid violating order.
-                        lock.lock();
-                        try {
-                            var reachable = new LinkedList<Item>();
-                            for (Item i; (i = completionBuffer.poll()) != null && i.in == null; ) {
-                                reachable.offer(i);
-                            }
-                            completionBuffer.clear();
-                            completionBuffer.addAll(reachable);
-                        } finally {
-                            lock.unlock();
-                        }
-                        throw e;
-                    }
-                }
-                
-                @Override
-                public void complete() throws Exception {
-                    lock.lockInterruptibly();
-                    try {
-                        if (state >= COMPLETING) {
-                            return;
-                        }
-                        state = COMPLETING;
-                        if (completionBuffer.isEmpty()) {
-                            outputReady.signalAll();
-                        }
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                
-                @Override
-                public void completeAbruptly(Throwable cause) {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        exception = cause == null ? NULL_EXCEPTION : cause;
-                        completionNotFull.signalAll();
-                        outputReady.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
+            @Override
+            Belt.Sink<T> newWorker() {
+                return new Worker();
             }
-            
-            class Source implements Belt.StepSource<U> {
-                @Override
-                public U poll() throws Exception {
-                    for (;;) {
-                        lock.lockInterruptibly();
-                        try {
-                            Item item;
-                            for (;;) {
-                                item = completionBuffer.peek();
-                                if (state >= COMPLETING) {
-                                    if (exception != null) {
-                                        throw new UpstreamException(exception == NULL_EXCEPTION ? null : exception);
-                                    } else if (state == CLOSED || item == null) {
-                                        return null;
-                                    }
-                                }
-                                if (item != null && item.in == null) {
-                                    break;
-                                }
-                                outputReady.await();
-                            }
-                            completionBuffer.poll();
-                            completionNotFull.signal();
-                            if (item.out == null) { // Skip nulls
-                                continue;
-                            }
-                            Item nextItem = completionBuffer.peek();
-                            if (nextItem != null && nextItem.in == null) {
-                                outputReady.signal();
-                            }
-                            return item.out;
-                        } finally {
-                            lock.unlock();
-                        }
-                    }
-                }
-                
-                @Override
-                public void close() {
-                    lock.lock();
-                    try {
-                        if (state == CLOSED) {
-                            return;
-                        }
-                        state = CLOSED;
-                        completionNotFull.signalAll();
-                        outputReady.signalAll();
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-            }
-            
-            @Override public Belt.Sink<T> sink() { return new Sink(); }
-            @Override public Belt.StepSource<U> source() { return new Source(); }
         }
         
-        return new MapBalanceOrdered();
+        return new MapBalanceOrdered(concurrency, bufferLimit);
     }
     
-    public static <T> Belt.StepToSourceOperator<Callable<T>, T> balanceMergeSource(int parallelism) {
-        if (parallelism < 1) {
-            throw new IllegalArgumentException("parallelism must be positive");
+    public static <T> Belt.StepToSourceOperator<Callable<T>, T> balanceMergeSource(int concurrency) {
+        if (concurrency < 1) {
+            throw new IllegalArgumentException("concurrency must be positive");
         }
         
         return source -> {
@@ -1640,14 +1529,14 @@ public class Belts {
                 }
                 return null;
             };
-            return merge(IntStream.range(0, parallelism).mapToObj(i -> worker).toList())
+            return merge(IntStream.range(0, concurrency).mapToObj(i -> worker).toList())
                 .andThen(alsoClose(source));
         };
     }
     
-    public static <T> Belt.SinkToStepOperator<Callable<T>, T> balanceMergeSink(int parallelism) {
-        if (parallelism < 1) {
-            throw new IllegalArgumentException("parallelism must be positive");
+    public static <T> Belt.SinkToStepOperator<Callable<T>, T> balanceMergeSink(int concurrency) {
+        if (concurrency < 1) {
+            throw new IllegalArgumentException("concurrency must be positive");
         }
         
         return sink -> {
@@ -1656,7 +1545,7 @@ public class Belts {
                 var t = c.call();
                 return t == null || sink.offer(t); // Skip nulls
             };
-            return balance(IntStream.range(0, parallelism).mapToObj(i -> worker).toList())
+            return balance(IntStream.range(0, concurrency).mapToObj(i -> worker).toList())
                 .compose(alsoComplete(sink));
         };
     }
