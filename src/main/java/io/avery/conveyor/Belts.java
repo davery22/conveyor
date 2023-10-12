@@ -191,7 +191,8 @@ public class Belts {
     /**
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
      * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
-     * which is then run and drained to the downstream sink. Then the downstream sink is completed normally.
+     * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
+     * running silos from the source are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -292,7 +293,8 @@ public class Belts {
     /**
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
      * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
-     * which is then run and drained to the downstream sink. Then the downstream sink is completed normally.
+     * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
+     * running silos from the source are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -590,6 +592,49 @@ public class Belts {
         return AlsoComplete::new;
     }
     
+    /**
+     * Returns a sink that offers input elements to consecutive inner sinks, using the {@code predicate} to determine
+     * when to create each new sink. When the {@code predicate} returns {@code true} for an element, the current inner
+     * sink is completed and its running silos awaited, then a new inner sink is created by passing the element to the
+     * {@code sinkFactory}, and the new sink is run.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     // In this example, the consecutive inner sinks offer to a shared sink, effectively "concatenating"
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.StepSink<Integer> sink = list::add;
+     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *
+     *     Belts.iteratorSource(List.of(0, 1, 2, 3, 4, 5).iterator())
+     *         .andThen(Belts
+     *             .split(
+     *                 (Integer i) -> i % 2 == 0, // Splits a new sink when element is even
+     *                 false, false,
+     *                 Throwable::printStackTrace,
+     *                 i -> noCompleteSink.compose(Belts.flatMap(j -> Belts.streamSource(Stream.of(j, i)),
+     *                                                           Throwable::printStackTrace))
+     *             )
+     *             .compose(Belts.alsoComplete(sink))
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *     System.out.println(list);
+     *     // Prints: [0, 0, 1, 0, 2, 2, 3, 2, 4, 4, 5, 4]
+     * }
+     * }
+     *
+     * @param predicate a predicate to be applied to the input elements
+     * @param splitAfter if {@code true}, an element that passes the {@code predicate} will cause a new inner sink to be
+     *                   created starting with the next element, rather than the current element
+     * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by created sinks
+     * @param sinkFactory a function that creates a sink, using the first element that will be offered to that sink
+     * @return a sink that offers input elements to consecutive inner sinks, delimited by passing {@code predicate}
+     * @param <T> the element type
+     */
     public static <T> Belt.Sink<T> split(Predicate<? super T> predicate,
                                          boolean splitAfter,
                                          boolean eagerCancel,
@@ -643,6 +688,54 @@ public class Belts {
         return new Split();
     }
     
+    /**
+     * Returns a sink that offers input elements to the inner sink corresponding to the key that the {@code classifier}
+     * computes for the element. When the {@code classifier} computes a previously-unseen key for an element, the
+     * {@code sinkFactory} is called with the key and element to create a new inner sink, which is then run. That first
+     * element, and subsequent elements that map to the same key, are offered to that sink until the sink cancels.
+     *
+     * <p>If {@code eagerCancel} is {@code true}, and any inner sink cancels, all inner sinks will be completed and
+     * running silos awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner sink
+     * cancels, it will be completed and its running silos awaited, before the outer sink resumes. Subsequent elements
+     * that map to the canceled sink's key will be discarded.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     // In this example, the concurrent inner sinks offer to a shared sink, effectively "merging"
+     *     List<String> list = new ArrayList<>();
+     *     Belt.StepSink<String> sink = list::add;
+     *     Belt.StepSink<String> noCompleteSink = sink::offer;
+     *
+     *     Belts.iteratorSource(List.of("now", "or", "never").iterator())
+     *         .andThen(Belts
+     *             .groupBy(
+     *                 (String s) -> s.substring(0, 1),
+     *                 false,
+     *                 Throwable::printStackTrace,
+     *                 (k, first) -> noCompleteSink.compose(Belts.flatMap(s -> Belts.streamSource(Stream.of(k, s, first)),
+     *                                                                    Throwable::printStackTrace))
+     *             )
+     *             .compose(Belts.alsoComplete(sink))
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *     System.out.println(list);
+     *     // Prints: [n, now, now, o, or, or, n, never, now]
+     * }
+     * }
+     *
+     * @param classifier a classifier function mapping input elements to keys
+     * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by created sinks
+     * @param sinkFactory a function that creates a sink, using a key and the first element that will be offered to that
+     *                    sink
+     * @return a sink that offers input elements to the inner sink corresponding to the key computed for the element
+     * @param <T> the element type
+     * @param <K> the key type
+     */
     public static <T, K> Belt.Sink<T> groupBy(Function<? super T, ? extends K> classifier,
                                               boolean eagerCancel,
                                               Consumer<? super Throwable> asyncExceptionHandler,

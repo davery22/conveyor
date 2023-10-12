@@ -25,7 +25,9 @@ class BeltsTest {
         testFilterMap();
         testAlsoClose();
         testAlsoComplete();
-//        testGroupBy();
+        testSplit();
+        testGroupBy();
+        
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
 //        testSpeed();
@@ -240,6 +242,56 @@ class BeltsTest {
         }
     }
     
+    static void testSplit() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+           // In this example, the consecutive inner sinks offer to a shared sink, effectively "concatenating"
+           List<Integer> list = new ArrayList<>();
+           Belt.StepSink<Integer> sink = list::add;
+           Belt.StepSink<Integer> noCompleteSink = sink::offer;
+      
+           Belts.iteratorSource(List.of(0, 1, 2, 3, 4, 5).iterator())
+               .andThen(Belts
+                   .split(
+                       (Integer i) -> i % 2 == 0, // Splits a new sink when element is even
+                       false, false,
+                       Throwable::printStackTrace,
+                       i -> noCompleteSink.compose(Belts.flatMap(j -> Belts.streamSource(Stream.of(j, i)),
+                                                                 Throwable::printStackTrace))
+                   )
+                   .compose(Belts.alsoComplete(sink))
+               )
+               .run(Belts.scopeExecutor(scope));
+      
+           scope.join();
+           assertEquals(List.of(0, 0, 1, 0, 2, 2, 3, 2, 4, 4, 5, 4), list);
+       }
+    }
+    
+    static void testGroupBy() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            // In this example, the concurrent inner sinks offer to a shared sink, effectively "merging"
+            List<String> list = new ArrayList<>();
+            Belt.StepSink<String> sink = list::add;
+            Belt.StepSink<String> noCompleteSink = sink::offer;
+            
+            Belts.iteratorSource(List.of("now", "or", "never").iterator())
+                .andThen(Belts
+                    .groupBy(
+                        (String s) -> s.substring(0, 1),
+                        false,
+                        Throwable::printStackTrace,
+                        (k, first) -> noCompleteSink.compose(Belts.flatMap(s -> Belts.streamSource(Stream.of(k, s, first)),
+                                                                           Throwable::printStackTrace))
+                    )
+                    .compose(Belts.alsoComplete(sink))
+                )
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            assertEquals(List.of("n", "now", "now", "o", "or", "or", "n", "never", "now"), list);
+        }
+    }
+    
     static void testBalanceMerge() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
@@ -252,7 +304,7 @@ class BeltsTest {
         }
     }
     
-    static void testGroupBy() throws Exception {
+    static void testGroupBy2() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             Belt.StepSegue<String, String> buffer = Belts.buffer(256);
             
