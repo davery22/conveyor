@@ -27,6 +27,7 @@ class BeltsTest {
         testAlsoComplete();
         testSplit();
         testGroupBy();
+        testFlatMap();
         
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
@@ -289,6 +290,50 @@ class BeltsTest {
             
             scope.join();
             assertEquals(List.of("n", "now", "now", "o", "or", "or", "n", "never", "now"), list);
+        }
+    }
+    
+    static void testFlatMap() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<String> list = new ArrayList<>();
+            
+            Belts.iteratorSource(List.of("red", "blue", "green").iterator())
+                .andThen(Belts
+                    .flatMap(
+                        (String color) -> Belts.streamSource(Stream.of("color", color))
+                            .andThen(Belts.buffer(256)),
+                        Throwable::printStackTrace
+                    )
+                    .andThen((Belt.StepSink<String>) list::add)
+                )
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            assertEquals(List.of("color", "red", "color", "blue", "color", "green"), list);
+        }
+    }
+    
+    static void testDelay() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<String> list = new ArrayList<>();
+            
+            Belts.iteratorSource(List.of("World").iterator())
+                .andThen(Belts
+                             .flatMap(
+                                 (String s) -> Belts.streamSource(Stream.of("Hello", s))
+                                     .andThen(Belts.delay(i -> Instant.now().plusSeconds(1), 256)),
+                                 Throwable::printStackTrace
+                             )
+                             .andThen((Belt.StepSink<String>) s -> {
+                                 System.out.println(s);
+                                 return true;
+                             })
+//                    .andThen((Belt.StepSink<String>) list::add)
+                )
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            assertEquals(List.of(), list);
         }
     }
     

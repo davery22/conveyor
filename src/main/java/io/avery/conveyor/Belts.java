@@ -811,6 +811,45 @@ public class Belts {
         return new GroupBy();
     }
     
+    /**
+     * Returns an operator that replaces each element with the contents of a mapped source before it reaches a
+     * downstream sink. The resultant upstream sink will apply the {@code mapper} to each element to produce a mapped
+     * source, run the source, offer its contents downstream, then close it and await its running silos. (If a mapped
+     * source is {@code null}, it is discarded.)
+     *
+     * <p>If the mapped sources are known to never encapsulate silos / cross asynchronous boundaries, it may be possible
+     * to replace usage of this operator with the {@link #gather gather} operator and a flat-mapping
+     * {@link Gatherer Gatherer}.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<String> list = new ArrayList<>();
+     *
+     *     Belts.iteratorSource(List.of("red", "blue", "green").iterator())
+     *         .andThen(Belts
+     *             .flatMap(
+     *                 (String color) -> Belts.streamSource(Stream.of("color", color))
+     *                     .andThen(Belts.buffer(256)),
+     *                 Throwable::printStackTrace
+     *             )
+     *             .andThen((Belt.StepSink<String>) list::add)
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *     System.out.println(list);
+     *     // Prints: [color, red, color, blue, color, green]
+     * }
+     * }
+     *
+     * @param mapper a function to be applied to the upstream elements, producing a mapped source
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by created sources
+     * @return an operator that replaces each element with the contents of a mapped source
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     public static <T, U> Belt.StepSinkOperator<T, U> flatMap(Function<? super T, ? extends Belt.Source<? extends U>> mapper,
                                                              Consumer<? super Throwable> asyncExceptionHandler) {
         Objects.requireNonNull(mapper);
@@ -855,6 +894,14 @@ public class Belts {
         return FlatMap::new;
     }
     
+    /**
+     *
+     * @param sourceMapper
+     * @param asyncExceptionHandler
+     * @return
+     * @param <T>
+     * @param <U>
+     */
     public static <T, U> Belt.SinkOperator<T, U> adaptSourceOfSink(Belt.StepSourceOperator<T, U> sourceMapper,
                                                                    Consumer<? super Throwable> asyncExceptionHandler) {
         Objects.requireNonNull(sourceMapper);
