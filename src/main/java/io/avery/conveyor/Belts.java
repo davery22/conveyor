@@ -895,12 +895,56 @@ public class Belts {
     }
     
     /**
+     * Returns an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
+     * from. The resulting upstream sink will wrap any upstream source it drains from to discard close signals, and then
+     * apply the {@code sourceMapper} to create a downstream source. The downstream source is then run, drained from,
+     * and closed, and its running silos are awaited.
      *
-     * @param sourceMapper
-     * @param asyncExceptionHandler
-     * @return
-     * @param <T>
-     * @param <U>
+     * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sourceMapper} after the
+     * upstream source, and then connecting the downstream sink after that. However, since close signals are expected to
+     * be handled externally from draining, any close signals that reach the upstream source during draining are
+     * discarded.
+     *
+     * <p>This operator is intended for use cases where either the caller does not have access to the source (eg, an API
+     * that must return a sink), or the sink is part of a fan-out, and does not intend to change the behavior of the
+     * source for other sinks. For best performance, it is recommended to chain subsequent operations onto the
+     * {@code sourceMapper} passed to this operator, rather than chaining calls to this operator.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list1 = new ArrayList<>();
+     *     List<Integer> list2 = new ArrayList<>();
+     *
+     *     Belts.iteratorSource(List.of(1, 2, 3).iterator())
+     *         .andThen(Belts.synchronizeStepSource())
+     *         .andThen(Belts.balance(List.of(
+     *             (Belt.StepSink<Integer>) list1::add,
+     *             ((Belt.StepSink<Integer>) list2::add)
+     *                 .compose(Belts.adaptSourceOfSink(
+     *                     Belts.filterMap(i -> 10 - i),
+     *                     Throwable::printStackTrace
+     *                 ))
+     *         )))
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = Stream.concat(list1.stream(), list2.stream()).map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 187; 817; 871; 297; 927; 972; 398; 938; 983; 987;
+     *     // 923; 293; 239; 813; 183; 138; 712; 172; 127; 123
+     * }
+     * }
+     *
+     * @param sourceMapper an operator that connects after an upstream source to produce a downstream source
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by the created downstream source
+     * @return an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
+     * from
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
      */
     public static <T, U> Belt.SinkOperator<T, U> adaptSourceOfSink(Belt.StepSourceOperator<T, U> sourceMapper,
                                                                    Consumer<? super Throwable> asyncExceptionHandler) {
@@ -935,10 +979,6 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("adaptSourceOfSink-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    // Basically, we are trying to make
-                    //   `source.andThen(adaptSourceOfSink(sourceMapper).andThen(sink))`
-                    // behave as if it was
-                    //   `source.andThen(sourceMapper).andThen(sink)`
                     newSource.run(scopeExecutor(scope));
                     try (newSource) {
                         sink.drainFromSource(newSource);
@@ -958,24 +998,57 @@ public class Belts {
         return SourceAdaptedSink::new;
     }
     
-    // TODO: Do these compose well? eg, for A:t->a, B:a->b, C:b->c, compare:
-    //  A-B
-    //    .andThen(adaptSinkOfSource(A.andThen(B)))
-    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)))
-    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B))
-    //  A-B-C
-    //    .andThen(adaptSinkOfSource(A.andThen(B.andThen(C))))
-    //    .andThen(adaptSinkOfSource(A.andThen(B).andThen(C)))
-    //    .andThen(adaptSinkOfSource(A.andThen(B)).andThen(adaptSinkOfSource(C)))
-    //    .andThen(adaptSinkOfSource(A.andThen(B))).andThen(adaptSinkOfSource(C))
-    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B.andThen(C))))
-    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B).andThen(adaptSinkOfSource(C))))
-    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B)).andThen(adaptSinkOfSource(C)))
-    //    .andThen(adaptSinkOfSource(A).andThen(adaptSinkOfSource(B))).andThen(adaptSinkOfSource(C))
-    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B.andThen(C)))
-    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B).andThen(adaptSinkOfSource(C)))
-    //    .andThen(adaptSinkOfSource(A)).andThen(adaptSinkOfSource(B)).andThen(adaptSinkOfSource(C))
-    
+    /**
+     * Returns an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to.
+     * The resulting downstream source will wrap any downstream sink it drains to to discard completion signals, and
+     * then apply the {@code sinkMapper} to create an upstream sink. The upstream sink is then run, drained to, and
+     * completed, and its running silos are awaited.
+     *
+     * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sinkMapper} before the
+     * downstream sink, and then connecting the upstream source before that. However, since completion signals are
+     * expected to be handled externally from draining, any completion signals that reach the downstream sink during
+     * draining are discarded.
+     *
+     * <p>This operator is intended for use cases where either the caller does not have access to the sink (eg, an API
+     * that must return a source), or the source is part of a fan-in, and does not intend to change the behavior of the
+     * sink for other sources. For best performance, it is recommended to chain subsequent operations onto the
+     * {@code sinkMapper} passed to this operator, rather than chaining calls to this operator.
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+     *
+     *     Belts
+     *         .merge(List.of(
+     *             Belts.streamSource(Stream.of(9)),
+     *             Belts.streamSource(Stream.of(2))
+     *                 .andThen(Belts.adaptSinkOfSource(
+     *                     Belts.flatMap(i -> Belts.streamSource(Stream.of(i, i+1, i+2)),
+     *                                   Throwable::printStackTrace),
+     *                     Throwable::printStackTrace
+     *                 ))
+     *         ))
+     *         .andThen(sink)
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *
+     *     String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+     *     System.out.println(result);
+     *     // Possible outputs:
+     *     // 9234; 2934; 2394; 2349
+     * }
+     * }
+     *
+     * @param sinkMapper an operator that connects before a downstream sink to produce an upstream sink
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
+     *                              encapsulated by the created upstream sink
+     * @return an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     public static <T, U> Belt.SourceOperator<T, U> adaptSinkOfSource(Belt.StepSinkOperator<T, U> sinkMapper,
                                                                      Consumer<? super Throwable> asyncExceptionHandler) {
         Objects.requireNonNull(sinkMapper);
@@ -1008,17 +1081,6 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("adaptSinkOfSource-drainToSink",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    // Basically, we are trying to make
-                    //   `source.andThen(adaptSinkOfSource(sinkMapper)).andThen(sink)`
-                    // behave as if it was
-                    //   `source.andThen(sinkMapper.andThen(sink))`
-                    //
-                    // A potential difference is in exception handling. We process newSink in this thread, and throw if
-                    // the 'silo' below throws. This means that exception may be passed to sink.completeAbruptly
-                    // sometime after this method exits. If there is an async boundary between newSink and sink, sink
-                    // would see a different exception than it would have in the `sinkMapper.andThen(sink)` version. No
-                    // heroics here can perfectly match the behavior of that version, so instead of trying and failing
-                    // in subtle ways, we go with the more obvious implementation.
                     newSink.run(scopeExecutor(scope));
                     try {
                         source.drainToSink(newSink);
@@ -1052,7 +1114,7 @@ public class Belts {
         
         class Gather implements Belt.StepSink<T> {
             final Belt.StepSink<? super R> sink;
-            final Gatherer.Downstream<R> gsink;
+            final Gatherer.Downstream<R> downstream;
             A acc = null;
             int state = NEW;
             
@@ -1063,7 +1125,7 @@ public class Belts {
             
             Gather(Belt.StepSink<? super R> sink) {
                 this.sink = Objects.requireNonNull(sink);
-                this.gsink = el -> {
+                this.downstream = el -> {
                     try {
                         return sink.offer(el);
                     } catch (Error | RuntimeException e) {
@@ -1094,7 +1156,7 @@ public class Belts {
                         return false;
                     }
                     initIfNew();
-                    if (!integrator.integrate(acc, input, gsink)) {
+                    if (!integrator.integrate(acc, input, downstream)) {
                         state = COMPLETED;
                         return false;
                     }
@@ -1114,7 +1176,7 @@ public class Belts {
                         return;
                     }
                     initIfNew();
-                    finisher.accept(acc, gsink);
+                    finisher.accept(acc, downstream);
                     sink.complete();
                     state = COMPLETED;
                 } catch (WrappingException e) {

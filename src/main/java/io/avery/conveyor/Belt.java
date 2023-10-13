@@ -628,7 +628,7 @@ public class Belt {
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
-        default <T> StepSink<T> compose(StepSinkSource<T, ? extends In> upstream) {
+        default <T> StepSink<T> compose(StepSinkSource<? super T, ? extends In> upstream) {
             return new Belts.ChainStepSink<>(upstream.sink(), new Belts.ClosedSilo<>(upstream.source(), this));
         }
         

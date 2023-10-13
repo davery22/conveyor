@@ -28,6 +28,8 @@ class BeltsTest {
         testSplit();
         testGroupBy();
         testFlatMap();
+        testAdaptSourceOfSink();
+        testAdaptSinkOfSource();
         
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
@@ -313,6 +315,61 @@ class BeltsTest {
         }
     }
     
+    static void testAdaptSourceOfSink() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list1 = new ArrayList<>();
+            List<Integer> list2 = new ArrayList<>();
+            
+            Belts.iteratorSource(List.of(1, 2, 3).iterator())
+                .andThen(Belts.synchronizeStepSource())
+                .andThen(Belts.balance(List.of(
+                    (Belt.StepSink<Integer>) list1::add,
+                    ((Belt.StepSink<Integer>) list2::add)
+                        .compose(Belts.adaptSourceOfSink(
+                            Belts.filterMap(i -> 10 - i),
+                            Throwable::printStackTrace
+                        ))
+                )))
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = Stream.concat(list1.stream(), list2.stream()).map(String::valueOf).collect(Collectors.joining());
+            assertIn(
+                Set.of(
+                    "187", "817", "871", "297", "927", "972", "398", "938", "983", "987",
+                    "923", "293", "239", "813", "183", "138", "712", "172", "127", "123"
+                ),
+                result
+            );
+        }
+    }
+    
+    static void testAdaptSinkOfSource() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
+            
+            Belts
+                .merge(List.of(
+                    Belts.streamSource(Stream.of(9)),
+                    Belts.streamSource(Stream.of(2))
+                        .andThen(Belts.adaptSinkOfSource(
+                            Belts.flatMap(i -> Belts.streamSource(Stream.of(i, i+1, i+2)),
+                                          Throwable::printStackTrace),
+                            Throwable::printStackTrace
+                        ))
+                ))
+                .andThen(sink)
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            
+            String result = list.stream().map(String::valueOf).collect(Collectors.joining());
+            assertIn(Set.of("9234", "2934", "2394", "2349"), result);
+        }
+    }
+    
     static void testDelay() throws Exception {
         try (var scope = new StructuredTaskScope<>()) {
             List<String> list = new ArrayList<>();
@@ -337,7 +394,7 @@ class BeltsTest {
         }
     }
     
-    static void testBalanceMerge() throws Exception {
+    static void testBalanceMerge2() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
                 .andThen(Belts.filterMap(s -> (Callable<String>) () -> s))
@@ -384,7 +441,7 @@ class BeltsTest {
         }
     }
     
-    static void testAdaptSinkOfSource() throws Exception {
+    static void testAdaptSinkOfSource2() throws Exception {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             lineSource()
                 .andThen(Belts.adaptSinkOfSource(
