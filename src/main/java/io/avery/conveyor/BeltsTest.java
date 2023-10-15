@@ -6,10 +6,7 @@ import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
-import java.util.function.BiConsumer;
-import java.util.function.BinaryOperator;
-import java.util.function.Function;
-import java.util.function.Supplier;
+import java.util.function.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -30,6 +27,7 @@ class BeltsTest {
         testFlatMap();
         testAdaptSourceOfSink();
         testAdaptSinkOfSource();
+        testGather();
         
 //        testMapAsyncVsMapBalanced();
 //        testNostepVsBuffer();
@@ -367,6 +365,22 @@ class BeltsTest {
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
             assertIn(Set.of("9234", "2934", "2394", "2349"), result);
+        }
+    }
+    
+    static void testGather() throws Exception {
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Integer> list = new ArrayList<>();
+            
+            Belts.streamSource(Stream.of(1, 2, 3))
+                .andThen(
+                    Belts.gather(map((Integer i) -> i * 2))
+                        .andThen((Belt.StepSink<Integer>) list::add)
+                )
+                .run(Belts.scopeExecutor(scope));
+            
+            scope.join();
+            assertEquals(List.of(2, 4, 6), list);
         }
     }
     

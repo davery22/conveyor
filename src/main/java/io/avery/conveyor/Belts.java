@@ -896,9 +896,9 @@ public class Belts {
     
     /**
      * Returns an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
-     * from. The resulting upstream sink will wrap any upstream source it drains from to discard close signals, and then
-     * apply the {@code sourceMapper} to create a downstream source. The downstream source is then run, drained from,
-     * and closed, and its running silos are awaited.
+     * from. The resultant upstream sink will wrap any upstream source it drains from, to discard close signals, and
+     * then apply the {@code sourceMapper} to create a downstream source. The downstream source is then run, drained
+     * from, and closed, and its running silos are awaited.
      *
      * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sourceMapper} after the
      * upstream source, and then connecting the downstream sink after that. However, since close signals are expected to
@@ -1000,7 +1000,7 @@ public class Belts {
     
     /**
      * Returns an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to.
-     * The resulting downstream source will wrap any downstream sink it drains to to discard completion signals, and
+     * The resultant downstream source will wrap any downstream sink it drains to, to discard completion signals, and
      * then apply the {@code sinkMapper} to create an upstream sink. The upstream sink is then run, drained to, and
      * completed, and its running silos are awaited.
      *
@@ -1107,6 +1107,36 @@ public class Belts {
         return SinkAdaptedSource::new;
     }
     
+    /**
+     * Returns an operator that transforms elements according to the given {@code gatherer} before they reach a
+     * downstream sink. The resultant upstream sink will call the gatherer's initializer upon first offer to initialize
+     * state, call the integrator on each offer to push elements downstream, and call the finisher on (normal)
+     * completion. (The gatherer's combiner is not used.)
+     *
+     * <p>Example:
+     * {@snippet :
+     * try (var scope = new StructuredTaskScope<>()) {
+     *     List<Integer> list = new ArrayList<>();
+     *
+     *     Belts.streamSource(Stream.of(1, 2, 3))
+     *         .andThen(
+     *             Belts.gather(Gatherers.map((Integer i) -> i * 2))
+     *                 .andThen((Belt.StepSink<Integer>) list::add)
+     *         )
+     *         .run(Belts.scopeExecutor(scope));
+     *
+     *     scope.join();
+     *     System.out.println(list);
+     *     // Prints: [2, 4, 6]
+     * }
+     * }
+     *
+     * @param gatherer the gatherer
+     * @return an operator that transforms elements according to the given {@code gatherer}
+     * @param <T> the upstream element type
+     * @param <A> the gatherer's accumulation type
+     * @param <R> the downstream element type
+     */
     public static <T, A, R> Belt.StepSinkOperator<T, R> gather(Gatherer<? super T, A, R> gatherer) {
         var supplier = gatherer.initializer();
         var integrator = gatherer.integrator();
@@ -1362,23 +1392,58 @@ public class Belts {
         @Override public Belt.StepSource<U> source() { return new Source(); }
     }
     
+    /**
+     * Returns a segue that balances computation of outputs across a limited number of concurrent workers, further
+     * limiting concurrency per partition key, and orders outputs based on input arrival.
+     *
+     * <p>The number of concurrent workers created when draining is controlled by the given {@code concurrency}. The
+     * number of workers allowed to work on the same partition at once is controlled by the given
+     * {@code permitsPerPartition}. If {@code permitsPerPartition} is greater than or equal to {@code concurrency}, this
+     * segue gracefully degrades to {@link #mapBalanceOrdered mapBalanceOrdered}.
+     *
+     * <p>When a worker polls an element, it first invokes the {@code classifier} on the element to determine a
+     * partition key. If the partition key is {@code null}, the worker will throw a {@link NullPointerException}.
+     * Otherwise, the worker will add the element to a pending output buffer, first waiting until the buffer is not full
+     * (size is below {@code bufferLimit}). Then, if the worker can acquire a partition permit, it will begin work on
+     * the element, calling the {@code mapper} and then the resultant callable, before signaling a completed output and
+     * releasing its permit. Otherwise, the worker will arrange for the element to be picked up when a permit becomes
+     * available, and resume polling.
+     *
+     * <p>The {@code classifier} is invoked on elements in the order they arrived. The {@code mapper} is invoked on
+     * elements with the same partition key in the order they arrived, but no particular order is guaranteed for
+     * elements with different partition keys. Output elements are polled from the buffer in the order that their
+     * associated input elements arrived (so completed outputs may be held up by earlier incomplete outputs).
+     *
+     * <p>If a callable returns {@code null}, its output is discarded. If a worker throws an exception for any reason -
+     * including because the {@code classifier}, {@code mapper}, or callable threw an exception - the remaining workers
+     * are interrupted and awaited, and all elements starting with the first incomplete output are cleared from the
+     * buffer.
+     *
+     * <p>The segue's source can be safely polled and closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param concurrency the (positive) number of worker threads
+     * @param permitsPerPartition the (positive) maximum number of workers that can concurrently work on the same
+     *                            partition
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @param classifier a classifier function mapping input elements to keys
+     * @param mapper a function to be applied to each input element and its partition key, returning an output-producing
+     *               callable
+     * @return a segue that balances computation of outputs across workers, also limiting concurrency per partition key,
+     * while retaining element order.
+     * @param <T> the upstream element type
+     * @param <K> the key type
+     * @param <U> the downstream element type
+     */
     public static <T, K, U> Belt.SinkStepSource<T, U> mapBalancePartitioned(int concurrency,
                                                                             int permitsPerPartition,
                                                                             int bufferLimit,
                                                                             Function<? super T, ? extends K> classifier,
                                                                             BiFunction<? super T, ? super K, ? extends Callable<? extends U>> mapper) {
-        // POLL:
-        // 1. Worker polls element from source
-        // 2. If completion buffer is full, worker waits until not full
-        // 3. Worker offers element to completion buffer
-        // 4. If element partition has permits, worker takes one and begins work (END)
-        // 5. Worker offers element to partition buffer, goes to step 1
-        
-        // OFFER:
-        // 1. Worker polls partition buffer, continues if not empty (END)
-        // 2. Worker gives permit back to partition
-        // 3. If partition has max permits, worker removes partition
-        
         if (concurrency < 1 || permitsPerPartition < 1 || bufferLimit < 1) {
             throw new IllegalArgumentException("concurrency, permitsPerPartition, and bufferLimit must be positive");
         }
@@ -1500,6 +1565,37 @@ public class Belts {
         return new MapBalancePartitioned(concurrency, bufferLimit);
     }
     
+    /**
+     * Returns a segue that balances computation of outputs across a limited number of concurrent workers, and orders
+     * outputs based on input arrival. The number of concurrent workers created when draining is controlled by the given
+     * {@code concurrency}.
+     *
+     * <p>When a worker polls an element, it adds the element to a pending output buffer, first waiting until the buffer
+     * is not full (size is below {@code bufferLimit}). Then, the worker will begin work on the element, calling the
+     * {@code mapper} and then the resultant callable, before signaling a completed output.
+     *
+     * <p>The {@code mapper} is invoked on elements in the order they arrived. Output elements are polled from the
+     * buffer in the order that their associated input elements arrived (so completed outputs may be held up by earlier
+     * incomplete outputs).
+     *
+     * <p>If a callable returns {@code null}, its output is discarded. If a worker throws an exception for any reason -
+     * including because the {@code mapper} or callable threw an exception - the remaining workers are interrupted and
+     * awaited, and all elements starting with the first incomplete output are cleared from the buffer.
+     *
+     * <p>The segue's source can be safely polled and closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param concurrency the (positive) number of worker threads
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @param mapper a function to be applied to each input element, returning an output-producing callable
+     * @return a segue that balances computation of outputs across workers, while retaining element order
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     public static <T, U> Belt.SinkStepSource<T, U> mapBalanceOrdered(int concurrency,
                                                                      int bufferLimit,
                                                                      Function<? super T, ? extends Callable<? extends U>> mapper) {
@@ -1575,6 +1671,24 @@ public class Belts {
         return new MapBalanceOrdered(concurrency, bufferLimit);
     }
     
+    /**
+     * Returns an operator that balances computation of outputs across a limited number of concurrent workers. The
+     * resultant downstream source yields output elements as they complete, which may not match the order that inputs
+     * arrived. Any {@code null} outputs are discarded.
+     *
+     * <p>This operator assumes that the upstream source supports concurrent polling, and any downstream sink supports
+     * concurrent offering. If necessary, this support can be patched-in using the {@link #synchronizeStepSource} and
+     * {@link #synchronizeStepSink} operators.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param concurrency the (positive) number of worker threads
+     * @return an operator that balances computation of outputs across workers
+     * @param <T> the output element type
+     */
     public static <T> Belt.StepToSourceOperator<Callable<T>, T> balanceMergeSource(int concurrency) {
         if (concurrency < 1) {
             throw new IllegalArgumentException("concurrency must be positive");
@@ -1596,6 +1710,24 @@ public class Belts {
         };
     }
     
+    /**
+     * Returns an operator that balances computation of outputs across a limited number of concurrent workers. The
+     * resultant upstream sink offers output elements downstream as they complete, which may not match the order that
+     * inputs arrived. Any {@code null} outputs are discarded.
+     *
+     * <p>This operator assumes that the downstream sink supports concurrent offering, and any upstream source supports
+     * concurrent polling. If necessary, this support can be patched-in using the {@link #synchronizeStepSink} and
+     * {@link #synchronizeStepSource} operators.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param concurrency the (positive) number of worker threads
+     * @return an operator that balances computation of outputs across workers
+     * @param <T> the output element type
+     */
     public static <T> Belt.SinkToStepOperator<Callable<T>, T> balanceMergeSink(int concurrency) {
         if (concurrency < 1) {
             throw new IllegalArgumentException("concurrency must be positive");
@@ -1612,6 +1744,22 @@ public class Belts {
         };
     }
     
+    /**
+     * Returns a fan-out sink that forwards each input element to the first available sink among the given
+     * {@code sinks}.
+     *
+     * <p>This operator assumes that any upstream source supports concurrent polling. If necessary, this support can be
+     * patched-in using the {@link #synchronizeStepSource} operator.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param sinks the sinks
+     * @return a fan-out sink that forwards each input element to the first available sink among the given {@code sinks}
+     * @param <T> the element type
+     */
     public static <T> Belt.Sink<T> balance(Collection<? extends Belt.Sink<? super T>> sinks) {
         var theSinks = List.copyOf(sinks);
         
@@ -1637,15 +1785,32 @@ public class Belts {
         return new Balance();
     }
     
+    /**
+     * Returns a fan-out sink that forwards each input element to all the given {@code sinks}, until any sink cancels.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param sinks the sinks
+     * @return a fan-out sink that forwards each input element to all the given {@code sinks}, until any sink cancels
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSink<T> broadcast(Collection<? extends Belt.StepSink<? super T>> sinks) {
         var theSinks = List.copyOf(sinks);
         
         class Broadcast extends ProxySink<T> implements Belt.StepSink<T> {
+            boolean draining = true;
+            
             @Override
             public boolean offer(T input) throws Exception {
+                if (!draining) {
+                    return false;
+                }
                 for (var sink : theSinks) {
                     if (!sink.offer(input)) {
-                        return false;
+                        return draining = false;
                     }
                 }
                 return true;
@@ -1660,9 +1825,28 @@ public class Belts {
         return new Broadcast();
     }
     
+    /**
+     * Returns a fan-out sink that selectively offers zero or more replacement elements to the given {@code sinks}, per
+     * input element. The {@code router} is applied to each input element in conjunction with a
+     * {@link BiConsumer biConsumer} that accepts the index of a sink in the given {@code sinks}, and a replacement
+     * element. The {@code router} calls the biConsumer zero or more times to provide the replacement elements.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param router a function that offers replacement elements to selected sinks
+     * @param eagerCancel if {@code true}, cancels when any sink cancels; else cancels when all sinks cancel
+     * @param sinks the sinks
+     * @return a fan-out sink that selectively offers zero or more replacement elements to each of the given
+     * {@code sinks}
+     * @param <T> the upstream element type
+     * @param <U> the downstream element type
+     */
     public static <T, U> Belt.StepSink<T> route(BiConsumer<? super T, ? super BiConsumer<Integer, U>> router,
                                                 boolean eagerCancel,
-                                                Collection<? extends Belt.StepSink<? super U>> sinks) {
+                                                List<? extends Belt.StepSink<? super U>> sinks) {
         Objects.requireNonNull(router);
         var theSinks = List.copyOf(sinks);
         BitSet active = new BitSet(theSinks.size());
@@ -1790,8 +1974,8 @@ public class Belts {
         return new Merge();
     }
     
-    public static <T> Belt.StepSource<T> mergeSorted(Collection<? extends Belt.StepSource<? extends T>> sources,
-                                                     Comparator<? super T> comparator) {
+    public static <T> Belt.StepSource<T> mergeSorted(Comparator<? super T> comparator,
+                                                     Collection<? extends Belt.StepSource<? extends T>> sources) {
         Objects.requireNonNull(comparator);
         var theSources = List.copyOf(sources);
         
@@ -2587,7 +2771,7 @@ public class Belts {
     /**
      * Returns an {@link Executor Executor} that delegates execution to the given {@code scope}.
      *
-     * <p>The resulting executor behaves as if defined by:
+     * <p>The resultant executor behaves as if defined by:
      * {@snippet :
      * Executor executor = runnable -> scope.fork(Executors.callable(runnable, null));
      * }
