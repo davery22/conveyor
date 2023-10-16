@@ -7,14 +7,12 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
-    public interface Core<In, Out> {
-        default Clock clock() { return Clock.systemUTC(); }
-        void onInit(SinkController ctl) throws Exception;
-        void onOffer(SinkController ctl, In input) throws Exception;
-        void onPoll(SourceController<Out> ctl) throws Exception;
-        void onComplete(SinkController ctl) throws Exception;
-    }
+public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
+    protected Clock clock() { return Clock.systemUTC(); }
+    protected abstract void onInit(SinkController ctl) throws Exception;
+    protected abstract void onOffer(SinkController ctl, In input) throws Exception;
+    protected abstract void onPoll(SourceController<Out> ctl) throws Exception;
+    protected abstract void onComplete(SinkController ctl) throws Exception;
     
     public sealed interface SinkController {
         void latchSinkDeadline(Instant deadline);
@@ -28,7 +26,6 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
         void latchClose();
     }
     
-    final Core<In, Out> core;
     final ReentrantLock lock = new ReentrantLock();
     final Condition readyForSource = lock.newCondition();
     final Condition readyForSink = lock.newCondition();
@@ -66,10 +63,6 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
     private static final int NONE   = 0 << 2;
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
-    
-    DeadlineSegue(Core<In, Out> core) {
-        this.core = Objects.requireNonNull(core);
-    }
     
     // One instance per TimedSegue.
     // Methods protect against some kinds of misuse:
@@ -113,7 +106,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
         //assert lock.isHeldByCurrentThread();
         if (state() == NEW) {
             setAccess(SINK);
-            core.onInit(controller);
+            onInit(controller);
             updateSinkDeadline();
             updateSourceDeadline();
             setState(RUNNING);
@@ -154,7 +147,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
                 } else if (savedDeadline == Instant.MAX) {
                     nanosRemaining = Long.MAX_VALUE;
                 } else {
-                    Instant now = core.clock().instant();
+                    Instant now = clock().instant();
                     try {
                         nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
                     } catch (ArithmeticException e) {
@@ -187,7 +180,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
                 } else if (savedDeadline == Instant.MAX) {
                     nanosRemaining = Long.MAX_VALUE;
                 } else {
-                    Instant now = core.clock().instant();
+                    Instant now = clock().instant();
                     try {
                         nanosRemaining = ChronoUnit.NANOS.between(now, savedDeadline);
                     } catch (ArithmeticException e) {
@@ -223,7 +216,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
                 }
                 setAccess(SINK);
                 
-                core.onOffer(controller, input);
+                onOffer(controller, input);
                 
                 updateSinkDeadline();
                 updateSourceDeadline();
@@ -246,7 +239,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
                 initIfNew();
                 setAccess(SINK);
                 
-                core.onComplete(controller);
+                onComplete(controller);
                 
                 setState(COMPLETING);
                 updateSourceDeadline();
@@ -297,7 +290,7 @@ public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
                     }
                     setAccess(SOURCE);
                     
-                    core.onPoll(controller);
+                    onPoll(controller);
                     
                     updateSinkDeadline();
                     updateSourceDeadline();

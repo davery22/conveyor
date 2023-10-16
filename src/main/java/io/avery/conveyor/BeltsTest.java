@@ -685,11 +685,6 @@ class BeltsTest {
             public BiConsumer<Void, Downstream<R>> finisher() {
                 return (state, downstream) -> {};
             }
-            
-            @Override
-            public Set<Characteristics> characteristics() {
-                return Set.of(Characteristics.GREEDY, Characteristics.STATELESS);
-            }
         };
     }
     
@@ -713,11 +708,6 @@ class BeltsTest {
             @Override
             public BiConsumer<Void, Downstream<U>> finisher() {
                 return (state, downstream) -> {};
-            }
-            
-            @Override
-            public Set<Characteristics> characteristics() {
-                return Set.of(Characteristics.GREEDY, Characteristics.STATELESS);
             }
         };
     }
