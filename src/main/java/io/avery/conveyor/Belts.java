@@ -609,7 +609,7 @@ public class Belts {
      *     Belts.iteratorSource(List.of(0, 1, 2, 3, 4, 5).iterator())
      *         .andThen(Belts
      *             .split(
-     *                 (Integer i) -> i % 2 == 0, // Splits a new sink when element is even
+     *                 (Integer i) -> i % 2 == 0, // Starts a new sink when element is even
      *                 false, false,
      *                 Throwable::printStackTrace,
      *                 i -> noCompleteSink.compose(Belts.flatMap(j -> Belts.streamSource(Stream.of(j, i)),
@@ -689,7 +689,7 @@ public class Belts {
     }
     
     /**
-     * Returns a sink that offers input elements to the inner sink corresponding to the key that the {@code classifier}
+     * Returns a sink that offers input elements to the inner sink associated with the key that the {@code classifier}
      * computes for the element. When the {@code classifier} computes a previously-unseen key for an element, the
      * {@code sinkFactory} is called with the key and element to create a new inner sink, which is then run. That first
      * element, and subsequent elements that map to the same key, are offered to that sink until the sink cancels.
@@ -732,7 +732,7 @@ public class Belts {
      *                              encapsulated by created sinks
      * @param sinkFactory a function that creates a sink, using a key and the first element that will be offered to that
      *                    sink
-     * @return a sink that offers input elements to the inner sink corresponding to the key computed for the element
+     * @return a sink that offers input elements to the inner sink associated with the key computed for the element
      * @param <T> the element type
      * @param <K> the key type
      */
@@ -1748,7 +1748,7 @@ public class Belts {
      * Returns a fan-out sink that forwards each input element to the first available sink among the given
      * {@code sinks}.
      *
-     * <p>This operator assumes that any upstream source supports concurrent polling. If necessary, this support can be
+     * <p>This sink assumes that any upstream source supports concurrent polling. If necessary, this support can be
      * patched-in using the {@link #synchronizeStepSource} operator.
      *
      * <p>Example:
@@ -1809,11 +1809,9 @@ public class Belts {
                     return false;
                 }
                 for (var sink : theSinks) {
-                    if (!sink.offer(input)) {
-                        return draining = false;
-                    }
+                    draining &= sink.offer(input);
                 }
-                return true;
+                return draining;
             }
             
             @Override
@@ -1900,6 +1898,18 @@ public class Belts {
         return new Route();
     }
     
+    /**
+     * Returns a fan-in source that yields all elements from each of the given {@code sources}, in turn.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param sources the sources
+     * @return a fan-in source that yields all elements from each of the given {@code sources}, in turn
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSource<T> concatStep(Collection<? extends Belt.StepSource<? extends T>> sources) {
         var theSources = List.copyOf(sources);
         
@@ -1926,6 +1936,18 @@ public class Belts {
         return new ConcatStep();
     }
     
+    /**
+     * Returns a fan-in source that yields all elements from each of the given {@code sources}, in turn.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param sources the sources
+     * @return a fan-in source that yields all elements from each of the given {@code sources}, in turn
+     * @param <T> the element type
+     */
     public static <T> Belt.Source<T> concat(Collection<? extends Belt.Source<? extends T>> sources) {
         var theSources = List.copyOf(sources);
         
@@ -1949,6 +1971,23 @@ public class Belts {
         return new Concat();
     }
     
+    /**
+     * Returns a fan-in source that yields each output element from the first available source among the given
+     * {@code sources}.
+     *
+     * <p>This source assumes that any downstream sink supports concurrent offering. If necessary, this support can be
+     * patched-in using the {@link #synchronizeStepSink} operator.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param sources the sources
+     * @return a fan-in source that yields each output element from the first available source among the given
+     * {@code sources}
+     * @param <T> the element type
+     */
     public static <T> Belt.Source<T> merge(Collection<? extends Belt.Source<? extends T>> sources) {
         var theSources = List.copyOf(sources);
         
@@ -1974,6 +2013,20 @@ public class Belts {
         return new Merge();
     }
     
+    /**
+     * Returns a fan-in source that yields the minimum of the latest elements from each of the given {@code sources}.
+     * The minimum element is determined by the {@code comparator}.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param comparator the comparator used to sort elements
+     * @param sources the sources
+     * @return a fan-in source that yields the minimum of the latest elements from each of the given {@code sources}
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSource<T> mergeSorted(Comparator<? super T> comparator,
                                                      Collection<? extends Belt.StepSource<? extends T>> sources) {
         Objects.requireNonNull(comparator);
@@ -2024,6 +2077,23 @@ public class Belts {
         return new MergeSorted();
     }
     
+    /**
+     * Returns a fan-in source that combines the latest elements from both sources once both sources yield a new
+     * element. The latest elements are combined using the given {@code combiner}, and the result is yielded.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param source1 the first source
+     * @param source2 the second source
+     * @param combiner a function used to combine elements from each source
+     * @return a fan-in source that combines the latest elements from both sources once both sources yield a new element
+     * @param <T1> the first source's element type
+     * @param <T2> the second source's element type
+     * @param <T> the combined element type
+     */
     public static <T1, T2, T> Belt.StepSource<T> zip(Belt.StepSource<? extends T1> source1,
                                                      Belt.StepSource<? extends T2> source2,
                                                      BiFunction<? super T1, ? super T2, ? extends T> combiner) {
@@ -2039,9 +2109,9 @@ public class Belts {
                 if (done) {
                     return null;
                 }
-                T1 e1;
-                T2 e2;
-                if ((e1 = source1.poll()) == null || (e2 = source2.poll()) == null) {
+                T1 e1 = source1.poll();
+                T2 e2 = source2.poll();
+                if (e1 == null || e2 == null) {
                     done = true;
                     return null;
                 }
@@ -2057,6 +2127,24 @@ public class Belts {
         return new Zip();
     }
     
+    /**
+     * Returns a fan-in source that combines the latest elements from both sources once either source yields a new
+     * element. The latest elements are combined using the given {@code combiner}, and the result is yielded.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param source1 the first source
+     * @param source2 the second source
+     * @param combiner a function used to combine elements from each source
+     * @return a fan-in source that combines the latest elements from both sources once either source yields a new
+     * element
+     * @param <T1> the first source's element type
+     * @param <T2> the second source's element type
+     * @param <T> the combined element type
+     */
     public static <T1, T2, T> Belt.Source<T> zipLatest(Belt.Source<? extends T1> source1,
                                                        Belt.Source<? extends T2> source2,
                                                        BiFunction<? super T1, ? super T2, ? extends T> combiner) {
@@ -2126,6 +2214,23 @@ public class Belts {
         return new ZipLatest();
     }
     
+    /**
+     * Returns a segue in which each offer to the sink must wait for a corresponding poll from the source, and vice
+     * versa. In many cases, the {@link #buffer buffer} method is preferable to this method, as buffering provides
+     * leeway for an upstream and downstream to temporarily proceed at different rates.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @return a segue in which each offer to the sink must wait for a corresponding poll from the source, and vice
+     * versa
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T, T> rendezvous() {
         class Rendezvous implements Belt.StepSegue<T, T> {
             final ReentrantLock sinkLock = new ReentrantLock();
@@ -2258,6 +2363,23 @@ public class Belts {
         return new Rendezvous();
     }
     
+    /**
+     * Returns a segue that buffers offered elements to respond to later polls. If the buffer is empty, polls will
+     * block. If the buffer is full (size equals {@code bufferLimit}), offers will block. Buffering provides leeway for
+     * an upstream and downstream to temporarily proceed at different rates.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @return a segue that buffers offered elements to respond to later polls
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T ,T> buffer(int bufferLimit) {
         if (bufferLimit < 1) {
             throw new IllegalArgumentException("bufferLimit must be positive");
@@ -2308,6 +2430,26 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a segue that injects additional elements - derived from the last buffered element - to respond to a poll
+     * if no elements are buffered. Injection stops once all injected elements are yielded, or a subsequent element is
+     * buffered.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param initial an initial element to seed the buffer; ignored if {@code null}
+     * @param mapper a function that expands an element to an iterator of zero or more elements to inject
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @return a segue that injects additional elements - derived from the last buffered element - to respond to a poll
+     * if no elements are buffered
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T, T> extrapolate(T initial,
                                                        Function<? super T, ? extends Iterator<? extends T>> mapper,
                                                        int bufferLimit) {
@@ -2381,6 +2523,31 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a segue that accumulates offered elements into a batch, permitting the batch to be yielded once a
+     * deadline expires. The deadline is recalculated from the current batch after each accumulation.
+     *
+     * <p>If the calculated deadline is an empty {@code Optional}, the previous deadline is retained (initially
+     * {@link Instant#MAX}). If the calculated deadline is a present {@code Optional} containing {@link Instant#MIN},
+     * subsequent offers will block until the current batch is yielded.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param batchSupplier a function that creates an initial (non-{@code null}) batch, called on initial offer and on
+     *                      offers following a poll
+     * @param accumulator a function that folds an offered element into the current batch
+     * @param deadlineMapper a function that optionally calculates a deadline for the current batch after accumulation
+     * @return a segue that accumulates offered elements into a batch, permitting the batch to be yielded once a
+     * deadline expires
+     * @param <T> the upstream element type
+     * @param <A> the batch type
+     */
     public static <T, A> Belt.StepSegue<T, A> batch(Supplier<? extends A> batchSupplier,
                                                     BiConsumer<? super A, ? super T> accumulator,
                                                     Function<? super A, Optional<Instant>> deadlineMapper) {
@@ -2438,6 +2605,38 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a segue that uses a token-bucketing scheme to limit the rate at which offered elements can be yielded.
+     * In this scheme, each offered element calculates a cost, in tokens, to yield that element. Tokens accrue at a
+     * fixed rate, given by {@code tokenInterval}. The initial and maximum number of unused tokens is given by
+     * {@code tokenLimit} - tokens that accrue beyond this maximum are discarded. Polls return when there are buffered
+     * elements and sufficient unused tokens to yield the element at the front of the buffer, using up those tokens.
+     * Elements that cost more than the {@code tokenLimit} temporarily increase the limit to match their cost when they
+     * reach the front of the buffer.
+     *
+     * <p>If an offered element calculates a negative cost, an {@link IllegalStateException} is thrown from the offer.
+     * If an offered element would cause the total cost of buffered elements to exceed {@link Long#MAX_VALUE}, an
+     * {@link ArithmeticException} is thrown from the offer.
+     *
+     * <p>Note that when insufficient tokens are available to yield the next element, polls enter timed waits that may
+     * have limited resolution, typically in the range of milliseconds. This can lead to an observed emission rate
+     * significantly slower than what the function arguments allow.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param tokenInterval a (positive) interval at which tokens accrue
+     * @param costMapper a function that calculates the (non-negative) cost, in tokens, to yield an offered element
+     * @param tokenLimit a (positive) initial and maximum number of unused tokens
+     * @param bufferLimit a (positive) maximum number of buffered elements
+     * @return a segue that uses a token-bucketing scheme to limit the rate at which offered elements can be yielded
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T, T> throttle(Duration tokenInterval,
                                                     ToLongFunction<? super T> costMapper,
                                                     long tokenLimit,
@@ -2464,8 +2663,8 @@ public class Belts {
         class Throttle implements TimedSegue.Core<T, T> {
             Deque<Weighted<T>> queue = null;
             long tempTokenLimit = 0;
-            long tokens = 0;
-            long cost = 0;
+            long tokens = tokenLimit;
+            long totalCost = 0;
             Instant lastObservedAccrual;
             boolean done = false;
             
@@ -2481,7 +2680,7 @@ public class Belts {
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
                 }
-                cost = Math.addExact(cost, elementCost);
+                totalCost = Math.addExact(totalCost, elementCost);
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
@@ -2512,7 +2711,7 @@ public class Belts {
                 if (tokens >= head.cost) {
                     tempTokenLimit = 0;
                     tokens -= head.cost;
-                    cost -= head.cost;
+                    totalCost -= head.cost;
                     queue.poll();
                     ctl.latchSinkDeadline(Instant.MIN);
                     ctl.latchOutput(head.element);
@@ -2549,6 +2748,24 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a segue that calculates a deadline for each offered element, buffering elements at least until their
+     * deadline expires. Elements with nearer deadlines may jump ahead of elements that arrived earlier.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param deadlineMapper a function that calculates a deadline for an element
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @return a segue that calculates a deadline for each offered element, buffering elements at least until their
+     * deadline expires
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T, T> delay(Function<? super T, Instant> deadlineMapper,
                                                  int bufferLimit) {
         Objects.requireNonNull(deadlineMapper);
@@ -2610,6 +2827,25 @@ public class Belts {
         return new TimedSegue<>(core);
     }
     
+    /**
+     * Returns a segue that injects an additional element to respond to a poll if no elements are buffered and a timeout
+     * expired since the last poll. The first timeout begins when a poll meets an empty buffer.
+     *
+     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * closed concurrently.
+     *
+     * <p>Example:
+     * {@snippet :
+     * TODO
+     * }
+     *
+     * @param timeout the (positive) timeout duration
+     * @param extraSupplier a supplier used to generate injected elements
+     * @param bufferLimit the (positive) maximum number of buffered elements
+     * @return a segue that injects an additional element to respond to a poll if no elements are buffered within a
+     * timeout since the last poll
+     * @param <T> the element type
+     */
     public static <T> Belt.StepSegue<T, T> keepAlive(Duration timeout,
                                                      Supplier<? extends T> extraSupplier,
                                                      int bufferLimit) {

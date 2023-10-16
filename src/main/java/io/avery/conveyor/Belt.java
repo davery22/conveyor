@@ -567,10 +567,12 @@ public class Belt {
          * prior to this call, in which case the element may not have been fully processed.
          *
          * @implSpec Once this method returns {@code false}, subsequent calls should also discard the input element and
-         * return {@code false}, to indicate the sink is permanently cancelled and no longer accepting elements.
+         * return {@code false}, to indicate the sink is permanently cancelled and no longer accepting elements. This
+         * method should not permit {@code null} inputs.
          *
          * @param input the input element
          * @return {@code false} if this sink cancelled, else {@code true}
+         * @throws NullPointerException if input is null
          * @throws Exception if unable to offer
          */
         boolean offer(In input) throws Exception;
