@@ -13,22 +13,16 @@ import java.util.function.*;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+/**
+ * Implementations of various useful {@link Belt.Stage Stages}, {@link Belt.Segue Segues}, and {@code Operators}.
+ *
+ * <p>In addition to any documented contracts, implementations here strictly follow structured concurrency - threads
+ * are spawned within lexical scopes that await their completion before exiting.
+ */
 public class Belts {
     private Belts() {} // Utility
     
     static final Throwable NULL_EXCEPTION = new Throwable();
-    
-    // TODO: Some rules:
-    //  - drainFromSource/drainToSink (+poll/offer) must never call close/complete on arguments or 'this'
-    //    - for the passed-in sources/sinks, they may be reused externally, eg by concat/spill
-    //    - for this source/sink, it may be reused externally, eg if it's a StepSink/Source
-    //    - fine to call close/complete on internally-created sources/sinks
-    //  - complete() may throw for any reason
-    //    - it should not return normally if it failed to complete a downstream
-    //    - it should not short subsequent complete() if it failed to complete a downstream
-    //  - complete(x) MUST complete each downstream before returning (normally or abruptly)
-    //  - close() MUST close each upstream before returning (normally or abruptly)
-    //  - no violating structured concurrency - if a method forks threads, it must wait for them to finish
     
     /**
      * Returns an operator that synchronizes access to an upstream source's {@code poll} and {@code close} methods. The
@@ -2385,17 +2379,17 @@ public class Belts {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Buffer implements TimedSegue.Core<T, T> {
+        class Buffer implements DeadlineSegue.Core<T, T> {
             Deque<T> queue = null;
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) {
+            public void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
                 ctl.latchSourceDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
@@ -2404,7 +2398,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
@@ -2420,14 +2414,14 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
         var core = new Buffer();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**
@@ -2458,14 +2452,14 @@ public class Belts {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Extrapolate implements TimedSegue.Core<T, T> {
+        class Extrapolate implements DeadlineSegue.Core<T, T> {
             T prev = null;
             Deque<T> queue = null;
             Iterator<? extends T> iter = Collections.emptyIterator();
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) {
+            public void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
                 if (initial != null) {
                     queue.offer(initial);
@@ -2476,7 +2470,7 @@ public class Belts {
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 prev = null;
                 iter = Collections.emptyIterator();
                 queue.offer(input);
@@ -2487,7 +2481,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
@@ -2513,14 +2507,14 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
         var core = new Extrapolate();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**
@@ -2555,15 +2549,15 @@ public class Belts {
         Objects.requireNonNull(accumulator);
         Objects.requireNonNull(deadlineMapper);
         
-        class Batch implements TimedSegue.Core<T, A> {
+        class Batch implements DeadlineSegue.Core<T, A> {
             A batch = null;
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) { }
+            public void onInit(DeadlineSegue.SinkController ctl) { }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 A b = batch;
                 if (b == null) {
                     b = Objects.requireNonNull(batchSupplier.get());
@@ -2581,7 +2575,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<A> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<A> ctl) {
                 if (done) {
                     ctl.latchClose();
                     if (batch == null) {
@@ -2595,14 +2589,14 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
         var core = new Batch();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**
@@ -2660,7 +2654,7 @@ public class Belts {
         }
         long tokenIntervalNanos = tmpTokenInterval;
         
-        class Throttle implements TimedSegue.Core<T, T> {
+        class Throttle implements DeadlineSegue.Core<T, T> {
             Deque<Weighted<T>> queue = null;
             long tempTokenLimit = 0;
             long tokens = tokenLimit;
@@ -2669,13 +2663,13 @@ public class Belts {
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) {
+            public void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>();
                 lastObservedAccrual = clock().instant();
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 long elementCost = costMapper.applyAsLong(input);
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
@@ -2692,7 +2686,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 Weighted<T> head = queue.peek();
                 if (head == null) {
                     ctl.latchClose();
@@ -2736,7 +2730,7 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (queue.isEmpty()) {
                     ctl.latchSourceDeadline(Instant.MIN);
@@ -2745,7 +2739,7 @@ public class Belts {
         }
         
         var core = new Throttle();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**
@@ -2773,17 +2767,17 @@ public class Belts {
             throw new IllegalArgumentException("bufferLimit must be positive");
         }
         
-        class Delay implements TimedSegue.Core<T, T> {
+        class Delay implements DeadlineSegue.Core<T, T> {
             PriorityQueue<Expiring<T>> pq = null;
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) {
+            public void onInit(DeadlineSegue.SinkController ctl) {
                 pq = new PriorityQueue<>(bufferLimit);
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 Instant deadline = Objects.requireNonNull(deadlineMapper.apply(input));
                 Expiring<T> e = new Expiring<>(input, deadline);
                 pq.offer(e);
@@ -2796,7 +2790,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 Expiring<T> head = pq.poll();
                 if (head == null) {
                     ctl.latchClose();
@@ -2815,7 +2809,7 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (pq.isEmpty()) {
                     ctl.latchSourceDeadline(Instant.MIN);
@@ -2824,7 +2818,7 @@ public class Belts {
         }
        
         var core = new Delay();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**
@@ -2858,18 +2852,18 @@ public class Belts {
             throw new IllegalArgumentException("timeout must be positive");
         }
         
-        class KeepAlive implements TimedSegue.Core<T, T> {
+        class KeepAlive implements DeadlineSegue.Core<T, T> {
             Deque<T> queue = null;
             boolean done = false;
             
             @Override
-            public void onInit(TimedSegue.SinkController ctl) {
+            public void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
                 ctl.latchSourceDeadline(clock().instant().plus(timeout));
             }
             
             @Override
-            public void onOffer(TimedSegue.SinkController ctl, T input) {
+            public void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
                 ctl.latchSourceDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
@@ -2878,7 +2872,7 @@ public class Belts {
             }
             
             @Override
-            public void onPoll(TimedSegue.SourceController<T> ctl) {
+            public void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
                     ctl.latchSinkDeadline(Instant.MIN);
@@ -2895,14 +2889,14 @@ public class Belts {
             }
             
             @Override
-            public void onComplete(TimedSegue.SinkController ctl) {
+            public void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 ctl.latchSourceDeadline(Instant.MIN);
             }
         }
         
         var core = new KeepAlive();
-        return new TimedSegue<>(core);
+        return new DeadlineSegue<>(core);
     }
     
     /**

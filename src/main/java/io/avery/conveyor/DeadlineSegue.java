@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
+public class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
     public interface Core<In, Out> {
         default Clock clock() { return Clock.systemUTC(); }
         void onInit(SinkController ctl) throws Exception;
@@ -67,7 +67,7 @@ public class TimedSegue<In, Out> implements Belt.StepSegue<In, Out> {
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
     
-    TimedSegue(Core<In, Out> core) {
+    DeadlineSegue(Core<In, Out> core) {
         this.core = Objects.requireNonNull(core);
     }
     

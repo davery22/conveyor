@@ -1,7 +1,5 @@
 package io.avery.conveyor;
 
-import java.util.EnumSet;
-import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
