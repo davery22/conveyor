@@ -64,7 +64,7 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
     private static final int SOURCE = 1 << 2;
     private static final int SINK   = 2 << 2;
     
-    // One instance per TimedSegue.
+    // One instance per DeadlineSegue.
     // Methods protect against some kinds of misuse:
     //  1. Casting to another interface and calling its methods - protected by checking access()
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership

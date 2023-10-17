@@ -6,6 +6,8 @@ import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -28,19 +30,109 @@ class BeltsTest {
         testAdaptSourceOfSink();
         testAdaptSinkOfSource();
         testGather();
+    }
+    
+    static void testtest() throws Exception {
+        List<Callable<Object>> work = List.of();
+        var database = new Object() { void batchWrite(List<Object> results) { } };
         
-//        testMapAsyncVsMapBalanced();
-//        testNostepVsBuffer();
-//        testSpeed();
-//        test1();
-//        test2();
-//        testBidi();
-
-//        try (var in = new Scanner(System.in)) {
-//            for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()); ) {
-//                System.out.println(line);
-//            }
-//        }
+        try (var scope = new StructuredTaskScope<>()) {
+            List<Object> buffer = new ArrayList<>();
+            int bufferCapacity = 1000;
+            long bufferTimeout = Duration.ofSeconds(5).toNanos();
+            ReentrantLock lock = new ReentrantLock();
+            Condition bufferFlushed = lock.newCondition();
+            Condition bufferFilled = lock.newCondition();
+            var signal = new Object() { boolean completed = false; boolean cancelled = false; };
+            
+            // Producer
+            scope.fork(() -> {
+                try {
+                    for (Callable<Object> unit : work) {
+                        // Process a unit of work
+                        Object result = unit.call();
+                        lock.lockInterruptibly();
+                        try {
+                            // Stop early if downstream cancelled
+                            if (signal.cancelled) {
+                                return null;
+                            }
+                            // Wait for full buffer to be flushed, or cancellation
+                            while (buffer.size() == bufferCapacity) {
+                                bufferFlushed.await();
+                                if (signal.cancelled) {
+                                    return null;
+                                }
+                            }
+                            // Add to buffer and signal downstream if full
+                            buffer.add(result);
+                            if (buffer.size() == bufferCapacity) {
+                                bufferFilled.signal();
+                            }
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                    return null;
+                } finally {
+                    // Signal downstream we are done
+                    lock.lock();
+                    try {
+                        signal.completed = true;
+                        bufferFilled.signal();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            });
+            
+            // Consumer
+            scope.fork(() -> {
+                long nextDeadline = System.nanoTime() + bufferTimeout;
+                try {
+                    for (;;) {
+                        List<Object> copyBuffer;
+                        lock.lockInterruptibly();
+                        try {
+                            // Stop when upstream is done and buffer is empty
+                            if (signal.completed && buffer.isEmpty()) {
+                                return null;
+                            }
+                            // Wait for buffer to fill up, or timeout, or completion
+                            long nanosRemaining = nextDeadline - System.nanoTime();
+                            while (buffer.size() != bufferCapacity) {
+                                if (nanosRemaining <= 0 || signal.completed) {
+                                    break;
+                                }
+                                nanosRemaining = bufferFilled.awaitNanos(nanosRemaining);
+                            }
+                            // Compute next deadline, replace the buffer, and signal upstream
+                            nextDeadline = System.nanoTime() + bufferTimeout;
+                            copyBuffer = List.copyOf(buffer);
+                            buffer.clear();
+                            bufferFlushed.signal();
+                        } finally {
+                            lock.unlock();
+                        }
+                        // Flush the buffer
+                        if (!copyBuffer.isEmpty()) {
+                            database.batchWrite(copyBuffer);
+                        }
+                    }
+                } finally {
+                    // Signal upstream we are done
+                    lock.lock();
+                    try {
+                        signal.cancelled = true;
+                        bufferFlushed.signal();
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+            });
+            
+            scope.join();
+        }
     }
     
     static void testSynchronizeStepSource() throws Exception {

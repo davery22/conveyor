@@ -5,14 +5,14 @@ import java.util.concurrent.StructuredTaskScope;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
 
-class FailureHandlingScope extends StructuredTaskScope<Object> {
+public class FailureHandlingScope extends StructuredTaskScope<Object> {
     final Consumer<? super Throwable> exceptionHandler;
     
-    FailureHandlingScope(Consumer<? super Throwable> exceptionHandler) {
+    public FailureHandlingScope(Consumer<? super Throwable> exceptionHandler) {
         this(null, Thread.ofVirtual().factory(), exceptionHandler);
     }
     
-    FailureHandlingScope(String name, ThreadFactory factory, Consumer<? super Throwable> exceptionHandler) {
+    public FailureHandlingScope(String name, ThreadFactory factory, Consumer<? super Throwable> exceptionHandler) {
         super(name, factory);
         this.exceptionHandler = Objects.requireNonNull(exceptionHandler);
     }

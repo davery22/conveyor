@@ -1,3 +1,5 @@
+Version-controlled notes for things I might like to remember or discuss in more detail at some point. These may only be
+comprehensible to me.
 
 1. Designing the #batch operator
    - Call-out: A Motivating Example (https://blog.colinbreck.com/akka-streams-a-motivating-example/)
@@ -9,7 +11,7 @@
 2. Initial operator impls
    - Note: Birth of Controller interfaces (https://github.com/davery22/conveyor/commit/36e6be25d78bce40865ee2e3acd046bd5d54cf1f#diff-359c76bb1e4be9b1f9e3363be3bd9eb8d2afae41643d4ef23bd75139b82c44a2R507)
    - Note: Designing the #throttle operator
-3. Birth of TimedSegue ('Tunnel') (https://github.com/davery22/conveyor/commit/a5c615378e6fd18fa25d1bb7e6004c8b047f66dd#diff-359c76bb1e4be9b1f9e3363be3bd9eb8d2afae41643d4ef23bd75139b82c44a2R522)
+3. Birth of DeadlineSegue ('Tunnel') (https://github.com/davery22/conveyor/commit/a5c615378e6fd18fa25d1bb7e6004c8b047f66dd#diff-359c76bb1e4be9b1f9e3363be3bd9eb8d2afae41643d4ef23bd75139b82c44a2R522)
    - Note: offer/complete/poll/close
    - Note: Retaining Controller interfaces, composition
 4. Birth of StepSource and StepSink for #zip (https://github.com/davery22/conveyor/commit/f6e66af82bac63cb90166051255d0ea76321ac33#diff-10d25d78f420787c7dea4bec78f4ec80b6a47ce9f8ec754a25762c7ae5179089R245)
@@ -46,7 +48,7 @@
 13. Assorted (https://github.com/davery22/conveyor/commit/42f395ffda09f235069be74057dcbea903a842df)
     - Note: First consideration of #complete returning boolean (resolved later in #adaptSinkOfSource)
     - Note: First hints of equivalence between plain operators and #rendezvous step operators (#mergeSorted)
-14. Completion of TimedSegue interface with duo-deadlines (https://github.com/davery22/conveyor/commit/23442deda30aeb60d055ff13832ad2dbe8b4f701)
+14. Completion of DeadlineSegue interface with duo-deadlines (https://github.com/davery22/conveyor/commit/23442deda30aeb60d055ff13832ad2dbe8b4f701)
 15. Spec of drain methods boolean return (https://github.com/davery22/conveyor/commit/7d2b673899a37b96e58ed7035d50d97505a954ea#diff-16763a30542f42f326a66ee23751b7a00f2b19655d7b47506e4d8a721a96d67eR1164)
 16. Birth of Segues (from #mapBalance saga) (https://github.com/davery22/conveyor/commit/d39fd0be78e3dc397607cc38c53b4de38999699d)
     - Note: Alongside birth of Silos (https://github.com/davery22/conveyor/commit/d39fd0be78e3dc397607cc38c53b4de38999699d#diff-db26c1af2b0dda12e76cd4a4cfebf9f847d8d75f7455438a04d5599b8612f88fR90)
@@ -163,7 +165,7 @@ and would still be able to extend Sources/Sinks with chaining/#run methods (thou
 
 Discuss:
 
-TimedSegue design
+DeadlineSegue design
 - Using deadlines on both sides to avoid the need for direct management of Conditions, timed waits, etc
 - Latching deadlines and waiting at the start of offer/poll, to avoid the need for more locks, and make error recovery possible
     - So some use cases, like 'transfer' (wait after updating state) and 'offer multiple' (update + wait multiple times), are inexpressible
