@@ -195,7 +195,7 @@ public class Belt {
          *
          * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
-         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source should return
+         * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should return
          * {@code null} from {@link StepSource#poll poll} and {@code false} from {@link Source#drainToSink drainToSink}
          * after yielding all values that arrived before it received this signal.
          *
@@ -219,7 +219,7 @@ public class Belt {
          *
          * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
-         * method is called, to prevent unbounded buffering or deadlock. The connected boundary source should throw an
+         * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should throw an
          * {@link UpstreamException}, wrapping the cause passed to this method, upon initiating any subsequent calls to
          * {@link StepSource#poll poll} or subsequent offers in {@link Source#drainToSink drainToSink}.
          *
@@ -380,7 +380,7 @@ public class Belt {
          *
          * @implSpec Calling this method may cause this source to stop yielding elements from
          * {@link StepSource#poll poll} and {@link #drainToSink drainToSink}. In that case, if this is a boundary
-         * source, the connected boundary sink should implement its {@link StepSink#offer offer} and
+         * source, the linked boundary sink should implement its {@link StepSink#offer offer} and
          * {@link Sink#drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock.
          *

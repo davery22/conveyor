@@ -91,7 +91,7 @@ but it was also trivial to adapt previous 'driver' code to implement them. Here 
 'batch writing' `Sink` alluded to earlier:
 
 ``` java
-Belt.Source<Result> source = sink -> {
+Belt.Source<Result> resultSource = sink -> {
     for (Callable<Result> unit : work) {
         Result result = unit.call();
         if (!sink.offer(result)) {
@@ -101,7 +101,7 @@ Belt.Source<Result> source = sink -> {
     return true;
 }
 
-Belt.Sink<List<Result>> sink = source -> {
+Belt.Sink<List<Result>> writeSink = source -> {
     for (List<Result> buffer; (buffer = source.poll()) != null; ) {
         database.batchWrite(buffer);
     }
@@ -112,5 +112,5 @@ Belt.Sink<List<Result>> sink = source -> {
 This standardized setup to a matter of passing a `StepSink` to a `Source`, or a `StepSource` to a `Sink` (and doing the
 'complete/close' dance around it). In either case, the source would drain its elements into the sink until one or the
 other signaled termination. With this standardization in place, and already having `StepSegue` to represent a 'linked'
-`Sink` and `Source` that could communicate elements across threads (across an 'asynchronous boundary'), it was
-beginning to look attractive and possible to declaratively string operations together.
+`Sink` and `Source` that could communicate elements across threads, it was beginning to look possible to declaratively
+string operations together.

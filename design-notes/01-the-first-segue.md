@@ -1,8 +1,8 @@
 # The First Segue
 
 I started this project as a fun personal challenge to see if I could translate some Reactive Streams operators to an
-imperative equivalent using (virtual) threads. This would give me a deeper understanding of the semantics of the
-operators, and whether virtual threads really make reactive programming obsolete.
+imperative equivalent using (virtual) threads. This would give me a deeper intuition of the semantics of the operators,
+and whether virtual threads really make reactive programming obsolete.
 
 One of the first use cases I had in mind was one I had run into several times at work, and very reminiscent of Colin
 Breck's [Motivating Example](https://blog.colinbreck.com/akka-streams-a-motivating-example/) for Akka Streams. The
@@ -158,7 +158,7 @@ mean 'never'. These usability improvements trimmed-down my implementations, and 
 `DeadlineSegue`. (Yes, `DeadlineSegue` came before even `Source` and `Sink`.)
 
 The first Segue to fall out of my original motivating example is called `batch`. It is designed to be more flexible than
-that example needed, but a solution using `batch` could look something like this:
+that example needed, but today, a solution using `batch` could look something like this:
 
 ``` java
 try (var scope = new FailureHandlingScope(exceptionHandler)) {
