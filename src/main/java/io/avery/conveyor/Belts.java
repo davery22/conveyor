@@ -2391,9 +2391,9 @@ public class Belts {
             @Override
             protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
+                    ctl.latchOfferDeadline(Instant.MAX);
                 }
             }
             
@@ -2401,12 +2401,12 @@ public class Belts {
             protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOfferDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (queue.peek() != null) {
                         return;
                     } else if (!done) {
-                        ctl.latchSourceDeadline(Instant.MAX);
+                        ctl.latchPollDeadline(Instant.MAX);
                         return;
                     } // else fall-through
                 }
@@ -2416,7 +2416,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
             }
         }
         
@@ -2462,9 +2462,9 @@ public class Belts {
                 queue = new ArrayDeque<>(bufferLimit);
                 if (initial != null) {
                     queue.offer(initial);
-                    ctl.latchSourceDeadline(Instant.MIN);
+                    ctl.latchPollDeadline(Instant.MIN);
                 } else {
-                    ctl.latchSourceDeadline(Instant.MAX);
+                    ctl.latchPollDeadline(Instant.MAX);
                 }
             }
             
@@ -2473,9 +2473,9 @@ public class Belts {
                 prev = null;
                 iter = Collections.emptyIterator();
                 queue.offer(input);
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
+                    ctl.latchOfferDeadline(Instant.MAX);
                 }
             }
             
@@ -2483,7 +2483,7 @@ public class Belts {
             protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOfferDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (!done) {
                         prev = head;
@@ -2498,7 +2498,7 @@ public class Belts {
                     if (iter.hasNext()) {
                         ctl.latchOutput(iter.next());
                     } else {
-                        ctl.latchSourceDeadline(Instant.MAX);
+                        ctl.latchPollDeadline(Instant.MAX);
                     }
                 } else {
                     ctl.latchClose();
@@ -2508,7 +2508,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
             }
         }
         
@@ -2564,10 +2564,10 @@ public class Belts {
                 Instant deadline = deadlineMapper.apply(b).orElse(null);
                 batch = b; // No more exception risk -- assign batch
                 if (deadline != null) {
-                    ctl.latchSourceDeadline(deadline);
+                    ctl.latchPollDeadline(deadline);
                     if (deadline == Instant.MIN) {
                         // Alternative implementations might adjust or reset the buffer instead of blocking
-                        ctl.latchSinkDeadline(Instant.MAX);
+                        ctl.latchOfferDeadline(Instant.MAX);
                     }
                 }
             }
@@ -2582,14 +2582,14 @@ public class Belts {
                 }
                 ctl.latchOutput(batch);
                 batch = null;
-                ctl.latchSourceDeadline(Instant.MAX);
-                ctl.latchSinkDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MAX);
+                ctl.latchOfferDeadline(Instant.MIN);
             }
             
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
             }
         }
         
@@ -2675,10 +2675,10 @@ public class Belts {
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
-                    ctl.latchSourceDeadline(Instant.MIN); // Let source-side do token math
+                    ctl.latchPollDeadline(Instant.MIN); // Let source-side do token math
                 }
                 if (queue.size() == bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
+                    ctl.latchOfferDeadline(Instant.MAX);
                 }
             }
             
@@ -2704,18 +2704,18 @@ public class Belts {
                     tokens -= head.cost;
                     totalCost -= head.cost;
                     queue.poll();
-                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOfferDeadline(Instant.MIN);
                     ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head == null) {
                         if (done) {
                             ctl.latchClose();
                         } else {
-                            ctl.latchSourceDeadline(Instant.MAX);
+                            ctl.latchPollDeadline(Instant.MAX);
                         }
                         return;
                     } else if (tokens >= head.cost) {
-                        ctl.latchSourceDeadline(Instant.MIN);
+                        ctl.latchPollDeadline(Instant.MIN);
                         return;
                     }
                     // else tokens < head.cost; Fall-through to scheduling
@@ -2723,14 +2723,14 @@ public class Belts {
                 // Schedule to wake up when we have enough tokens for next emission
                 tempTokenLimit = head.cost;
                 long tokensNeeded = head.cost - tokens;
-                ctl.latchSourceDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
+                ctl.latchPollDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
             }
             
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (queue.isEmpty()) {
-                    ctl.latchSourceDeadline(Instant.MIN);
+                    ctl.latchPollDeadline(Instant.MIN);
                 }
             }
         }
@@ -2778,10 +2778,10 @@ public class Belts {
                 Expiring<T> e = new Expiring<>(input, deadline);
                 pq.offer(e);
                 if (pq.peek() == e) {
-                    ctl.latchSourceDeadline(deadline);
+                    ctl.latchPollDeadline(deadline);
                 }
                 if (pq.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
+                    ctl.latchOfferDeadline(Instant.MAX);
                 }
             }
             
@@ -2792,13 +2792,13 @@ public class Belts {
                     ctl.latchClose();
                     return;
                 }
-                ctl.latchSinkDeadline(Instant.MIN);
+                ctl.latchOfferDeadline(Instant.MIN);
                 ctl.latchOutput(head.element);
                 head = pq.peek();
                 if (head != null) {
-                    ctl.latchSourceDeadline(head.deadline);
+                    ctl.latchPollDeadline(head.deadline);
                 } else if (!done) {
-                    ctl.latchSourceDeadline(Instant.MAX);
+                    ctl.latchPollDeadline(Instant.MAX);
                 } else {
                     ctl.latchClose();
                 }
@@ -2808,7 +2808,7 @@ public class Belts {
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (pq.isEmpty()) {
-                    ctl.latchSourceDeadline(Instant.MIN);
+                    ctl.latchPollDeadline(Instant.MIN);
                 }
             }
         }
@@ -2854,15 +2854,15 @@ public class Belts {
             @Override
             protected void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
-                ctl.latchSourceDeadline(clock().instant().plus(timeout));
+                ctl.latchPollDeadline(clock().instant().plus(timeout));
             }
             
             @Override
             protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchSinkDeadline(Instant.MAX);
+                    ctl.latchOfferDeadline(Instant.MAX);
                 }
             }
             
@@ -2870,14 +2870,14 @@ public class Belts {
             protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchSinkDeadline(Instant.MIN);
+                    ctl.latchOfferDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (queue.isEmpty() && !done) {
-                        ctl.latchSourceDeadline(clock().instant().plus(timeout));
+                        ctl.latchPollDeadline(clock().instant().plus(timeout));
                     }
                 } else if (!done) {
                     ctl.latchOutput(extraSupplier.get());
-                    ctl.latchSourceDeadline(clock().instant().plus(timeout));
+                    ctl.latchPollDeadline(clock().instant().plus(timeout));
                 } else {
                     ctl.latchClose();
                 }
@@ -2886,7 +2886,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchSourceDeadline(Instant.MIN);
+                ctl.latchPollDeadline(Instant.MIN);
             }
         }
         

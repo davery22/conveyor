@@ -7,33 +7,185 @@ import java.util.Objects;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * A {@link Belt.StepSegue StepSegue} that uses deadlines to manage timed waits for offers and polls, and provides
+ * several lifecycle hooks to simplify state management. Each lifecycle hook executes under synchronization, ensuring
+ * exclusive access to state. Lifecycle hooks receive controller objects with methods to "latch" deadlines or outputs.
+ * Latched deadlines and outputs are applied after the hook returns, or discarded if the hook throws an exception.
+ *
+ * @param <In> the sink's input element type
+ * @param <Out> the source's output element type
+ */
 public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> {
+    /**
+     * Returns the clock that this segue uses for timed waits. Deadlines are compared to the clock's current
+     * {@code Instant} to calculate how long to wait.
+     *
+     * <p>The default clock is {@code Clock.systemUTC()}, which provides the current instant as if by calling
+     * {@code Instant.now()}.
+     *
+     * @return the clock that this segue uses for timed waits.
+     */
     protected Clock clock() { return Clock.systemUTC(); }
+    
+    /**
+     * Runs synchronized when the first {@code poll}, {@code offer}, or {@code complete} reaches this segue's source or
+     * sink, before awaiting any deadlines. The given controller can be used to latch initial offer or poll deadlines.
+     * Otherwise, the initial offer deadline is {@code Instant.MIN}, and the initial poll deadline is
+     * {@code Instant.MAX}. This method can also be used to late-initialize state for this segue.
+     *
+     * <p>Latched values are discarded if this method throws an exception.
+     *
+     * @param ctl the controller
+     * @throws Exception if unable to initialize
+     */
     protected abstract void onInit(SinkController ctl) throws Exception;
+    
+    /**
+     * Runs synchronized each time an input element is offered to this segue's sink, after awaiting the current offer
+     * deadline. The given controller can be used to latch subsequent offer or poll deadlines. The input element can be
+     * accumulated onto this segue's state, in preparation for later offers or polls.
+     *
+     * <p>Latched values are discarded if this method throws an exception.
+     *
+     * @param ctl the controller
+     * @param input the offered input element
+     * @throws Exception if unable to offer
+     */
     protected abstract void onOffer(SinkController ctl, In input) throws Exception;
+    
+    /**
+     * Runs synchronized each time an output element is polled from this segue's source, after awaiting the current
+     * poll deadline. The given controller can be used to latch subsequent offer or poll deadlines, as well as to latch
+     * an output element or {@code close} signal. If no output or {@code close} is latched, the {@code poll} will
+     * restart after applying any latched deadlines.
+     *
+     * <p>Latched values are discarded if this method throws an exception.
+     *
+     * @param ctl the controller
+     * @throws Exception if unable to poll
+     */
     protected abstract void onPoll(SourceController<Out> ctl) throws Exception;
+    
+    /**
+     * Runs synchronized when this segue's source is completed (normally). The given controller can be used to latch a
+     * subsequent poll deadline. The offer deadline will be ignored, since the sink will no longer accept offers after
+     * this method returns normally.
+     *
+     * <p>Latched values are discarded if this method throws an exception.
+     *
+     * @param ctl the controller
+     * @throws Exception if unable to complete
+     */
     protected abstract void onComplete(SinkController ctl) throws Exception;
     
+    /**
+     * A controller for sink-like operations on a {@code DeadlineSegue}.
+     */
     public sealed interface SinkController {
-        void latchSinkDeadline(Instant deadline);
-        void latchSourceDeadline(Instant deadline);
+        /**
+         * Latches a new {@code deadline} for subsequent offers to await before running.
+         *
+         * <p>Subsequent calls to this method in the same hook invocation will replace the latched deadline.
+         *
+         * @param deadline the deadline
+         * @throws NullPointerException if deadline is null
+         */
+        void latchOfferDeadline(Instant deadline);
+        
+        /**
+         * Latches a new {@code deadline} for subsequent polls to await before running.
+         *
+         * <p>Subsequent calls to this method in the same hook invocation will replace the latched deadline.
+         *
+         * @param deadline the deadline
+         * @throws NullPointerException if deadline is null
+         */
+        void latchPollDeadline(Instant deadline);
     }
     
+    /**
+     * A controller for source-like operations on a {@code DeadlineSegue}.
+     *
+     * @param <Out> the output element type
+     */
     public sealed interface SourceController<Out> {
-        void latchSinkDeadline(Instant deadline);
-        void latchSourceDeadline(Instant deadline);
+        /**
+         * Latches a new {@code deadline} for subsequent offers to await before running.
+         *
+         * <p>Subsequent calls to this method in the same hook invocation will replace the latched deadline.
+         *
+         * @param deadline the deadline
+         * @throws NullPointerException if deadline is null
+         */
+        void latchOfferDeadline(Instant deadline);
+        
+        /**
+         * Latches a new {@code deadline} for subsequent polls to await before running.
+         *
+         * <p>Subsequent calls to this method in the same hook invocation will replace the latched deadline.
+         *
+         * @param deadline the deadline
+         * @throws NullPointerException if deadline is null
+         */
+        void latchPollDeadline(Instant deadline);
+        
+        /**
+         * Latches an {@code output} element for the enclosing {@code poll} to return.
+         *
+         * <p>Subsequent calls to this method in the same hook invocation will replace the latched output.
+         *
+         * @param output an output element
+         * @throws NullPointerException if output is null
+         */
         void latchOutput(Out output);
+        
+        /**
+         * Latches a {@code close} operation, to be applied before the enclosing {@code poll} returns. After closing the
+         * segue's source, subsequent polls on the source will return {@code null} without waiting, and subsequent
+         * offers to the sink will return {@code false} without waiting.
+         */
         void latchClose();
+    }
+    
+    /**
+     * Constructs a new {@code DeadlineSegue}.
+     */
+    protected DeadlineSegue() {
+    }
+    
+    /**
+     * Returns the {@link Belt.StepSink sink} side of this segue.
+     *
+     * <p>The sink can be safely offered to and completed concurrently.
+     *
+     * @return the sink side of this segue
+     */
+    @Override
+    public Belt.StepSink<In> sink() {
+        return new Sink();
+    }
+    
+    /**
+     * Returns the {@link Belt.StepSource source} side of this segue.
+     *
+     * <p>The source can be safely polled and closed concurrently.
+     *
+     * @return the source side of this segue
+     */
+    @Override
+    public Belt.StepSource<Out> source() {
+        return new Source();
     }
     
     final ReentrantLock lock = new ReentrantLock();
     final Condition readyForSource = lock.newCondition();
     final Condition readyForSink = lock.newCondition();
     final Controller controller = new Controller();
-    Instant sinkDeadline = Instant.MIN;
-    Instant sourceDeadline = Instant.MAX;
-    Instant latchedSinkDeadline = null;
-    Instant latchedSourceDeadline = null;
+    Instant offerDeadline = Instant.MIN;
+    Instant pollDeadline = Instant.MAX;
+    Instant latchedOfferDeadline = null;
+    Instant latchedPollDeadline = null;
     Out latchedOutput = null;
     Throwable exception = null;
     int ctl = 0; // We encode the remaining properties in 5 bits
@@ -70,19 +222,19 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
     //  2. Capturing the instance and calling from outside its scope - protected by checking lock ownership
     private final class Controller implements SinkController, SourceController<Out> {
         @Override
-        public void latchSinkDeadline(Instant deadline) {
+        public void latchOfferDeadline(Instant deadline) {
             if (access() < SOURCE || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
-            latchedSinkDeadline = Objects.requireNonNull(deadline);
+            latchedOfferDeadline = Objects.requireNonNull(deadline);
         }
         
         @Override
-        public void latchSourceDeadline(Instant deadline) {
+        public void latchPollDeadline(Instant deadline) {
             if (access() < SOURCE || !lock.isHeldByCurrentThread()) {
                 throw new IllegalStateException();
             }
-            latchedSourceDeadline = Objects.requireNonNull(deadline);
+            latchedPollDeadline = Objects.requireNonNull(deadline);
         }
         
         @Override
@@ -107,40 +259,40 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
         if (state() == NEW) {
             setAccess(SINK);
             onInit(controller);
-            updateSinkDeadline();
-            updateSourceDeadline();
+            updateOfferDeadline();
+            updatePollDeadline();
             setState(RUNNING);
         }
     }
     
-    private void updateSinkDeadline() {
+    private void updateOfferDeadline() {
         //assert lock.isHeldByCurrentThread();
-        Instant nextDeadline = latchedSinkDeadline;
+        Instant nextDeadline = latchedOfferDeadline;
         if (nextDeadline != null) {
-            if (nextDeadline.isBefore(sinkDeadline)) {
+            if (nextDeadline.isBefore(offerDeadline)) {
                 readyForSink.signalAll();
             }
-            sinkDeadline = nextDeadline;
+            offerDeadline = nextDeadline;
         }
     }
     
-    private void updateSourceDeadline() {
+    private void updatePollDeadline() {
         //assert lock.isHeldByCurrentThread();
-        Instant nextDeadline = latchedSourceDeadline;
+        Instant nextDeadline = latchedPollDeadline;
         if (nextDeadline != null) {
-            if (nextDeadline.isBefore(sourceDeadline)) {
+            if (nextDeadline.isBefore(pollDeadline)) {
                 readyForSource.signalAll();
             }
-            sourceDeadline = nextDeadline;
+            pollDeadline = nextDeadline;
         }
     }
     
-    private boolean awaitSinkDeadline() throws InterruptedException {
+    private boolean awaitOfferDeadline() throws InterruptedException {
         //assert lock.isHeldByCurrentThread();
         Instant savedDeadline = null;
         long nanosRemaining = 0;
         for (;;) {
-            if (savedDeadline != (savedDeadline = sinkDeadline)) {
+            if (savedDeadline != (savedDeadline = offerDeadline)) {
                 // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
                 if (savedDeadline == Instant.MIN) {
                     return true;
@@ -168,12 +320,12 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
         }
     }
     
-    private boolean awaitSourceDeadline() throws InterruptedException {
+    private boolean awaitPollDeadline() throws InterruptedException {
         //assert lock.isHeldByCurrentThread();
         Instant savedDeadline = null;
         long nanosRemaining = 0;
         for (;;) {
-            if (savedDeadline != (savedDeadline = sourceDeadline)) {
+            if (savedDeadline != (savedDeadline = pollDeadline)) {
                 // Check for Instant.MIN/MAX to preempt common causes of ArithmeticException below
                 if (savedDeadline == Instant.MIN) {
                     return true;
@@ -211,19 +363,19 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                     return false;
                 }
                 initIfNew();
-                if (!awaitSinkDeadline()) {
+                if (!awaitOfferDeadline()) {
                     return false;
                 }
                 setAccess(SINK);
                 
                 onOffer(controller, input);
                 
-                updateSinkDeadline();
-                updateSourceDeadline();
+                updateOfferDeadline();
+                updatePollDeadline();
                 return true;
             } finally {
-                latchedSinkDeadline = null;
-                latchedSourceDeadline = null;
+                latchedOfferDeadline = null;
+                latchedPollDeadline = null;
                 setAccess(NONE);
                 lock.unlock();
             }
@@ -242,11 +394,11 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                 onComplete(controller);
                 
                 setState(COMPLETING);
-                updateSourceDeadline();
+                updatePollDeadline();
                 readyForSink.signalAll();
             } finally {
-                latchedSinkDeadline = null;
-                latchedSourceDeadline = null;
+                latchedOfferDeadline = null;
+                latchedPollDeadline = null;
                 setAccess(NONE);
                 lock.unlock();
             }
@@ -282,7 +434,7 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                         return null;
                     }
                     initIfNew();
-                    if (!awaitSourceDeadline()) {
+                    if (!awaitPollDeadline()) {
                         if (exception != null) {
                             throw new UpstreamException(exception == Belts.NULL_EXCEPTION ? null : exception);
                         }
@@ -292,8 +444,8 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                     
                     onPoll(controller);
                     
-                    updateSinkDeadline();
-                    updateSourceDeadline();
+                    updateOfferDeadline();
+                    updatePollDeadline();
                     if (latchedClose()) {
                         close();
                     }
@@ -301,8 +453,8 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                         return latchedOutput;
                     }
                 } finally {
-                    latchedSinkDeadline = null;
-                    latchedSourceDeadline = null;
+                    latchedOfferDeadline = null;
+                    latchedPollDeadline = null;
                     latchedOutput = null;
                     setLatchedClose(false);
                     setAccess(NONE);
@@ -325,15 +477,5 @@ public abstract class DeadlineSegue<In, Out> implements Belt.StepSegue<In, Out> 
                 lock.unlock();
             }
         }
-    }
-    
-    @Override
-    public Belt.StepSink<In> sink() {
-        return new Sink();
-    }
-    
-    @Override
-    public Belt.StepSource<Out> source() {
-        return new Source();
     }
 }

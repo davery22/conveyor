@@ -1,7 +1,7 @@
 package io.avery.conveyor;
 
 /**
- * Exception thrown when attempting to yield an element from a boundary {@link Belt.Source Source} whose connected
+ * Exception thrown when attempting to yield an element from a boundary {@link Belt.Source Source} whose linked
  * boundary {@link Belt.Sink Sink} has {@link Belt.Sink#completeAbruptly completed abruptly}. This exception can be
  * inspected using the {@link Throwable#getCause()} method.
  */
