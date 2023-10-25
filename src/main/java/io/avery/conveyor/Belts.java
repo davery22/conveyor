@@ -186,7 +186,7 @@ public class Belts {
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
      * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
      * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
-     * running silos from the source are awaited.
+     * running stations from the source are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -223,8 +223,8 @@ public class Belts {
      * }
      *
      * @param mapper a function that creates a source from an exception
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by the created source
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by the created source
      * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
      * @param <T> the sink element type
      */
@@ -288,7 +288,7 @@ public class Belts {
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
      * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
      * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
-     * running silos from the source are awaited.
+     * running stations from the source are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -327,8 +327,8 @@ public class Belts {
      * }
      *
      * @param mapper a function that creates a source from an exception
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by the created source
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by the created source
      * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
      * @param <T> the sink element type
      */
@@ -589,8 +589,8 @@ public class Belts {
     /**
      * Returns a sink that offers input elements to consecutive inner sinks, using the {@code predicate} to determine
      * when to create each new sink. When the {@code predicate} returns {@code true} for an element, the current inner
-     * sink is completed and its running silos awaited, then a new inner sink is created by passing the element to the
-     * {@code sinkFactory}, and the new sink is run.
+     * sink is completed and its running stations awaited, then a new inner sink is created by passing the element to
+     * the {@code sinkFactory}, and the new sink is run.
      *
      * <p>Example:
      * {@snippet :
@@ -623,8 +623,8 @@ public class Belts {
      * @param splitAfter if {@code true}, an element that passes the {@code predicate} will cause a new inner sink to be
      *                   created starting with the next element, rather than the current element
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by created sinks
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by created sinks
      * @param sinkFactory a function that creates a sink, using the first element that will be offered to that sink
      * @return a sink that offers input elements to consecutive inner sinks, delimited by passing {@code predicate}
      * @param <T> the element type
@@ -689,9 +689,9 @@ public class Belts {
      * element, and subsequent elements that map to the same key, are offered to that sink until the sink cancels.
      *
      * <p>If {@code eagerCancel} is {@code true}, and any inner sink cancels, all inner sinks will be completed and
-     * running silos awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner sink
-     * cancels, it will be completed and its running silos awaited, before the outer sink resumes. Subsequent elements
-     * that map to the canceled sink's key will be discarded.
+     * running stations awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner
+     * sink cancels, it will be completed and its running stations awaited, before the outer sink resumes. Subsequent
+     * elements that map to the canceled sink's key will be discarded.
      *
      * <p>Example:
      * {@snippet :
@@ -722,8 +722,8 @@ public class Belts {
      *
      * @param classifier a classifier function mapping input elements to keys
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by created sinks
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by created sinks
      * @param sinkFactory a function that creates a sink, using a key and the first element that will be offered to that
      *                    sink
      * @return a sink that offers input elements to the inner sink associated with the key computed for the element
@@ -808,10 +808,10 @@ public class Belts {
     /**
      * Returns an operator that replaces each element with the contents of a mapped source before it reaches a
      * downstream sink. The resultant upstream sink will apply the {@code mapper} to each element to produce a mapped
-     * source, run the source, offer its contents downstream, then close it and await its running silos. (If a mapped
+     * source, run the source, offer its contents downstream, then close it and await its running stations. (If a mapped
      * source is {@code null}, it is discarded.)
      *
-     * <p>If the mapped sources are known to never encapsulate silos / cross asynchronous boundaries, it may be possible
+     * <p>If the mapped sources are known to never enclose stations / cross asynchronous boundaries, it may be possible
      * to replace usage of this operator with the {@link #gather gather} operator and a flat-mapping
      * {@link Gatherer Gatherer}.
      *
@@ -838,8 +838,8 @@ public class Belts {
      * }
      *
      * @param mapper a function to be applied to the upstream elements, producing a mapped source
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by created sources
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by created sources
      * @return an operator that replaces each element with the contents of a mapped source
      * @param <T> the upstream element type
      * @param <U> the downstream element type
@@ -892,7 +892,7 @@ public class Belts {
      * Returns an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
      * from. The resultant upstream sink will wrap any upstream source it drains from, to discard close signals, and
      * then apply the {@code sourceMapper} to create a downstream source. The downstream source is then run, drained
-     * from, and closed, and its running silos are awaited.
+     * from, and closed, and its running stations are awaited.
      *
      * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sourceMapper} after the
      * upstream source, and then connecting the downstream sink after that. However, since close signals are expected to
@@ -933,8 +933,8 @@ public class Belts {
      * }
      *
      * @param sourceMapper an operator that connects after an upstream source to produce a downstream source
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by the created downstream source
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by the created downstream source
      * @return an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
      * from
      * @param <T> the upstream element type
@@ -996,7 +996,7 @@ public class Belts {
      * Returns an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to.
      * The resultant downstream source will wrap any downstream sink it drains to, to discard completion signals, and
      * then apply the {@code sinkMapper} to create an upstream sink. The upstream sink is then run, drained to, and
-     * completed, and its running silos are awaited.
+     * completed, and its running stations are awaited.
      *
      * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sinkMapper} before the
      * downstream sink, and then connecting the upstream source before that. However, since completion signals are
@@ -1037,8 +1037,8 @@ public class Belts {
      * }
      *
      * @param sinkMapper an operator that connects before a downstream sink to produce an upstream sink
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running silos
-     *                              encapsulated by the created upstream sink
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     *                              enclosed by the created upstream sink
      * @return an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to
      * @param <T> the upstream element type
      * @param <U> the downstream element type
@@ -3158,7 +3158,7 @@ public class Belts {
         }
     }
     
-    static final class ClosedSilo<T> implements Belt.Silo {
+    static final class ClosedStation<T> implements Belt.Station {
         final Belt.Source<? extends T> source;
         final Belt.Sink<? super T> sink;
         boolean ran = false;
@@ -3166,13 +3166,13 @@ public class Belts {
         static final VarHandle RAN;
         static {
             try {
-                RAN = MethodHandles.lookup().findVarHandle(ClosedSilo.class, "ran", boolean.class);
+                RAN = MethodHandles.lookup().findVarHandle(ClosedStation.class, "ran", boolean.class);
             } catch (ReflectiveOperationException e) {
                 throw new ExceptionInInitializerError(e);
             }
         }
         
-        ClosedSilo(Belt.Source<? extends T> source, Belt.Sink<? super T> sink) {
+        ClosedStation(Belt.Source<? extends T> source, Belt.Sink<? super T> sink) {
             this.source = Objects.requireNonNull(source);
             this.sink = Objects.requireNonNull(sink);
         }
@@ -3217,8 +3217,8 @@ public class Belts {
         }
     }
     
-    static final class ChainSilo extends Chain implements Belt.Silo {
-        ChainSilo(Belt.Silo left, Belt.Silo right) {
+    static final class ChainStation extends Chain implements Belt.Station {
+        ChainStation(Belt.Station left, Belt.Station right) {
             super(left, right);
         }
     }
@@ -3226,7 +3226,7 @@ public class Belts {
     static sealed class ChainSink<In> extends Chain implements Belt.Sink<In> {
         final Belt.Sink<? super In> sink;
         
-        ChainSink(Belt.Sink<? super In> left, Belt.Silo right) {
+        ChainSink(Belt.Sink<? super In> left, Belt.Station right) {
             super(left, right);
             this.sink = left instanceof ChainSink<? super In> cs ? cs.sink : left;
         }
@@ -3250,7 +3250,7 @@ public class Belts {
     static sealed class ChainSource<Out> extends Chain implements Belt.Source<Out> {
         final Belt.Source<? extends Out> source;
         
-        ChainSource(Belt.Silo left, Belt.Source<? extends Out> right) {
+        ChainSource(Belt.Station left, Belt.Source<? extends Out> right) {
             super(left, right);
             this.source = right instanceof ChainSource<? extends Out> cs ? cs.source : right;
         }
@@ -3267,7 +3267,7 @@ public class Belts {
     }
     
     static final class ChainStepSink<In> extends ChainSink<In> implements Belt.StepSink<In> {
-        ChainStepSink(Belt.StepSink<? super In> left, Belt.Silo right) {
+        ChainStepSink(Belt.StepSink<? super In> left, Belt.Station right) {
             super(left, right);
         }
         
@@ -3278,7 +3278,7 @@ public class Belts {
     }
     
     static final class ChainStepSource<Out> extends ChainSource<Out> implements Belt.StepSource<Out> {
-        ChainStepSource(Belt.Silo left, Belt.StepSource<? extends Out> right) {
+        ChainStepSource(Belt.Station left, Belt.StepSource<? extends Out> right) {
             super(left, right);
         }
         

@@ -26,7 +26,7 @@ comprehensible to me.
    - Note: Birth of more fan-in/fan-out (#merge, #balance, #broadcast)
    - Note: Birth of chaining ('Pipeline')
 9. Birth of chaining, run(), 'Pipeline' (https://github.com/davery22/conveyor/commit/dbef666b4f1e91b033bab25654330457e664d813#diff-cbb9dfeb0617a41e8f6ca43cee0ba2e5ef0f98191320b8dfcd8f9ae38bbb5f68R20)
-   - Note: First hints of Silos
+   - Note: First hints of Stations
 10. The #mapBalance saga
     - Note: Ordered fan-out Sink (https://github.com/davery22/conveyor/commit/6a55e31a78a887f8330c7442768b761ca85ed99a#diff-16763a30542f42f326a66ee23751b7a00f2b19655d7b47506e4d8a721a96d67eR334)
     - Note: #mapBalancePartitioned as a synchronous Sink (https://github.com/davery22/conveyor/commit/da0a09cca1155e3725545027776d135495ad30a4#diff-16763a30542f42f326a66ee23751b7a00f2b19655d7b47506e4d8a721a96d67eR450)
@@ -51,7 +51,7 @@ comprehensible to me.
 14. Completion of DeadlineSegue interface with duo-deadlines (https://github.com/davery22/conveyor/commit/23442deda30aeb60d055ff13832ad2dbe8b4f701)
 15. Spec of drain methods boolean return (https://github.com/davery22/conveyor/commit/7d2b673899a37b96e58ed7035d50d97505a954ea#diff-16763a30542f42f326a66ee23751b7a00f2b19655d7b47506e4d8a721a96d67eR1164)
 16. Birth of Segues (from #mapBalance saga) (https://github.com/davery22/conveyor/commit/d39fd0be78e3dc397607cc38c53b4de38999699d)
-    - Note: Alongside birth of Silos (https://github.com/davery22/conveyor/commit/d39fd0be78e3dc397607cc38c53b4de38999699d#diff-db26c1af2b0dda12e76cd4a4cfebf9f847d8d75f7455438a04d5599b8612f88fR90)
+    - Note: Alongside birth of Stations (https://github.com/davery22/conveyor/commit/d39fd0be78e3dc397607cc38c53b4de38999699d#diff-db26c1af2b0dda12e76cd4a4cfebf9f847d8d75f7455438a04d5599b8612f88fR90)
 17. Idempotent #run (https://github.com/davery22/conveyor/commit/a383b388a5f399efeac7ed333571d13a7fafd744)
 18. Removal of short-lived threading (https://github.com/davery22/conveyor/commit/47af88f3e214e0074ce4b38eb77f20ae33cc77b8)
     - 100x to loop
@@ -64,7 +64,7 @@ comprehensible to me.
     - Note: Overloads for automatic shape conversion
     - Note: Modify chaining into fan-in/out
 21. Revisit #flatMap and #groupBy to respect structured concurrency (https://github.com/davery22/conveyor/commit/a92be21f782c8f740e95843e8b57a1b43da45784)
-    - Note: Wait on Silos when subSink/Source completes/closes
+    - Note: Wait on Stations when subSink/Source completes/closes
 22. Restructure Operators to indicate dataflow-order (https://github.com/davery22/conveyor/commit/26f72fff5b9ff848648c4bc5348e0fe08d00e8a6)
 23. Throw from #completeAbruptly; finalize exception path/suppression (https://github.com/davery22/conveyor/commit/7696f1ecbcd616f1fb208977c788c247b5d262d8)
 24. FailureHandlingScope (https://github.com/davery22/conveyor/commit/66d8086dbc14303f996909c28eb24f6196a5f1ec)
@@ -186,7 +186,7 @@ The effect of buffers/staging on processing
 
 Document:
 
-#andThen is left-associative; #compose is right-associative (matters for which side #runs Silos)
+#andThen is left-associative; #compose is right-associative (matters for which side #runs Stations)
 
 Discuss:
 
@@ -244,8 +244,8 @@ Discuss:
 Discuss:
 
 Avoiding deadlock when waiting on nested runs
-- If there is a situation where an inner Source/Sink runs a Silo that other inner Sources/Sinks depend on, we can deadlock
-- To trigger this, the Silo would have to NOT already be running when the Source/Sink is run
+- If there is a situation where an inner Source/Sink runs a Station that other inner Sources/Sinks depend on, we can deadlock
+- To trigger this, the Station would have to NOT already be running when the Source/Sink is run
 - To avoid this, the outer stage should be solely-responsible for running (and closing/completing) shared Stages
 
 Discuss:

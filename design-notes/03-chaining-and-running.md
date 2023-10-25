@@ -21,7 +21,7 @@ try (var scope = new StructuredTaskScope<>()) {
     StepSegue<B, C> segue2 = ...
     Sink<C> sink = ...
     
-    // First phase
+    // First station
     scope.fork(() -> {
         try (source) {
             source.drainToSink(segue1);
@@ -44,7 +44,7 @@ try (var scope = new StructuredTaskScope<>()) {
         }
     });
     
-    // Second phase
+    // Second station
     scope.fork(() -> {
         try (segue1) {
             segue2.drainFromSource(segue1);
@@ -55,7 +55,7 @@ try (var scope = new StructuredTaskScope<>()) {
         }
     });
     
-    // Third phase
+    // Third station
     scope.fork(() -> {
         try (segue2) {
             sink.drainFromSource(segue2);
@@ -74,7 +74,7 @@ Even if we factored the 'complete/close' ceremony into methods, the separation b
 threads starts to obstruct legibility, and opens more room for error. The story gets worse in the presence of fan-out or
 fan-in operators, where the threads can no longer be arranged in a linear progression corresponding to the data flow,
 because the data flow itself is non-linear. Not to mention operators like `flatMap` or `groupBy`, that can dynamically
-create nested pipelines, each of which may have a different number of phases, and thus, threads.
+create nested pipelines, each of which may have a different number of stations, and thus, threads.
 
 This reasoning led me to pursue a more fluent API, where pipelines could be built by chaining calls to operators -
 similar to how Java Streams (and most Reactive Streams vendors) work. I still liked and wanted to preserve the
@@ -83,13 +83,13 @@ interfaces. However, as I continued to refine the approach, the new set of inter
 existing interfaces: Each 'pipeline' interface worked by wrapping (and exposing) an instance of the corresponding
 'plain' interface, and provided methods - `andThen` and `compose` - for connecting to (the 'pipeline' variants of)
 sources, sinks, or segues, as applicable. There was one additional 'pipeline' interface: The equivalent of what is now
-called `Silo`, which represented a source connected to a sink, or a sequence of such connections. Finally, the
-'pipeline' interfaces introduced a `run` method, that would concurrently execute any encapsulated 'silos', draining each
+called `Station`, which represented a source connected to a sink, or a sequence of such connections. Finally, the
+'pipeline' interfaces introduced a `run` method, that would concurrently execute any enclosed stations, draining each
 source to its paired sink, and handling every 'complete/close' dance.
 
 The `run` method was the payout of chaining, eliminating the previous separation and ceremony. But, its existence
 implied that the only safe way to use an arbitrary 'pipeline' source or sink was to call `run` first. This is because
-the 'pipeline' source or sink <em>might</em> have 'silos' inside, and not running those could cause the exposed 'plain'
+the 'pipeline' source or sink <em>might</em> have stations inside, and not running those could cause the exposed 'plain'
 source or sink to deadlock when used (by waiting forever for a non-empty or non-full internal buffer, respectively).
 This posed a burden of opportunity on operators, like `zip`: If an operator accepted 'pipeline' inputs, it could return
 a 'pipeline' output that would `run` the inputs when it runs. If an operator <em>didn't</em> do this, then it could
@@ -100,8 +100,9 @@ inputs and return a 'pipeline' output that handled running the inputs, just in c
 
 Seeing how this would play out, and not really enjoying the idea of having doppelganger interfaces anyway, I decided to
 move the chaining methods directly onto the original interfaces, along with the `run` method. This has the bitter
-implication from earlier - that if we don't know better, we should assume that any `Source` or `Sink` might have silos
-inside - so even if we want to drain manually, we still need to `run` things. But by this point, I expected that
-draining manually would be far less common usage than chaining stages to form a closed `Silo`, and then running that.
-Between the ergonomics of chaining, the implicit handling of threads and the 'complete/close' dance, and the collective
-influence of operators whose output may now need to be `run`, chaining and running had become the endorsed usage.
+implication from earlier - that if we don't know better, we should assume that any `Source` or `Sink` might have
+stations inside - so even if we want to drain manually, we still need to `run` things. But by this point, I expected
+that draining manually would be far less common usage than chaining stages to form a closed `Station`, and then running
+that. Between the ergonomics of chaining, the implicit handling of threads and the 'complete/close' dance, and the
+collective influence of operators whose output may now need to be `run`, chaining and running had become the endorsed
+usage.

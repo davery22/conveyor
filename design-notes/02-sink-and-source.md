@@ -53,9 +53,9 @@ This is still imperatively managing threads, but offers much better encapsulatio
 `producer` and `consumer` names might be starting to feel odd - in reality both threads are fulfilling a 'producer' and
 'consumer' role, but the consumption by `batch.offer` and production by `batch.poll` is glossed over. Though we could
 still write the code very similarly to this today, we would probably factor the 'work processing' into a Source, and the
-'batch writing' into a Sink. This would allow us to connect and `run` the underlying Silos, which under the hood would
-pretty much look like the two threads above (but with the surrounding 'complete/close protocol' correctly handled for
-us).
+'batch writing' into a Sink. This would allow us to connect and `run` the underlying Stations, which under the hood
+would pretty much look like the two threads above (but with the surrounding 'complete/close protocol' correctly handled
+for us).
 
 At the time, Source and Sink did not exist, but that was about to change. As I looked toward new kinds of operators
 to implement, one of the first ones I decided to tackle was `zip`. (Btw, shout out to Akka Streams'
