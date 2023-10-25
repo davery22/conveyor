@@ -7,10 +7,27 @@ import java.util.stream.Collector;
 import java.util.stream.Stream;
 
 /**
- * TODO: Stages, Segues, Operators
- *  intermediate vs boundary vs terminal
- *  fan-out vs fan-in
- *  exception handling ('up' to nearest boundary, then 'down' across boundaries)
+ * Interrelated interfaces for expressing flow-controlled processing pipelines, where {@link Sink Sinks} accept elements
+ * and {@link Source Sources} yield elements.
+ *
+ * <h2>Stages</h2>
+ *
+ * <h2>Segues</h2>
+ *
+ * <h2>Operators</h2>
+ *
+ * <h2>Completion and cancellation</h2>
+ *
+ * <h2>Proxying and boundaries</h2>
+ *
+ * proxy vs boundary
+ *
+ * <h3>Fan-in and fan-out</h3>
+ *
+ * <h2>Exception handling</h2>
+ *
+ * ('up' to nearest boundary, then 'down' across boundaries)
+ *
  */
 public class Belt {
     private Belt() {}
@@ -29,8 +46,8 @@ public class Belt {
      *
      * (For a "stage" that accepts input elements and yields output elements, see {@link Segue Segue}.)
      *
-     * <p>Stages can be {@link #run run}, which will traverse each silo encapsulated by the stage and execute the
-     * processing pipeline.
+     * <p>Stages can be {@link #run run}, which will traverse each silo encapsulated by the stage and concurrently drain
+     * sources to sinks.
      */
     public sealed interface Stage {
         /**
@@ -60,7 +77,7 @@ public class Belt {
          * @implSpec A stage that delegates to other stages should call {@code run} on each stage before returning from
          * this method.
          *
-         * @implNote The default implementation does nothing.
+         * <p>The default implementation does nothing.
          *
          * @param executor the executor to submit tasks to
          */
@@ -207,7 +224,7 @@ public class Belt {
          * {@link #run Stage.run}). The utility method {@link Belts#composedComplete(Stream)} is provided for common use
          * cases.
          *
-         * @implNote The default implementation does nothing.
+         * <p>The default implementation does nothing.
          *
          * @throws Exception if unable to complete
          */
@@ -231,7 +248,7 @@ public class Belt {
          * {@link #run Stage.run}). The utility method {@link Belts#composedCompleteAbruptly(Stream, Throwable)} is
          * provided for common use cases.
          *
-         * @implNote The default implementation does nothing.
+         * <p>The default implementation does nothing.
          *
          * @param cause the causal exception
          * @throws Exception if unable to complete
@@ -389,7 +406,7 @@ public class Belt {
          * exception, subsequent exceptions should be suppressed onto the first exception. The utility method
          * {@link Belts#composedClose(Stream)} is provided for common use cases.
          *
-         * @implNote The default implementation does nothing.
+         * <p>The default implementation does nothing.
          *
          * @throws Exception if unable to close
          */
