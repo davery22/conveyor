@@ -9,8 +9,8 @@ A `StepSegue` was both a `StepSink` and a `StepSource`.
 At the time, these were the only relationships to consider. The simple "drain" connections left no loose ends, but with
 `StepSegue`s involved, it was possible to set up multiple segues end-to-end, such that one's 'source-part' drains into
 the next's 'sink-part'. Each segue's 'sink-part' would run on a different thread than its 'source-part', resulting in a
-series of threads that each own a specific phase of element processing - polling from upstream, transforming, and
-offering downstream - like stations on an assembly line. This was simple to envision, but harder to express in the code:
+series of threads that each own a specific phase of element processing - pulling from upstream, transforming, and
+pushing downstream - like stations on an assembly line. This was simple to envision, but harder to express in the code:
 The segues would have to be declared up-front, and then separately called from a series of threads, in the correct
 order, while correctly propagating completion and cancellation signals.
 

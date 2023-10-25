@@ -25,8 +25,8 @@ public class Belts {
     static final Throwable NULL_EXCEPTION = new Throwable();
     
     /**
-     * Returns an operator that synchronizes access to an upstream source's {@code poll} and {@code close} methods. The
-     * resultant downstream source can be safely polled concurrently, making it suitable for ad-hoc "balancing" use
+     * Returns an operator that synchronizes access to an upstream source's {@code pull} and {@code close} methods. The
+     * resultant downstream source can be safely pulled concurrently, making it suitable for ad-hoc "balancing" use
      * cases.
      *
      * <p>Example:
@@ -35,11 +35,11 @@ public class Belts {
      *     List<Integer> list = new ArrayList<>();
      *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
      *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-     *     Belt.StepSource<Integer> noCloseSource = source::poll;
+     *     Belt.StepSource<Integer> noCloseSource = source::pull;
      *
      *     Belts
      *         .merge(List.of(
-     *             // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+     *             // These 2 sources will concurrently pull from the same upstream, effectively "balancing"
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 4))
      *         ))
@@ -55,7 +55,7 @@ public class Belts {
      *     // 156; 516; 561; 246; 426; 462; 345; 435; 453; 456;
      *     // 423; 243; 234; 513; 153; 135; 612; 162; 126; 123;
      * }
-     * }
+     *}
      *
      * @return an operator that synchronizes access to an upstream source
      * @param <T> the source element type
@@ -70,10 +70,10 @@ public class Belts {
             }
             
             @Override
-            public T poll() throws Exception {
+            public T pull() throws Exception {
                 lock.lockInterruptibly();
                 try {
-                    return source.poll();
+                    return source.pull();
                 } finally {
                     lock.unlock();
                 }
@@ -99,8 +99,8 @@ public class Belts {
     }
     
     /**
-     * Returns an operator that synchronizes access to a downstream sink's {@code offer}, {@code complete}, and
-     * {@code completeAbruptly} methods. The resultant upstream sink can be safely offered to concurrently, making it
+     * Returns an operator that synchronizes access to a downstream sink's {@code push}, {@code complete}, and
+     * {@code completeAbruptly} methods. The resultant upstream sink can be safely pushed to concurrently, making it
      * suitable for ad-hoc "merging" use cases.
      *
      * <p>Example:
@@ -109,11 +109,11 @@ public class Belts {
      *     List<Integer> list = new ArrayList<>();
      *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
      *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *     Belt.StepSink<Integer> noCompleteSink = sink::push;
      *
      *     Belts
      *         .balance(List.of(
-     *             // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+     *             // These 2 sinks will concurrently push to the same downstream, effectively "merging"
      *             noCompleteSink.compose(Belts.gather(Gatherers.map((Integer i) -> i + 1))),
      *             noCompleteSink.compose(Belts.gather(Gatherers.map((Integer i) -> i + 4)))
      *         ))
@@ -129,7 +129,7 @@ public class Belts {
      *     // 156; 516; 561; 246; 426; 462; 345; 435; 453; 456;
      *     // 423; 243; 234; 513; 153; 135; 612; 162; 126; 123;
      * }
-     * }
+     *}
      *
      * @return an operator that synchronizes access to a downstream sink
      * @param <T> the sink element type
@@ -144,10 +144,10 @@ public class Belts {
             }
             
             @Override
-            public boolean offer(T input) throws Exception {
+            public boolean push(T input) throws Exception {
                 lock.lockInterruptibly();
                 try {
-                    return sink.offer(input);
+                    return sink.push(input);
                 } finally {
                     lock.unlock();
                 }
@@ -241,8 +241,8 @@ public class Belts {
             }
             
             @Override
-            public boolean offer(T input) throws Exception {
-                return sink.offer(input);
+            public boolean push(T input) throws Exception {
+                return sink.push(input);
             }
             
             @Override
@@ -426,8 +426,8 @@ public class Belts {
             }
             
             @Override
-            public U poll() throws Exception {
-                for (T t; (t = source.poll()) != null; ) {
+            public U pull() throws Exception {
+                for (T t; (t = source.pull()) != null; ) {
                     U u = mapper.apply(t);
                     if (u != null) {
                         return u;
@@ -462,15 +462,15 @@ public class Belts {
      *     List<Integer> list = new ArrayList<>();
      *     Iterator<Integer> iter = List.of(0, 1, 2).iterator();
      *     Belt.StepSource<Integer> source = new Belt.StepSource<Integer>() {
-     *         @Override public Integer poll() { return iter.hasNext() ? iter.next() : null; }
+     *         @Override public Integer pull() { return iter.hasNext() ? iter.next() : null; }
      *         @Override public void close() { System.out.print("000"); }
      *     }.andThen(Belts.synchronizeStepSource());
      *     Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-     *     Belt.StepSource<Integer> noCloseSource = source::poll;
+     *     Belt.StepSource<Integer> noCloseSource = source::pull;
      *
      *     Belts
      *         .merge(List.of(
-     *             // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+     *             // These 2 sources will concurrently pull from the same upstream, effectively "balancing"
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
      *             noCloseSource.andThen(Belts.filterMap(i -> i + 4))
      *         ))
@@ -486,7 +486,7 @@ public class Belts {
      *     // 000156; 000516; 000561; 000246; 000426; 000462; 000345; 000435; 000453; 000456;
      *     // 000423; 000243; 000234; 000513; 000153; 000135; 000612; 000162; 000126; 000123
      * }
-     * }
+     *}
      *
      * @param sourceToClose the additional source to close
      * @return an operator that also closes the given {@code sourceToClose} when an upstream source closes
@@ -533,14 +533,14 @@ public class Belts {
      *     List<Integer> list = new ArrayList<>();
      *     Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
      *     Belt.StepSink<Integer> sink = new Belt.StepSink<Integer>() {
-     *         @Override public boolean offer(Integer input) { return list.add(input); }
+     *         @Override public boolean push(Integer input) { return list.add(input); }
      *         @Override public void complete() { list.addAll(List.of(0, 0, 0)); }
      *     }.compose(Belts.synchronizeStepSink());
-     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *     Belt.StepSink<Integer> noCompleteSink = sink::push;
      *
      *     Belts
      *         .balance(List.of(
-     *             // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+     *             // These 2 sinks will concurrently push to the same downstream, effectively "merging"
      *             noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
      *             noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
      *         ))
@@ -556,7 +556,7 @@ public class Belts {
      *     // 156000; 516000; 561000; 246000; 426000; 462000; 345000; 435000; 453000; 456000;
      *     // 423000; 243000; 234000; 513000; 153000; 135000; 612000; 162000; 126000; 123000
      * }
-     * }
+     *}
      *
      * @param sinkToComplete the additional sink to complete
      * @return an operator that also completes the given {@code sinkToComplete} when a downstream sink completes
@@ -587,7 +587,7 @@ public class Belts {
     }
     
     /**
-     * Returns a sink that offers input elements to consecutive inner sinks, using the {@code predicate} to determine
+     * Returns a sink that pushes input elements to consecutive inner sinks, using the {@code predicate} to determine
      * when to create each new sink. When the {@code predicate} returns {@code true} for an element, the current inner
      * sink is completed and its running stations awaited, then a new inner sink is created by passing the element to
      * the {@code sinkFactory}, and the new sink is run.
@@ -595,10 +595,10 @@ public class Belts {
      * <p>Example:
      * {@snippet :
      * try (var scope = new StructuredTaskScope<>()) {
-     *     // In this example, the consecutive inner sinks offer to a shared sink, effectively "concatenating"
+     *     // In this example, the consecutive inner sinks push to a shared sink, effectively "concatenating"
      *     List<Integer> list = new ArrayList<>();
      *     Belt.StepSink<Integer> sink = list::add;
-     *     Belt.StepSink<Integer> noCompleteSink = sink::offer;
+     *     Belt.StepSink<Integer> noCompleteSink = sink::push;
      *
      *     Belts.iteratorSource(List.of(0, 1, 2, 3, 4, 5).iterator())
      *         .andThen(Belts
@@ -617,7 +617,7 @@ public class Belts {
      *     System.out.println(list);
      *     // Prints: [0, 0, 1, 0, 2, 2, 3, 2, 4, 4, 5, 4]
      * }
-     * }
+     *}
      *
      * @param predicate a predicate to be applied to the input elements
      * @param splitAfter if {@code true}, an element that passes the {@code predicate} will cause a new inner sink to be
@@ -625,8 +625,8 @@ public class Belts {
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
      * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
      *                              enclosed by created sinks
-     * @param sinkFactory a function that creates a sink, using the first element that will be offered to that sink
-     * @return a sink that offers input elements to consecutive inner sinks, delimited by passing {@code predicate}
+     * @param sinkFactory a function that creates a sink, using the first element that will be pushed to that sink
+     * @return a sink that pushes input elements to consecutive inner sinks, delimited by passing {@code predicate}
      * @param <T> the element type
      */
     public static <T> Belt.Sink<T> split(Predicate<? super T> predicate,
@@ -649,7 +649,7 @@ public class Belts {
                     try {
                         boolean drained = true;
                         boolean split = true;
-                        for (T val; (val = source.poll()) != null; ) {
+                        for (T val; (val = source.pull()) != null; ) {
                             if ((!splitAfter && predicate.test(val)) || split) {
                                 subSink.complete();
                                 scope.join();
@@ -657,7 +657,7 @@ public class Belts {
                                 subSink.run(exec);
                             }
                             split = splitAfter && predicate.test(val);
-                            if (!subSink.offer(val)) {
+                            if (!subSink.push(val)) {
                                 if (eagerCancel) {
                                     drained = false;
                                     break;
@@ -683,10 +683,10 @@ public class Belts {
     }
     
     /**
-     * Returns a sink that offers input elements to the inner sink associated with the key that the {@code classifier}
+     * Returns a sink that pushes input elements to the inner sink associated with the key that the {@code classifier}
      * computes for the element. When the {@code classifier} computes a previously-unseen key for an element, the
      * {@code sinkFactory} is called with the key and element to create a new inner sink, which is then run. That first
-     * element, and subsequent elements that map to the same key, are offered to that sink until the sink cancels.
+     * element, and subsequent elements that map to the same key, are pushed to that sink until the sink cancels.
      *
      * <p>If {@code eagerCancel} is {@code true}, and any inner sink cancels, all inner sinks will be completed and
      * running stations awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner
@@ -696,10 +696,10 @@ public class Belts {
      * <p>Example:
      * {@snippet :
      * try (var scope = new StructuredTaskScope<>()) {
-     *     // In this example, the concurrent inner sinks offer to a shared sink, effectively "merging"
+     *     // In this example, the concurrent inner sinks push to a shared sink, effectively "merging"
      *     List<String> list = new ArrayList<>();
      *     Belt.StepSink<String> sink = list::add;
-     *     Belt.StepSink<String> noCompleteSink = sink::offer;
+     *     Belt.StepSink<String> noCompleteSink = sink::push;
      *
      *     Belts.iteratorSource(List.of("now", "or", "never").iterator())
      *         .andThen(Belts
@@ -718,15 +718,15 @@ public class Belts {
      *     System.out.println(list);
      *     // Prints: [n, now, now, o, or, or, n, never, now]
      * }
-     * }
+     *}
      *
      * @param classifier a classifier function mapping input elements to keys
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
      * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
      *                              enclosed by created sinks
-     * @param sinkFactory a function that creates a sink, using a key and the first element that will be offered to that
+     * @param sinkFactory a function that creates a sink, using a key and the first element that will be pushed to that
      *                    sink
-     * @return a sink that offers input elements to the inner sink associated with the key computed for the element
+     * @return a sink that pushes input elements to the inner sink associated with the key computed for the element
      * @param <T> the element type
      * @param <K> the key type
      */
@@ -760,7 +760,7 @@ public class Belts {
                                                           asyncExceptionHandler)) {
                     try {
                         boolean drained = true;
-                        for (T val; (val = source.poll()) != null; ) {
+                        for (T val; (val = source.pull()) != null; ) {
                             K key = Objects.requireNonNull(classifier.apply(val));
                             var s = scopedSinkByKey.get(key);
                             if (s == TOMBSTONE) {
@@ -778,7 +778,7 @@ public class Belts {
                                 // incomplete sinks and returning a no-op Sink if maxed (thus dropping elements).
                                 subSink.run(subScope);
                             }
-                            if (!scopedSink.sink.offer(val)) {
+                            if (!scopedSink.sink.push(val)) {
                                 if (eagerCancel) {
                                     drained = false;
                                     break;
@@ -808,7 +808,7 @@ public class Belts {
     /**
      * Returns an operator that replaces each element with the contents of a mapped source before it reaches a
      * downstream sink. The resultant upstream sink will apply the {@code mapper} to each element to produce a mapped
-     * source, run the source, offer its contents downstream, then close it and await its running stations. (If a mapped
+     * source, run the source, push its contents downstream, then close it and await its running stations. (If a mapped
      * source is {@code null}, it is discarded.)
      *
      * <p>If the mapped sources are known to never enclose stations / cross asynchronous boundaries, it may be possible
@@ -858,7 +858,7 @@ public class Belts {
             }
             
             @Override
-            public boolean offer(T input) throws Exception {
+            public boolean push(T input) throws Exception {
                 Objects.requireNonNull(input);
                 if (!draining) {
                     return false;
@@ -867,7 +867,7 @@ public class Belts {
                 if (subSource == null) {
                     return true;
                 }
-                try (var scope = new FailureHandlingScope("flatMap-offer",
+                try (var scope = new FailureHandlingScope("flatMap-push",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     subSource.run(scopeExecutor(scope));
@@ -958,8 +958,8 @@ public class Belts {
                     volatile boolean drained = false;
                     
                     @Override
-                    public T poll() throws Exception {
-                        var result = source.poll();
+                    public T pull() throws Exception {
+                        var result = source.pull();
                         if (result == null) {
                             drained = true;
                         }
@@ -1061,8 +1061,8 @@ public class Belts {
                     volatile boolean drained = true;
                     
                     @Override
-                    public boolean offer(U input) throws Exception {
-                        if (!sink.offer(input)) {
+                    public boolean push(U input) throws Exception {
+                        if (!sink.push(input)) {
                             return drained = false;
                         }
                         return true;
@@ -1103,8 +1103,8 @@ public class Belts {
     
     /**
      * Returns an operator that transforms elements according to the given {@code gatherer} before they reach a
-     * downstream sink. The resultant upstream sink will call the gatherer's initializer upon first offer to initialize
-     * state, call the integrator on each offer to push elements downstream, and call the finisher on (normal)
+     * downstream sink. The resultant upstream sink will call the gatherer's initializer upon first push to initialize
+     * state, call the integrator on each push to pass elements downstream, and call the finisher on (normal)
      * completion. (The gatherer's combiner is not used.)
      *
      * <p>Example:
@@ -1151,7 +1151,7 @@ public class Belts {
                 this.sink = Objects.requireNonNull(sink);
                 this.downstream = el -> {
                     try {
-                        return sink.offer(el);
+                        return sink.push(el);
                     } catch (Error | RuntimeException e) {
                         throw e;
                     } catch (Exception e) {
@@ -1174,7 +1174,7 @@ public class Belts {
             }
             
             @Override
-            public boolean offer(T input) throws Exception {
+            public boolean push(T input) throws Exception {
                 try {
                     if (state >= COMPLETED) {
                         return false;
@@ -1329,7 +1329,7 @@ public class Belts {
         
         class Source implements Belt.StepSource<U> {
             @Override
-            public U poll() throws Exception {
+            public U pull() throws Exception {
                 for (;;) {
                     lock.lockInterruptibly();
                     try {
@@ -1395,13 +1395,13 @@ public class Belts {
      * {@code permitsPerPartition}. If {@code permitsPerPartition} is greater than or equal to {@code concurrency}, this
      * segue gracefully degrades to {@link #mapBalanceOrdered mapBalanceOrdered}.
      *
-     * <p>When a worker polls an element, it first invokes the {@code classifier} on the element to determine a
+     * <p>When a worker pulls an element, it first invokes the {@code classifier} on the element to determine a
      * partition key. If the partition key is {@code null}, the worker will throw a {@link NullPointerException}.
      * Otherwise, the worker will add the element to a pending output buffer, first waiting until the buffer is not full
      * (size is below {@code bufferLimit}). Then, if the worker can acquire a partition permit, it will begin work on
      * the element, calling the {@code mapper} and then the resultant callable, before signaling a completed output and
      * releasing its permit. Otherwise, the worker will arrange for the element to be picked up when a permit becomes
-     * available, and resume polling.
+     * available, and resume pulling.
      *
      * <p>The {@code classifier} is invoked on elements in the order they arrived. The {@code mapper} is invoked on
      * elements with the same partition key in the order they arrived, but no particular order is guaranteed for
@@ -1413,7 +1413,7 @@ public class Belts {
      * are interrupted and awaited, and all elements starting with the first incomplete output are cleared from the
      * buffer.
      *
-     * <p>The segue's source can be safely polled and closed concurrently.
+     * <p>The segue's source can be safely pulled and closed concurrently.
      *
      * <p>Example:
      * {@snippet :
@@ -1474,7 +1474,7 @@ public class Belts {
                             if (item == null) {
                                 sourceLock.lockInterruptibly();
                                 try {
-                                    T in = source.poll();
+                                    T in = source.pull();
                                     if (in == null) {
                                         return true;
                                     }
@@ -1564,7 +1564,7 @@ public class Belts {
      * outputs based on input arrival. The number of concurrent workers created when draining is controlled by the given
      * {@code concurrency}.
      *
-     * <p>When a worker polls an element, it adds the element to a pending output buffer, first waiting until the buffer
+     * <p>When a worker pulls an element, it adds the element to a pending output buffer, first waiting until the buffer
      * is not full (size is below {@code bufferLimit}). Then, the worker will begin work on the element, calling the
      * {@code mapper} and then the resultant callable, before signaling a completed output.
      *
@@ -1576,7 +1576,7 @@ public class Belts {
      * including because the {@code mapper} or callable threw an exception - the remaining workers are interrupted and
      * awaited, and all elements starting with the first incomplete output are cleared from the buffer.
      *
-     * <p>The segue's source can be safely polled and closed concurrently.
+     * <p>The segue's source can be safely pulled and closed concurrently.
      *
      * <p>Example:
      * {@snippet :
@@ -1613,7 +1613,7 @@ public class Belts {
                         try {
                             sourceLock.lockInterruptibly();
                             try {
-                                T in = source.poll();
+                                T in = source.pull();
                                 if (in == null) {
                                     return true;
                                 }
@@ -1670,8 +1670,8 @@ public class Belts {
      * resultant downstream source yields output elements as they complete, which may not match the order that inputs
      * arrived. Any {@code null} outputs are discarded.
      *
-     * <p>This operator assumes that the upstream source supports concurrent polling, and any downstream sink supports
-     * concurrent offering. If necessary, this support can be patched-in using the {@link #synchronizeStepSource} and
+     * <p>This operator assumes that the upstream source supports concurrent pulling, and any downstream sink supports
+     * concurrent pushing. If necessary, this support can be patched-in using the {@link #synchronizeStepSource} and
      * {@link #synchronizeStepSink} operators.
      *
      * <p>Example:
@@ -1691,7 +1691,7 @@ public class Belts {
         return source -> {
             Objects.requireNonNull(source);
             Belt.StepSource<T> worker = () -> {
-                for (Callable<T> c; (c = source.poll()) != null; ) {
+                for (Callable<T> c; (c = source.pull()) != null; ) {
                     var t = c.call();
                     if (t != null) { // Skip nulls
                         return t;
@@ -1706,11 +1706,11 @@ public class Belts {
     
     /**
      * Returns an operator that balances computation of outputs across a limited number of concurrent workers. The
-     * resultant upstream sink offers output elements downstream as they complete, which may not match the order that
+     * resultant upstream sink pushes output elements downstream as they complete, which may not match the order that
      * inputs arrived. Any {@code null} outputs are discarded.
      *
-     * <p>This operator assumes that the downstream sink supports concurrent offering, and any upstream source supports
-     * concurrent polling. If necessary, this support can be patched-in using the {@link #synchronizeStepSink} and
+     * <p>This operator assumes that the downstream sink supports concurrent pushing, and any upstream source supports
+     * concurrent pulling. If necessary, this support can be patched-in using the {@link #synchronizeStepSink} and
      * {@link #synchronizeStepSource} operators.
      *
      * <p>Example:
@@ -1731,7 +1731,7 @@ public class Belts {
             Objects.requireNonNull(sink);
             Belt.StepSink<Callable<T>> worker = c -> {
                 var t = c.call();
-                return t == null || sink.offer(t); // Skip nulls
+                return t == null || sink.push(t); // Skip nulls
             };
             return balance(IntStream.range(0, concurrency).mapToObj(i -> worker).toList())
                 .compose(alsoComplete(sink));
@@ -1742,7 +1742,7 @@ public class Belts {
      * Returns a fan-out sink that forwards each input element to the first available sink among the given
      * {@code sinks}.
      *
-     * <p>This sink assumes that any upstream source supports concurrent polling. If necessary, this support can be
+     * <p>This sink assumes that any upstream source supports concurrent pulling. If necessary, this support can be
      * patched-in using the {@link #synchronizeStepSource} operator.
      *
      * <p>Example:
@@ -1798,12 +1798,12 @@ public class Belts {
             boolean draining = true;
             
             @Override
-            public boolean offer(T input) throws Exception {
+            public boolean push(T input) throws Exception {
                 if (!draining) {
                     return false;
                 }
                 for (var sink : theSinks) {
-                    draining &= sink.offer(input);
+                    draining &= sink.push(input);
                 }
                 return draining;
             }
@@ -1818,7 +1818,7 @@ public class Belts {
     }
     
     /**
-     * Returns a fan-out sink that selectively offers zero or more replacement elements to the given {@code sinks}, per
+     * Returns a fan-out sink that selectively pushes zero or more replacement elements to the given {@code sinks}, per
      * input element. The {@code router} is applied to each input element in conjunction with a
      * {@link BiConsumer biConsumer} that accepts the index of a sink in the given {@code sinks}, and a replacement
      * element. The {@code router} calls the biConsumer zero or more times to provide the replacement elements.
@@ -1828,10 +1828,10 @@ public class Belts {
      * TODO
      * }
      *
-     * @param router a function that offers replacement elements to selected sinks
+     * @param router a function that pushes replacement elements to selected sinks
      * @param eagerCancel if {@code true}, cancels when any sink cancels; else cancels when all sinks cancel
      * @param sinks the sinks
-     * @return a fan-out sink that selectively offers zero or more replacement elements to each of the given
+     * @return a fan-out sink that selectively pushes zero or more replacement elements to each of the given
      * {@code sinks}
      * @param <T> the upstream element type
      * @param <U> the downstream element type
@@ -1846,7 +1846,7 @@ public class Belts {
         BiConsumer<Integer, U> pusher = (i, u) -> {
             try {
                 var sink = theSinks.get(i); // Note: Can throw IOOBE
-                if (active.get(i) && !sink.offer(u)) {
+                if (active.get(i) && !sink.push(u)) {
                     active.clear(i);
                 }
             } catch (Error | RuntimeException e) {
@@ -1866,7 +1866,7 @@ public class Belts {
             boolean done = false;
             
             @Override
-            public boolean offer(T input) throws Exception {
+            public boolean push(T input) throws Exception {
                 if (done) {
                     return false;
                 }
@@ -1911,9 +1911,9 @@ public class Belts {
             int i = 0;
             
             @Override
-            public T poll() throws Exception {
+            public T pull() throws Exception {
                 for (; i < theSources.size(); i++) {
-                    T t = theSources.get(i).poll();
+                    T t = theSources.get(i).pull();
                     if (t != null) {
                         return t;
                     }
@@ -1969,7 +1969,7 @@ public class Belts {
      * Returns a fan-in source that yields each output element from the first available source among the given
      * {@code sources}.
      *
-     * <p>This source assumes that any downstream sink supports concurrent offering. If necessary, this support can be
+     * <p>This source assumes that any downstream sink supports concurrent pushing. If necessary, this support can be
      * patched-in using the {@link #synchronizeStepSink} operator.
      *
      * <p>Example:
@@ -2034,21 +2034,21 @@ public class Belts {
             static final int COMPLETED = -2;
             
             @Override
-            public T poll() throws Exception {
+            public T pull() throws Exception {
                 if (lastIndex <= NEW) {
                     if (lastIndex == COMPLETED) {
                         return null;
                     }
-                    // First poll - poll all sources to bootstrap the queue
+                    // First pull - pull all sources to bootstrap the queue
                     for (int i = 0; i < theSources.size(); i++) {
-                        var t = theSources.get(i).poll();
+                        var t = theSources.get(i).pull();
                         if (t != null) {
                             latest.offer(new Indexed<>(t, i));
                         }
                     }
                 } else {
-                    // Subsequent poll - poll from the source that last emitted
-                    var t = theSources.get(lastIndex).poll();
+                    // Subsequent pull - pull from the source that last emitted
+                    var t = theSources.get(lastIndex).pull();
                     if (t != null) {
                         latest.offer(new Indexed<>(t, lastIndex));
                     }
@@ -2099,12 +2099,12 @@ public class Belts {
             boolean done = false;
             
             @Override
-            public T poll() throws Exception {
+            public T pull() throws Exception {
                 if (done) {
                     return null;
                 }
-                T1 e1 = source1.poll();
-                T2 e2 = source2.poll();
+                T1 e1 = source1.pull();
+                T2 e2 = source2.pull();
                 if (e1 == null || e2 == null) {
                     done = true;
                     return null;
@@ -2157,7 +2157,7 @@ public class Belts {
                 
                 abstract class HelperSink<X, Y> implements Belt.StepSink<X> {
                     @Override
-                    public boolean offer(X e) throws Exception {
+                    public boolean push(X e) throws Exception {
                         Objects.requireNonNull(e);
                         lock.lockInterruptibly();
                         try {
@@ -2172,7 +2172,7 @@ public class Belts {
                                 ready.signal();
                             }
                             T t = combiner.apply(latest1, latest2);
-                            return sink.offer(t);
+                            return sink.push(t);
                         } finally {
                             lock.unlock();
                         }
@@ -2209,11 +2209,11 @@ public class Belts {
     }
     
     /**
-     * Returns a segue in which each offer to the sink must wait for a corresponding poll from the source, and vice
+     * Returns a segue in which each push to the sink must wait for a corresponding pull from the source, and vice
      * versa. In many cases, the {@link #buffer buffer} method is preferable to this method, as buffering provides
      * leeway for an upstream and downstream to temporarily proceed at different rates.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2221,7 +2221,7 @@ public class Belts {
      * TODO
      * }
      *
-     * @return a segue in which each offer to the sink must wait for a corresponding poll from the source, and vice
+     * @return a segue in which each push to the sink must wait for a corresponding pull from the source, and vice
      * versa
      * @param <T> the element type
      */
@@ -2241,9 +2241,9 @@ public class Belts {
             
             class Sink implements Belt.StepSink<T> {
                 @Override
-                public boolean offer(T input) throws Exception {
+                public boolean push(T input) throws Exception {
                     Objects.requireNonNull(input);
-                    sinkLock.lockInterruptibly(); // Prevent overwriting offers
+                    sinkLock.lockInterruptibly(); // Prevent overwriting pushes
                     try {
                         lock.lockInterruptibly();
                         try {
@@ -2300,7 +2300,7 @@ public class Belts {
             
             class Source implements Belt.StepSource<T> {
                 @Override
-                public T poll() throws Exception {
+                public T pull() throws Exception {
                     lock.lockInterruptibly();
                     try {
                         if (state == CLOSED) {
@@ -2358,11 +2358,11 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that buffers offered elements to respond to later polls. If the buffer is empty, polls will
-     * block. If the buffer is full (size equals {@code bufferLimit}), offers will block. Buffering provides leeway for
+     * Returns a segue that buffers pushed elements to respond to later pulls. If the buffer is empty, pulls will
+     * block. If the buffer is full (size equals {@code bufferLimit}), pushes will block. Buffering provides leeway for
      * an upstream and downstream to temporarily proceed at different rates.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2371,7 +2371,7 @@ public class Belts {
      * }
      *
      * @param bufferLimit the (positive) maximum number of buffered elements
-     * @return a segue that buffers offered elements to respond to later polls
+     * @return a segue that buffers pushed elements to respond to later pulls
      * @param <T> the element type
      */
     public static <T> Belt.StepSegue<T ,T> buffer(int bufferLimit) {
@@ -2389,24 +2389,24 @@ public class Belts {
             }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchOfferDeadline(Instant.MAX);
+                    ctl.latchPushDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchOfferDeadline(Instant.MIN);
+                    ctl.latchPushDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (queue.peek() != null) {
                         return;
                     } else if (!done) {
-                        ctl.latchPollDeadline(Instant.MAX);
+                        ctl.latchPullDeadline(Instant.MAX);
                         return;
                     } // else fall-through
                 }
@@ -2416,7 +2416,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
             }
         }
         
@@ -2424,11 +2424,11 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that injects additional elements - derived from the last buffered element - to respond to a poll
+     * Returns a segue that injects additional elements - derived from the last buffered element - to respond to a pull
      * if no elements are buffered. Injection stops once all injected elements are yielded, or a subsequent element is
      * buffered.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2439,7 +2439,7 @@ public class Belts {
      * @param initial an initial element to seed the buffer; ignored if {@code null}
      * @param mapper a function that expands an element to an iterator of zero or more elements to inject
      * @param bufferLimit the (positive) maximum number of buffered elements
-     * @return a segue that injects additional elements - derived from the last buffered element - to respond to a poll
+     * @return a segue that injects additional elements - derived from the last buffered element - to respond to a pull
      * if no elements are buffered
      * @param <T> the element type
      */
@@ -2462,28 +2462,28 @@ public class Belts {
                 queue = new ArrayDeque<>(bufferLimit);
                 if (initial != null) {
                     queue.offer(initial);
-                    ctl.latchPollDeadline(Instant.MIN);
+                    ctl.latchPullDeadline(Instant.MIN);
                 } else {
-                    ctl.latchPollDeadline(Instant.MAX);
+                    ctl.latchPullDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 prev = null;
                 iter = Collections.emptyIterator();
                 queue.offer(input);
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchOfferDeadline(Instant.MAX);
+                    ctl.latchPushDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchOfferDeadline(Instant.MIN);
+                    ctl.latchPushDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (!done) {
                         prev = head;
@@ -2498,7 +2498,7 @@ public class Belts {
                     if (iter.hasNext()) {
                         ctl.latchOutput(iter.next());
                     } else {
-                        ctl.latchPollDeadline(Instant.MAX);
+                        ctl.latchPullDeadline(Instant.MAX);
                     }
                 } else {
                     ctl.latchClose();
@@ -2508,7 +2508,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
             }
         }
         
@@ -2516,14 +2516,14 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that accumulates offered elements into a batch, permitting the batch to be yielded once a
+     * Returns a segue that accumulates pushed elements into a batch, permitting the batch to be yielded once a
      * deadline expires. The deadline is recalculated from the current batch after each accumulation.
      *
      * <p>If the calculated deadline is an empty {@code Optional}, the previous deadline is retained (initially
      * {@link Instant#MAX}). If the calculated deadline is a present {@code Optional} containing {@link Instant#MIN},
-     * subsequent offers will block until the current batch is yielded.
+     * subsequent pushes will block until the current batch is yielded.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2531,11 +2531,11 @@ public class Belts {
      * TODO
      * }
      *
-     * @param batchSupplier a function that creates an initial (non-{@code null}) batch, called on initial offer and on
-     *                      offers following a poll
-     * @param accumulator a function that folds an offered element into the current batch
+     * @param batchSupplier a function that creates an initial (non-{@code null}) batch, called on initial push and on
+     *                      pushes following a pull
+     * @param accumulator a function that folds a pushed element into the current batch
      * @param deadlineMapper a function that optionally calculates a deadline for the current batch after accumulation
-     * @return a segue that accumulates offered elements into a batch, permitting the batch to be yielded once a
+     * @return a segue that accumulates pushed elements into a batch, permitting the batch to be yielded once a
      * deadline expires
      * @param <T> the upstream element type
      * @param <A> the batch type
@@ -2555,7 +2555,7 @@ public class Belts {
             protected void onInit(DeadlineSegue.SinkController ctl) { }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 A b = batch;
                 if (b == null) {
                     b = Objects.requireNonNull(batchSupplier.get());
@@ -2564,16 +2564,16 @@ public class Belts {
                 Instant deadline = deadlineMapper.apply(b).orElse(null);
                 batch = b; // No more exception risk -- assign batch
                 if (deadline != null) {
-                    ctl.latchPollDeadline(deadline);
+                    ctl.latchPullDeadline(deadline);
                     if (deadline == Instant.MIN) {
                         // Alternative implementations might adjust or reset the buffer instead of blocking
-                        ctl.latchOfferDeadline(Instant.MAX);
+                        ctl.latchPushDeadline(Instant.MAX);
                     }
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<A> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<A> ctl) {
                 if (done) {
                     ctl.latchClose();
                     if (batch == null) {
@@ -2582,14 +2582,14 @@ public class Belts {
                 }
                 ctl.latchOutput(batch);
                 batch = null;
-                ctl.latchPollDeadline(Instant.MAX);
-                ctl.latchOfferDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MAX);
+                ctl.latchPushDeadline(Instant.MIN);
             }
             
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
             }
         }
         
@@ -2597,23 +2597,23 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that uses a token-bucketing scheme to limit the rate at which offered elements can be yielded.
-     * In this scheme, each offered element calculates a cost, in tokens, to yield that element. Tokens accrue at a
+     * Returns a segue that uses a token-bucketing scheme to limit the rate at which pushed elements can be yielded.
+     * In this scheme, each pushed element calculates a cost, in tokens, to yield that element. Tokens accrue at a
      * fixed rate, given by {@code tokenInterval}. The initial and maximum number of unused tokens is given by
-     * {@code tokenLimit} - tokens that accrue beyond this maximum are discarded. Polls return when there are buffered
+     * {@code tokenLimit} - tokens that accrue beyond this maximum are discarded. Pulls return when there are buffered
      * elements and sufficient unused tokens to yield the element at the front of the buffer, using up those tokens.
      * Elements that cost more than the {@code tokenLimit} temporarily increase the limit to match their cost when they
      * reach the front of the buffer.
      *
-     * <p>If an offered element calculates a negative cost, an {@link IllegalStateException} is thrown from the offer.
-     * If an offered element would cause the total cost of buffered elements to exceed {@link Long#MAX_VALUE}, an
-     * {@link ArithmeticException} is thrown from the offer.
+     * <p>If a pushed element calculates a negative cost, an {@link IllegalStateException} is thrown from the push.
+     * If a pushed element would cause the total cost of buffered elements to exceed {@link Long#MAX_VALUE}, an
+     * {@link ArithmeticException} is thrown from the push.
      *
-     * <p>Note that when insufficient tokens are available to yield the next element, polls enter timed waits that may
+     * <p>Note that when insufficient tokens are available to yield the next element, pulls enter timed waits that may
      * have limited resolution, typically in the range of milliseconds. This can lead to an observed emission rate
      * significantly slower than what the function arguments allow.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2622,10 +2622,10 @@ public class Belts {
      * }
      *
      * @param tokenInterval a (positive) interval at which tokens accrue
-     * @param costMapper a function that calculates the (non-negative) cost, in tokens, to yield an offered element
+     * @param costMapper a function that calculates the (non-negative) cost, in tokens, to yield a pushed element
      * @param tokenLimit a (positive) initial and maximum number of unused tokens
      * @param bufferLimit a (positive) maximum number of buffered elements
-     * @return a segue that uses a token-bucketing scheme to limit the rate at which offered elements can be yielded
+     * @return a segue that uses a token-bucketing scheme to limit the rate at which pushed elements can be yielded
      * @param <T> the element type
      */
     public static <T> Belt.StepSegue<T, T> throttle(Duration tokenInterval,
@@ -2666,7 +2666,7 @@ public class Belts {
             }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 long elementCost = costMapper.applyAsLong(input);
                 if (elementCost < 0) {
                     throw new IllegalStateException("Element cost cannot be negative");
@@ -2675,15 +2675,15 @@ public class Belts {
                 var w = new Weighted<>(input, elementCost);
                 queue.offer(w);
                 if (queue.peek() == w) {
-                    ctl.latchPollDeadline(Instant.MIN); // Let source-side do token math
+                    ctl.latchPullDeadline(Instant.MIN); // Let source-side do token math
                 }
                 if (queue.size() == bufferLimit) {
-                    ctl.latchOfferDeadline(Instant.MAX);
+                    ctl.latchPushDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<T> ctl) {
                 Weighted<T> head = queue.peek();
                 if (head == null) {
                     ctl.latchClose();
@@ -2704,18 +2704,18 @@ public class Belts {
                     tokens -= head.cost;
                     totalCost -= head.cost;
                     queue.poll();
-                    ctl.latchOfferDeadline(Instant.MIN);
+                    ctl.latchPushDeadline(Instant.MIN);
                     ctl.latchOutput(head.element);
                     head = queue.peek();
                     if (head == null) {
                         if (done) {
                             ctl.latchClose();
                         } else {
-                            ctl.latchPollDeadline(Instant.MAX);
+                            ctl.latchPullDeadline(Instant.MAX);
                         }
                         return;
                     } else if (tokens >= head.cost) {
-                        ctl.latchPollDeadline(Instant.MIN);
+                        ctl.latchPullDeadline(Instant.MIN);
                         return;
                     }
                     // else tokens < head.cost; Fall-through to scheduling
@@ -2723,14 +2723,14 @@ public class Belts {
                 // Schedule to wake up when we have enough tokens for next emission
                 tempTokenLimit = head.cost;
                 long tokensNeeded = head.cost - tokens;
-                ctl.latchPollDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
+                ctl.latchPullDeadline(now.plusNanos(tokenIntervalNanos * tokensNeeded - nanosSinceLastAccrual));
             }
             
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (queue.isEmpty()) {
-                    ctl.latchPollDeadline(Instant.MIN);
+                    ctl.latchPullDeadline(Instant.MIN);
                 }
             }
         }
@@ -2739,10 +2739,10 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that calculates a deadline for each offered element, buffering elements at least until their
+     * Returns a segue that calculates a deadline for each pushed element, buffering elements at least until their
      * deadline expires. Elements with nearer deadlines may jump ahead of elements that arrived earlier.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2752,7 +2752,7 @@ public class Belts {
      *
      * @param deadlineMapper a function that calculates a deadline for an element
      * @param bufferLimit the (positive) maximum number of buffered elements
-     * @return a segue that calculates a deadline for each offered element, buffering elements at least until their
+     * @return a segue that calculates a deadline for each pushed element, buffering elements at least until their
      * deadline expires
      * @param <T> the element type
      */
@@ -2773,32 +2773,32 @@ public class Belts {
             }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 Instant deadline = Objects.requireNonNull(deadlineMapper.apply(input));
                 Expiring<T> e = new Expiring<>(input, deadline);
                 pq.offer(e);
                 if (pq.peek() == e) {
-                    ctl.latchPollDeadline(deadline);
+                    ctl.latchPullDeadline(deadline);
                 }
                 if (pq.size() >= bufferLimit) {
-                    ctl.latchOfferDeadline(Instant.MAX);
+                    ctl.latchPushDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<T> ctl) {
                 Expiring<T> head = pq.poll();
                 if (head == null) {
                     ctl.latchClose();
                     return;
                 }
-                ctl.latchOfferDeadline(Instant.MIN);
+                ctl.latchPushDeadline(Instant.MIN);
                 ctl.latchOutput(head.element);
                 head = pq.peek();
                 if (head != null) {
-                    ctl.latchPollDeadline(head.deadline);
+                    ctl.latchPullDeadline(head.deadline);
                 } else if (!done) {
-                    ctl.latchPollDeadline(Instant.MAX);
+                    ctl.latchPullDeadline(Instant.MAX);
                 } else {
                     ctl.latchClose();
                 }
@@ -2808,7 +2808,7 @@ public class Belts {
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
                 if (pq.isEmpty()) {
-                    ctl.latchPollDeadline(Instant.MIN);
+                    ctl.latchPullDeadline(Instant.MIN);
                 }
             }
         }
@@ -2817,10 +2817,10 @@ public class Belts {
     }
     
     /**
-     * Returns a segue that injects an additional element to respond to a poll if no elements are buffered and a timeout
-     * expired since the last poll. The first timeout begins when a poll meets an empty buffer.
+     * Returns a segue that injects an additional element to respond to a pull if no elements are buffered and a timeout
+     * expired since the last pull. The first timeout begins when a pull meets an empty buffer.
      *
-     * <p>The segue's sink can be safely offered to and completed concurrently. Its source can be safely polled and
+     * <p>The segue's sink can be safely pushed to and completed concurrently. Its source can be safely pulled and
      * closed concurrently.
      *
      * <p>Example:
@@ -2831,8 +2831,8 @@ public class Belts {
      * @param timeout the (positive) timeout duration
      * @param extraSupplier a supplier used to generate injected elements
      * @param bufferLimit the (positive) maximum number of buffered elements
-     * @return a segue that injects an additional element to respond to a poll if no elements are buffered within a
-     * timeout since the last poll
+     * @return a segue that injects an additional element to respond to a pull if no elements are buffered within a
+     * timeout since the last pull
      * @param <T> the element type
      */
     public static <T> Belt.StepSegue<T, T> keepAlive(Duration timeout,
@@ -2854,30 +2854,30 @@ public class Belts {
             @Override
             protected void onInit(DeadlineSegue.SinkController ctl) {
                 queue = new ArrayDeque<>(bufferLimit);
-                ctl.latchPollDeadline(clock().instant().plus(timeout));
+                ctl.latchPullDeadline(clock().instant().plus(timeout));
             }
             
             @Override
-            protected void onOffer(DeadlineSegue.SinkController ctl, T input) {
+            protected void onPush(DeadlineSegue.SinkController ctl, T input) {
                 queue.offer(input);
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
                 if (queue.size() >= bufferLimit) {
-                    ctl.latchOfferDeadline(Instant.MAX);
+                    ctl.latchPushDeadline(Instant.MAX);
                 }
             }
             
             @Override
-            protected void onPoll(DeadlineSegue.SourceController<T> ctl) {
+            protected void onPull(DeadlineSegue.SourceController<T> ctl) {
                 T head = queue.poll();
                 if (head != null) {
-                    ctl.latchOfferDeadline(Instant.MIN);
+                    ctl.latchPushDeadline(Instant.MIN);
                     ctl.latchOutput(head);
                     if (queue.isEmpty() && !done) {
-                        ctl.latchPollDeadline(clock().instant().plus(timeout));
+                        ctl.latchPullDeadline(clock().instant().plus(timeout));
                     }
                 } else if (!done) {
                     ctl.latchOutput(extraSupplier.get());
-                    ctl.latchPollDeadline(clock().instant().plus(timeout));
+                    ctl.latchPullDeadline(clock().instant().plus(timeout));
                 } else {
                     ctl.latchClose();
                 }
@@ -2886,7 +2886,7 @@ public class Belts {
             @Override
             protected void onComplete(DeadlineSegue.SinkController ctl) {
                 done = true;
-                ctl.latchPollDeadline(Instant.MIN);
+                ctl.latchPullDeadline(Instant.MIN);
             }
         }
         
@@ -2900,7 +2900,7 @@ public class Belts {
      * will throw a {@link NullPointerException}.
      *
      * <p>The source does not adjust the parallelism setting of the stream. In particular, if the stream
-     * {@link Stream#isParallel() isParallel}, draining the source may issue concurrent offers to the sink.
+     * {@link Stream#isParallel() isParallel}, draining the source may issue concurrent pushes to the sink.
      *
      * @param stream the stream to yield from
      * @return a source that yields the elements from the given {@code stream}
@@ -2923,7 +2923,7 @@ public class Belts {
                     return stream.allMatch(el -> {
                         Objects.requireNonNull(el);
                         try {
-                            return sink.offer(el);
+                            return sink.push(el);
                         } catch (Error | RuntimeException e) {
                             throw e;
                         } catch (Exception e) {
@@ -2951,7 +2951,7 @@ public class Belts {
     }
     
     /**
-     * Returns a source that yields the elements from the given {@code iterator}. Each time the source is polled, it
+     * Returns a source that yields the elements from the given {@code iterator}. Each time the source is pulled, it
      * will advance the iterator, until the iterator is depleted. If the iterator ever yields {@code null}, the source
      * will throw a {@link NullPointerException}.
      *
@@ -2965,7 +2965,7 @@ public class Belts {
     
     /**
      * Returns a source that yields the elements from the given {@code iterator}, and performs the given {@code onClose}
-     * operation when closed. Each time the source is polled, it will advance the iterator, until the iterator is
+     * operation when closed. Each time the source is pulled, it will advance the iterator, until the iterator is
      * depleted. If the iterator ever yields {@code null}, the source will throw a {@link NullPointerException}.
      *
      * @param iterator the iterator to yield from
@@ -2979,7 +2979,7 @@ public class Belts {
         
         class IteratorSource implements Belt.StepSource<T> {
             @Override
-            public T poll() {
+            public T pull() {
                 return iterator.hasNext() ? Objects.requireNonNull(iterator.next()) : null;
             }
             
@@ -3272,8 +3272,8 @@ public class Belts {
         }
         
         @Override
-        public boolean offer(In input) throws Exception {
-            return ((Belt.StepSink<? super In>) sink).offer(input);
+        public boolean push(In input) throws Exception {
+            return ((Belt.StepSink<? super In>) sink).push(input);
         }
     }
     
@@ -3283,8 +3283,8 @@ public class Belts {
         }
         
         @Override
-        public Out poll() throws Exception {
-            return ((Belt.StepSource<? extends Out>) source).poll();
+        public Out pull() throws Exception {
+            return ((Belt.StepSource<? extends Out>) source).pull();
         }
     }
     

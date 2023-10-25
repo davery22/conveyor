@@ -12,7 +12,7 @@ comprehensible to me.
    - Note: Birth of Controller interfaces (https://github.com/davery22/conveyor/commit/36e6be25d78bce40865ee2e3acd046bd5d54cf1f#diff-359c76bb1e4be9b1f9e3363be3bd9eb8d2afae41643d4ef23bd75139b82c44a2R507)
    - Note: Designing the #throttle operator
 3. Birth of DeadlineSegue ('Tunnel') (https://github.com/davery22/conveyor/commit/a5c615378e6fd18fa25d1bb7e6004c8b047f66dd#diff-359c76bb1e4be9b1f9e3363be3bd9eb8d2afae41643d4ef23bd75139b82c44a2R522)
-   - Note: offer/complete/poll/close
+   - Note: push/complete/pull/close
    - Note: Retaining Controller interfaces, composition
 4. Birth of StepSource and StepSink for #zip (https://github.com/davery22/conveyor/commit/f6e66af82bac63cb90166051255d0ea76321ac33#diff-10d25d78f420787c7dea4bec78f4ec80b6a47ce9f8ec754a25762c7ae5179089R245)
    - Note: First hints of plain Source (#zipLatest)
@@ -92,7 +92,7 @@ Why no 'plain' variants of some operators
 Document:
 
 A Source that is replayable should either be plain or Supplier&lt;Step&gt;
-- The same StepSource's poll can't yield the same sequence at different times to different callers
+- The same StepSource's pull can't yield the same sequence at different times to different callers
 - ...If drainToSink can yield the same elements on subsequent calls, then #spill is naive...
 - ...If it can't, need Supplier<Step> for 'cold' flows...
 - No guarantees about non-repetition from plain Sinks/Sources (unless DOCUMENTED)
@@ -100,30 +100,30 @@ A Source that is replayable should either be plain or Supplier&lt;Step&gt;
 
 Discuss:
 
-There is no way to know that a source is empty without polling it.
-And once we poll it and get something, there is no way to put it back.
-So if we need to poll 2 sources to produce 1 output, and 1 source is empty,
+There is no way to know that a source is empty without pulling it.
+And once we pull it and get something, there is no way to put it back.
+So if we need to pull 2 sources to produce 1 output, and 1 source is empty,
 we will end up discarding the element from the other source.
-Likewise, must offer to a Sink to know whether it is cancelled
+Likewise, must push to a Sink to know whether it is cancelled
 
 Discuss:
 
-Lack of 'timed' or 'try' offer/poll
+Lack of 'timed' or 'try' push/pull
 
 Document:
 
-- drainFromSource(StepSource) should only call #poll on the StepSource
-- drainToSink(StepSink) should only call #offer on the StepSink
+- drainFromSource(StepSource) should only call #pull on the StepSource
+- drainToSink(StepSink) should only call #push on the StepSink
 
 Discuss:
 
 Fundamentally non-step operators
 - Cannot write a stepBalance, even if it takes StepSinks. Even if we wrap the sinks to know which ones are
-  "currently" blocked in offer(), that would only be aware of offers that we submitted, not other threads using the sink.
-- Cannot write a stepMerge, for the same reason - cannot know which sources may be blocked in poll() by another thread.
-- Cannot write a stepZipLatest, because poll() should return as soon as the first interior poll() completes, but
-  that would imply unscoped threads running the other interior polls. Even if we waited for all polls, that still
-  would not work, because correct behavior means that we should re-poll each source as soon as its previous poll
+  "currently" blocked in push(), that would only be aware of pushes that we submitted, not other threads using the sink.
+- Cannot write a stepMerge, for the same reason - cannot know which sources may be blocked in pull() by another thread.
+- Cannot write a stepZipLatest, because pull() should return as soon as the first interior pull() completes, but
+  that would imply unscoped threads running the other interior pulls. Even if we waited for all pulls, that still
+  would not work, because correct behavior means that we should re-pull each source as soon as its previous pull
   finishes, since sources may emit at different rates.
 
 Discuss:
@@ -131,15 +131,15 @@ Discuss:
 Why can't we write a step stage from non-step stages?
 Non-step stages can only "drain". To wrap in step, we would either need to:
 
-StepSource: When we poll(), internal StepSink (eventually) returns an element buffered from original Source.
+StepSource: When we pull(), internal StepSink (eventually) returns an element buffered from original Source.
 - In other words we've made a Segue!
-- If we drain the original Source on first poll(), we need unbounded buffering to complete within poll()
-- Otherwise, the original Source would already need to be draining in an unscoped thread, outside our poll()
+- If we drain the original Source on first pull(), we need unbounded buffering to complete within pull()
+- Otherwise, the original Source would already need to be draining in an unscoped thread, outside our pull()
 
-StepSink: When we offer(), internal StepSource buffers so original Sink can see result on poll()
+StepSink: When we push(), internal StepSource buffers so original Sink can see result on pull()
 - In other words we've made a Segue!
-- If we drain the original Sink on first offer(), we deadlock because offer() is now waiting for more offers
-- Otherwise, the original Sink would already need to be draining in an unscoped thread, outside our offer()
+- If we drain the original Sink on first push(), we deadlock because push() is now waiting for more pushes
+- Otherwise, the original Sink would already need to be draining in an unscoped thread, outside our push()
 
 Discuss:
 
@@ -147,7 +147,7 @@ Discuss:
 - Non-step from step     - ALWAYS possible - See above
 - Step from non-step     - NEVER possible - Requires external asynchrony to pause draining, or unbounded buffering
   (possible using other buffer-overflow handling, eg error, drop)
-- Step from step         - SOMETIMES possible - If asynchrony is scoped to the poll/offer, or buffering is bounded
+- Step from step         - SOMETIMES possible - If asynchrony is scoped to the pull/push, or buffering is bounded
 
 Discuss:
 
@@ -167,8 +167,8 @@ Discuss:
 
 DeadlineSegue design
 - Using deadlines on both sides to avoid the need for direct management of Conditions, timed waits, etc
-- Latching deadlines and waiting at the start of offer/poll, to avoid the need for more locks, and make error recovery possible
-    - So some use cases, like 'transfer' (wait after updating state) and 'offer multiple' (update + wait multiple times), are inexpressible
+- Latching deadlines and waiting at the start of push/pull, to avoid the need for more locks, and make error recovery possible
+    - So some use cases, like 'transfer' (wait after updating state) and 'push multiple' (update + wait multiple times), are inexpressible
     - This is by design - aiming for simplicity for common cases, rather than maximum expressiveness or optimal performance
 
 Discuss:
@@ -182,7 +182,7 @@ Discuss:
 The effect of buffers/staging on processing
 - eg in #zip, can't know we will use either value until we have both
 - eg in #broadcast with eagerCancel, a sink may fail with buffered elements, meaning other sinks process more than it
-    - Just because #offer returned true doesn't mean element was processed by some downstream
+    - Just because #push returned true doesn't mean element was processed by some downstream
 
 Document:
 
@@ -196,10 +196,10 @@ This is equivalent to putting a buffer on the input to get a Step input, so the 
 Discuss:
 
 Capability models
-- A Sink demands a stronger capability from its [Step]Source - the capability to poll()
-- A Source demands a stronger capability from its [Step]Sink - the capability to offer()
+- A Sink demands a stronger capability from its [Step]Source - the capability to pull()
+- A Source demands a stronger capability from its [Step]Sink - the capability to push()
 - An operator can sometimes provide a stronger capability by demanding a stronger capability from its inputs
-- The capability to #poll/#offer implies that the [Step]Source/Sink does not have a long-lived asynchronous scope
+- The capability to #pull/#push implies that the [Step]Source/Sink does not have a long-lived asynchronous scope
 
 Discuss:
 
@@ -222,9 +222,9 @@ Why not implicit close/complete[Abruptly] (inside #drainX) for plain Sinks/Sourc
 Discuss:
 
 When to define plain Sink/Source?
-- When we want sources to race-to-offer (eg merge), or sinks to race-to-poll (eg balance)
+- When we want sources to race-to-push (eg merge), or sinks to race-to-pull (eg balance)
 - When step-at-a-time is would require extra work/slowdown (eg concat), or unbounded buffering (eg gather)
-- When poll/offer would violate structured concurrency (leak threads)
+- When pull/push would violate structured concurrency (leak threads)
 
 Discuss:
 

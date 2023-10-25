@@ -2,13 +2,12 @@
 
 `DeadlineSegue` made implementing operators easier by being opinionated, at the cost of some baggage and limitations. So
 around the same time, I introduced an unopinionated interface above it: `StepSegue` (both of these had different names
-at the time). `StepSegue` had four abstract methods: `offer`, `complete`, `poll`, and `close`. The `offer` and `poll`
-methods were borrowed from BlockingQueue (though the semantics do not exactly match anything there), while the
-`complete` and `close` methods were added to signal that the 'producer completed' or 'consumer cancelled', respectively.
-A 'producer' thread would repeatedly `offer` and eventually `complete`, while a 'consumer' thread would repeatedly
-`poll` and eventually `close`. This was very much like a BlockingQueue with termination signals built-in, and it was
-meant to be used that way. For example, applying an early version of the `batch` segue would have looked something like
-this:
+at the time). `StepSegue` had four abstract methods: `push`, `complete`, `pull`, and `close`. The `push` and `pull`
+methods were adapted from BlockingQueue's `put` and `take`, respectively, while the `complete` and `close` methods were
+added to signal that the 'producer completed' or 'consumer cancelled', respectively. A 'producer' thread would
+repeatedly `push` and eventually `complete`, while a 'consumer' thread would repeatedly `pull` and eventually `close`.
+This was very much like a BlockingQueue with termination signals built-in, and it was meant to be used that way. For
+example, applying an early version of the `batch` segue would have looked something like this:
 
 ``` java
 try (var scope = new StructuredTaskScope<>()) {
@@ -25,7 +24,7 @@ try (var scope = new StructuredTaskScope<>()) {
         try {
             for (Callable<Result> unit : work) {
                 Result result = unit.call();
-                if (!batch.offer(result)) {
+                if (!batch.push(result)) {
                     break;
                 }
             }
@@ -38,7 +37,7 @@ try (var scope = new StructuredTaskScope<>()) {
     
     Subtask<Void> consumer = scope.fork(() -> {
         try (batch) {
-            for (List<Result> buffer; (buffer = batch.poll()) != null; ) {
+            for (List<Result> buffer; (buffer = batch.pull()) != null; ) {
                 database.batchWrite(buffer);
             }
         }
@@ -51,7 +50,7 @@ try (var scope = new StructuredTaskScope<>()) {
 
 This is still imperatively managing threads, but offers much better encapsulation than before `StepSegue` existed. The
 `producer` and `consumer` names might be starting to feel odd - in reality both threads are fulfilling a 'producer' and
-'consumer' role, but the consumption by `batch.offer` and production by `batch.poll` is glossed over. Though we could
+'consumer' role, but the consumption by `batch.push` and production by `batch.pull` is glossed over. Though we could
 still write the code very similarly to this today, we would probably factor the 'work processing' into a Source, and the
 'batch writing' into a Sink. This would allow us to connect and `run` the underlying Stations, which under the hood
 would pretty much look like the two threads above (but with the surrounding 'complete/close protocol' correctly handled
@@ -71,13 +70,13 @@ what I eventually named them. For the time being, `StepSegue` inherited from bot
 
 A trickier situation  was `zip`'s cousin: `zipLatest` (sometimes called `combineLatest`). Like `zip`, `zipLatest` works
 off of two sources, but emits a combined element whenever <em>either</em> source emits, using the latest seen element
-from both. This wouldn't be possible if `zipLatest` had to `poll` both sources, because "latest" in this context implies
+from both. This wouldn't be possible if `zipLatest` had to `pull` both sources, because "latest" in this context implies
 that elements are arriving independently of the operator asking for them. What I found I could do is consume all
 elements from both sources in concurrent threads, with some synchronization to combine the latest elements as they
-arrive, and offer the result to a downstream sink. Interestingly, this new kind of 'source' (which became `Source`)
-could not support polling, but <em>required</em> a 'sink' that supported offering - `StepSink`. I encountered the dual
-to this when I implemented `balance` - a 'sink' (`Sink`) that could not support offering, but required a 'source' that
-supported polling - `StepSource`.
+arrive, and push the result to a downstream sink. Interestingly, this new kind of 'source' (which became `Source`)
+could not support pulling, but <em>required</em> a 'sink' that supported pushing - `StepSink`. I encountered the dual to
+this when I implemented `balance` - a 'sink' (`Sink`) that could not support pushing, but required a 'source' that
+supported pulling - `StepSource`.
 
 The complete set of interfaces up to this point were:
  - `Sink`
@@ -94,7 +93,7 @@ but it was also trivial to adapt previous 'driver' code to implement them. Here 
 Belt.Source<Result> resultSource = sink -> {
     for (Callable<Result> unit : work) {
         Result result = unit.call();
-        if (!sink.offer(result)) {
+        if (!sink.push(result)) {
             return false;
         }
     }
@@ -102,7 +101,7 @@ Belt.Source<Result> resultSource = sink -> {
 }
 
 Belt.Sink<List<Result>> writeSink = source -> {
-    for (List<Result> buffer; (buffer = source.poll()) != null; ) {
+    for (List<Result> buffer; (buffer = source.pull()) != null; ) {
         database.batchWrite(buffer);
     }
     return true;

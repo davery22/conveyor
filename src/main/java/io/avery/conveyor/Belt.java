@@ -190,15 +190,15 @@ public class Belt {
     @FunctionalInterface
     public non-sealed interface Sink<In> extends Stage {
         /**
-         * Polls as many elements as possible from the source to this sink. This proceeds until either an exception is
+         * Pulls as many elements as possible from the source to this sink. This proceeds until either an exception is
          * thrown, this sink cancels, or this sink is unable to accept more elements from the source (which does not
          * necessarily mean the source drained). Returns {@code true} if the source definitely drained, meaning a call
-         * to {@link StepSource#poll poll} returned {@code null}; else returns {@code false}.
+         * to {@link StepSource#pull pull} returned {@code null}; else returns {@code false}.
          *
-         * @implSpec Implementors should restrict to {@link StepSource#poll polling} from the source. Closing the source
+         * @implSpec Implementors should restrict to {@link StepSource#pull pulling} from the source. Closing the source
          * is the caller's responsibility, as the source may be reused after this method is called.
          *
-         * <p>Implementors should document if they concurrently poll from the source, as this is not safe for all
+         * <p>Implementors should document if they concurrently pull from the source, as this is not safe for all
          * sources.
          *
          * @param source the source to drain from
@@ -210,10 +210,10 @@ public class Belt {
         /**
          * Signals any nearest downstream boundary sources to stop yielding elements that arrive after this signal.
          *
-         * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
+         * @implSpec A boundary sink should implement its {@link StepSink#push push} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should return
-         * {@code null} from {@link StepSource#poll poll} and {@code false} from {@link Source#drainToSink drainToSink}
+         * {@code null} from {@link StepSource#pull pull} and {@code false} from {@link Source#drainToSink drainToSink}
          * after yielding all values that arrived before it received this signal.
          *
          * <p>A sink that delegates to downstream sinks should call {@code complete} on each downstream sink before
@@ -234,11 +234,11 @@ public class Belt {
          * Signals any nearest downstream boundary sources to stop yielding elements and throw
          * {@link UpstreamException}.
          *
-         * @implSpec A boundary sink should implement its {@link StepSink#offer offer} and
+         * @implSpec A boundary sink should implement its {@link StepSink#push push} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should throw an
          * {@link UpstreamException}, wrapping the cause passed to this method, upon initiating any subsequent calls to
-         * {@link StepSource#poll poll} or subsequent offers in {@link Source#drainToSink drainToSink}.
+         * {@link StepSource#pull pull} or subsequent pushes in {@link Source#drainToSink drainToSink}.
          *
          * <p>A sink that delegates to downstream sinks should call {@code completeAbruptly} on each downstream sink
          * before returning from this method, <strong>even if this method throws</strong>. If completing any sink throws
@@ -376,15 +376,15 @@ public class Belt {
     @FunctionalInterface
     public non-sealed interface Source<Out> extends Stage, AutoCloseable {
         /**
-         * Offers as many elements as possible from this source to the sink. This proceeds until either an exception is
-         * thrown, this source is drained, or this source is unable to offer more elements to the sink (which does not
+         * Pushes as many elements as possible from this source to the sink. This proceeds until either an exception is
+         * thrown, this source is drained, or this source is unable to push more elements to the sink (which does not
          * necessarily mean the sink cancelled). Returns {@code false} if the sink definitely cancelled, meaning a call
-         * to {@link StepSink#offer offer} returned {@code false}; else returns {@code true}.
+         * to {@link StepSink#push push} returned {@code false}; else returns {@code true}.
          *
-         * @implSpec Implementors should restrict to {@link StepSink#offer offering} to the sink. Completing the sink is
+         * @implSpec Implementors should restrict to {@link StepSink#push pushing} to the sink. Completing the sink is
          * the caller's responsibility, as the sink may be reused after this method is called.
          *
-         * <p>Implementors should document if they concurrently offer to the sink, as this is not safe for all sinks.
+         * <p>Implementors should document if they concurrently push to the sink, as this is not safe for all sinks.
          *
          * @param sink the sink to drain to
          * @return {@code false} if the sink cancelled
@@ -396,8 +396,8 @@ public class Belt {
          * Relinquishes any underlying resources held by this source.
          *
          * @implSpec Calling this method may cause this source to stop yielding elements from
-         * {@link StepSource#poll poll} and {@link #drainToSink drainToSink}. In that case, if this is a boundary
-         * source, the linked boundary sink should implement its {@link StepSink#offer offer} and
+         * {@link StepSource#pull pull} and {@link #drainToSink drainToSink}. In that case, if this is a boundary
+         * source, the linked boundary sink should implement its {@link StepSink#push push} and
          * {@link Sink#drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock.
          *
@@ -414,7 +414,7 @@ public class Belt {
         
         /**
          * Performs the given action for each remaining element of the source. This proceeds until either an exception
-         * is thrown, this source is drained, or this source is unable to offer more elements to the {@code Consumer}.
+         * is thrown, this source is drained, or this source is unable to push more elements to the {@code Consumer}.
          *
          * @param action the action to be performed for each element
          * @throws Exception if unable to drain
@@ -424,7 +424,7 @@ public class Belt {
             
             class ConsumerSink implements StepSink<Out> {
                 @Override
-                public boolean offer(Out input) {
+                public boolean push(Out input) {
                     action.accept(input);
                     return true;
                 }
@@ -435,7 +435,7 @@ public class Belt {
         
         /**
          * Performs a mutable reduction operation on the remaining elements of this source using a {@code Collector}.
-         * This proceeds until either an exception is thrown, this source is drained, or this source is unable to offer
+         * This proceeds until either an exception is thrown, this source is drained, or this source is unable to push
          * more elements to the {@code Collector}.
          *
          * @see Stream#collect(Collector)
@@ -453,7 +453,7 @@ public class Belt {
             
             class CollectorSink implements StepSink<Out> {
                 @Override
-                public boolean offer(Out input) {
+                public boolean push(Out input) {
                     accumulator.accept(acc, input);
                     return true;
                 }
@@ -573,14 +573,14 @@ public class Belt {
     /**
      * A {@link Sink Sink} that can accept input elements one at a time.
      *
-     * <p>This is a functional interface whose functional method is {@link #offer(Object)}.
+     * <p>This is a functional interface whose functional method is {@link #push(Object)}.
      *
      * @param <In> the input element type
      */
     @FunctionalInterface
     public interface StepSink<In> extends Sink<In> {
         /**
-         * Offers the input element to this sink for processing. Returns {@code false} if this sink cancelled during or
+         * Pushes the input element to this sink for processing. Returns {@code false} if this sink cancelled during or
          * prior to this call, in which case the element may not have been fully processed.
          *
          * @implSpec Once this method returns {@code false}, subsequent calls should also discard the input element and
@@ -590,21 +590,21 @@ public class Belt {
          * @param input the input element
          * @return {@code false} if this sink cancelled, else {@code true}
          * @throws NullPointerException if input is null
-         * @throws Exception if unable to offer
+         * @throws Exception if unable to push
          */
-        boolean offer(In input) throws Exception;
+        boolean push(In input) throws Exception;
         
         /**
          * {@inheritDoc}
          *
-         * @implSpec The implementation loops, polling from the source and offering to this sink, until either the
+         * @implSpec The implementation loops, pulling from the source and pushing to this sink, until either the
          * source drains or this sink cancels. This is equivalent to the implementation of
          * {@link StepSource#drainToSink StepSource.drainToSink(StepSink)}.
          */
         @Override
         default boolean drainFromSource(StepSource<? extends In> source) throws Exception {
-            for (In e; (e = source.poll()) != null; ) {
-                if (!offer(e)) {
+            for (In e; (e = source.pull()) != null; ) {
+                if (!push(e)) {
                     return false;
                 }
             }
@@ -698,34 +698,34 @@ public class Belt {
     /**
      * A {@link Source Source} that can yield output elements one at a time.
      *
-     * <p>This is a functional interface whose functional method is {@link #poll()}.
+     * <p>This is a functional interface whose functional method is {@link #pull()}.
      *
      * @param <Out> the output element type
      */
     @FunctionalInterface
     public interface StepSource<Out> extends Source<Out> {
         /**
-         * Polls this source for the next element. Returns {@code null} if this source is drained.
+         * Pulls this source for the next element. Returns {@code null} if this source is drained.
          *
          * @implSpec Once this method returns {@code null}, subsequent calls should also return {@code null}, to indicate
          * the source is permanently drained and no longer yielding elements.
          *
          * @return the next element from this source, or {@code null} if this source is drained
-         * @throws Exception if unable to poll
+         * @throws Exception if unable to pull
          */
-        Out poll() throws Exception;
+        Out pull() throws Exception;
         
         /**
          * {@inheritDoc}
          *
-         * @implSpec The implementation loops, polling from this source and offering to the sink, until either this
+         * @implSpec The implementation loops, pulling from this source and pushing to the sink, until either this
          * source drains or the sink cancels. This is equivalent to the implementation of
          * {@link StepSink#drainFromSource StepSink.drainFromSource(StepSource)}.
          */
         @Override
         default boolean drainToSink(StepSink<? super Out> sink) throws Exception {
-            for (Out e; (e = poll()) != null; ) {
-                if (!sink.offer(e)) {
+            for (Out e; (e = pull()) != null; ) {
+                if (!sink.push(e)) {
                     return false;
                 }
             }

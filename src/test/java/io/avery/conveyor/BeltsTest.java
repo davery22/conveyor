@@ -35,11 +35,11 @@ class BeltsTest {
             List<Integer> list = new ArrayList<>();
             Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
             Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-            Belt.StepSource<Integer> noCloseSource = source::poll;
+            Belt.StepSource<Integer> noCloseSource = source::pull;
             
             Belts
                 .merge(List.of(
-                    // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+                    // These 2 sources will concurrently pull from the same upstream, effectively "balancing"
                     noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
                     noCloseSource.andThen(Belts.filterMap(i -> i + 4))
                 ))
@@ -65,11 +65,11 @@ class BeltsTest {
             List<Integer> list = new ArrayList<>();
             Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
             Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-            Belt.StepSink<Integer> noCompleteSink = sink::offer;
+            Belt.StepSink<Integer> noCompleteSink = sink::push;
             
             Belts
                 .balance(List.of(
-                    // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+                    // These 2 sinks will concurrently push to the same downstream, effectively "merging"
                     noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
                     noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
                 ))
@@ -168,15 +168,15 @@ class BeltsTest {
             List<Integer> list = new ArrayList<>();
             Iterator<Integer> iter = List.of(0, 1, 2).iterator();
             Belt.StepSource<Integer> source = new Belt.StepSource<Integer>() {
-                @Override public Integer poll() { return iter.hasNext() ? iter.next() : null; }
+                @Override public Integer pull() { return iter.hasNext() ? iter.next() : null; }
                 @Override public void close() { list.addAll(List.of(0, 0, 0)); }
             }.andThen(Belts.synchronizeStepSource());
             Belt.StepSink<Integer> sink = ((Belt.StepSink<Integer>) list::add).compose(Belts.synchronizeStepSink());
-            Belt.StepSource<Integer> noCloseSource = source::poll;
+            Belt.StepSource<Integer> noCloseSource = source::pull;
             
             Belts
                 .merge(List.of(
-                    // These 2 sources will concurrently poll from the same upstream, effectively "balancing"
+                    // These 2 sources will concurrently pull from the same upstream, effectively "balancing"
                     noCloseSource.andThen(Belts.filterMap(i -> i + 1)),
                     noCloseSource.andThen(Belts.filterMap(i -> i + 4))
                 ))
@@ -202,14 +202,14 @@ class BeltsTest {
             List<Integer> list = new ArrayList<>();
             Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(0, 1, 2).iterator()).andThen(Belts.synchronizeStepSource());
             Belt.StepSink<Integer> sink = new Belt.StepSink<Integer>() {
-                @Override public boolean offer(Integer input) { return list.add(input); }
+                @Override public boolean push(Integer input) { return list.add(input); }
                 @Override public void complete() { list.addAll(List.of(0, 0, 0)); }
             }.compose(Belts.synchronizeStepSink());
-            Belt.StepSink<Integer> noCompleteSink = sink::offer;
+            Belt.StepSink<Integer> noCompleteSink = sink::push;
             
             Belts
                 .balance(List.of(
-                    // These 2 sinks will concurrently offer to the same downstream, effectively "merging"
+                    // These 2 sinks will concurrently push to the same downstream, effectively "merging"
                     noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 1))),
                     noCompleteSink.compose(Belts.gather(map((Integer i) -> i + 4)))
                 ))
@@ -232,10 +232,10 @@ class BeltsTest {
     
     static void testSplit() throws Exception {
         try (var scope = new StructuredTaskScope<>()) {
-           // In this example, the consecutive inner sinks offer to a shared sink, effectively "concatenating"
+           // In this example, the consecutive inner sinks push to a shared sink, effectively "concatenating"
            List<Integer> list = new ArrayList<>();
            Belt.StepSink<Integer> sink = list::add;
-           Belt.StepSink<Integer> noCompleteSink = sink::offer;
+           Belt.StepSink<Integer> noCompleteSink = sink::push;
       
            Belts.iteratorSource(List.of(0, 1, 2, 3, 4, 5).iterator())
                .andThen(Belts
@@ -257,10 +257,10 @@ class BeltsTest {
     
     static void testGroupBy() throws Exception {
         try (var scope = new StructuredTaskScope<>()) {
-            // In this example, the concurrent inner sinks offer to a shared sink, effectively "merging"
+            // In this example, the concurrent inner sinks push to a shared sink, effectively "merging"
             List<String> list = new ArrayList<>();
             Belt.StepSink<String> sink = list::add;
-            Belt.StepSink<String> noCompleteSink = sink::offer;
+            Belt.StepSink<String> noCompleteSink = sink::push;
             
             Belts.iteratorSource(List.of("now", "or", "never").iterator())
                 .andThen(Belts
@@ -429,7 +429,7 @@ class BeltsTest {
                                     if ("CEASE".equals(e)) throw new IllegalStateException("CEASED!");
                                     return Stream.of(e);
                                 }))
-                                .andThen(buffer.sink()::offer)
+                                .andThen(buffer.sink()::push)
                             )
                     )
                     .compose(Belts.alsoComplete(buffer.sink()))
@@ -486,7 +486,7 @@ class BeltsTest {
             ((Belt.StepSource<Long>) () -> iter.hasNext() ? iter.next() : null)
 //                ((Belt.Source<Long>) sink -> {
 //                    for (long i = 0; i < 1_000_000; i++) {
-//                        if (!sink.offer(i)) {
+//                        if (!sink.push(i)) {
 //                            return false;
 //                        }
 //                    }
@@ -524,7 +524,7 @@ class BeltsTest {
             ((Belt.Source<Long>)
                 sink -> {
                     for (long i = 0; i < 1_000_000; i++) {
-                        if (!sink.offer(i)) {
+                        if (!sink.push(i)) {
                             return false;
                         }
                     }
@@ -579,7 +579,7 @@ class BeltsTest {
 //            // Producer
 //            scope.fork(() -> {
 //                try (var in = new Scanner(System.in)) {
-//                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && segue.offer(line); ) { }
+//                    for (String line; in.hasNextLine() && !"stop".equalsIgnoreCase(line = in.nextLine()) && segue.push(line); ) { }
 //                    segue.complete(null);
 //                } catch (Throwable error) {
 //                    segue.complete(error);
