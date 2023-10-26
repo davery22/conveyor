@@ -10,24 +10,7 @@ import java.util.stream.Stream;
  * Interrelated interfaces for expressing flow-controlled processing pipelines, where {@link Sink Sinks} accept elements
  * and {@link Source Sources} yield elements.
  *
- * <h2>Stages</h2>
- *
- * <h2>Segues</h2>
- *
- * <h2>Operators</h2>
- *
- * <h2>Completion and cancellation</h2>
- *
- * <h2>Proxying and boundaries</h2>
- *
- * proxy vs boundary
- *
- * <h3>Fan-in and fan-out</h3>
- *
- * <h2>Exception handling</h2>
- *
- * ('up' to nearest boundary, then 'down' across boundaries)
- *
+ * TODO: Regurgitate the README, except more technical-sounding
  */
 public class Belt {
     private Belt() {}
@@ -179,7 +162,7 @@ public class Belt {
     /**
      * A {@link Stage Stage} that accepts input elements.
      *
-     * <p>A sink may encapsulate a downstream station, which will {@link #run run} when the sink runs. Sinks generally
+     * <p>A sink may enclose a downstream station, which will {@link #run run} when the sink runs. Sinks generally
      * should be run before accepting elements, in case the sink connects across a downstream boundary, to avoid the
      * effects of unmitigated buffer saturation (including potential deadlock).
      *
@@ -365,9 +348,9 @@ public class Belt {
     /**
      * A {@link Stage Stage} that yields output elements.
      *
-     * <p>A source may encapsulate an upstream station, which will {@link #run run} when the source runs. Sources
-     * generally should be run before yielding elements, in case the source connects across an upstream boundary, to
-     * avoid the effects of unmitigated buffer depletion (including potential deadlock).
+     * <p>A source may enclose an upstream station, which will {@link #run run} when the source runs. Sources generally
+     * should be run before yielding elements, in case the source connects across an upstream boundary, to avoid the
+     * effects of unmitigated buffer depletion (including potential deadlock).
      *
      * <p>This is a functional interface whose functional method is {@link #drainToSink(StepSink)}.
      *
@@ -822,9 +805,9 @@ public class Belt {
      * A {@link Sink Sink} paired with a {@link Source Source}.
      *
      * <p>The sink and source need not be related. However, it is common for the sink and source to be internally
-     * connected, such that the elements input to the sink determine or influence the elements output from the source.
-     * This allows data to transition across the "asynchronous boundary" between threads, if the thread(s) draining to
-     * the sink differ from the thread(s) draining from the source.
+     * "linked", as by shared state, such that the elements input to the sink determine or influence the elements output
+     * from the source. This allows data to transition across the "asynchronous boundary" between threads, if the
+     * thread(s) draining to the sink differ from the thread(s) draining from the source.
      *
      * @param <In> the input element type
      * @param <Out> the output element type

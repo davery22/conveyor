@@ -4,7 +4,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
 import java.util.function.*;
 import java.util.stream.Collectors;
@@ -616,7 +615,7 @@ class BeltsTest {
         }
     }
     
-    static void testBidi() throws InterruptedException, ExecutionException {
+    static void testBidi() throws InterruptedException {
         try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
             var buffer = Belts.extrapolate(0, e -> Collections.emptyIterator(), 256);
             var iter = Stream.generate(new Scanner(System.in)::nextLine)
