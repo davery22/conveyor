@@ -14,7 +14,7 @@ Below is a walk-through introducing concepts.
 
 For more details and specific examples, see the [javadocs](TODO).
 
-For a recap of how some aspects of the design came to be, see the [design-notes](TODO).
+For a recap of how some aspects of the design came to be, see the [design-notes](https://github.com/davery22/conveyor/blob/master/design-notes/01-the-first-segue.md).
 
 ---
 
@@ -277,38 +277,55 @@ source-to-source and sink-to-sink proxying.
 Now that we have introduced the concept of proxying, we can also describe pipelines that are non-linear, ie "fan-in" and
 "fan-out".
 
-A fan-in source proxies several sources. A motivating example is `merge`, which yields elements as they arrive from
-multiple sources.
+A fan-in source proxies several sources. An example is `merge`, which yields elements as they arrive from multiple
+sources.
 
 ``` java
+Instant start = Instant.now();
+var delays = new Object(){ int fizz = 0; int buzz = 0; };
+
 Belts
     .merge(List.of(
-        TODO
+        Belts.streamSource(Stream.generate(() -> "fizz"))
+            .andThen(Belts.delay(_ -> start.plusSeconds(delays.fizz += 3), 1)),
+        Belts.streamSource(Stream.generate(() -> "buzz"))
+            .andThen(Belts.delay(_ -> start.plusSeconds(delays.buzz += 5), 1))
     ))
     .andThen((String s) -> { System.out.println(s); return true; })
     .run(executor);
+// Prints:
+// fizz  (after  3 seconds)
+// buzz  (after  5 seconds)
+// fizz  (after  6 seconds)
+// fizz  (after  9 seconds)
+// buzz  (after 10 seconds)
+// ...
 ```
 
-A fan-out sink proxies several sinks. A motivating example is `balance`, which pushes each input element to the first
-available sink.
+A fan-out sink proxies several sinks. An example is `balance`, which pushes each input element to the first available
+sink.
 
 ``` java
-List<String> queue1 = new ArrayList<>();
-List<String> queue2 = new ArrayList<>();
-List<String> queue3 = new ArrayList<>();
-
-TODO
-    .balance(List.of(
-        (Belt.StepSink<String>) queue1::add,
-        (Belt.StepSink<String>) queue2::add,
-        (Belt.StepSink<String>) queue3::add,
-    ))
+Belts.iteratorSource(Stream.iterate(0, i -> i + 1).iterator())
+    .andThen(Belts.synchronizeStepSource())
+    .andThen(Belts.balance(List.<Belt.StepSink<Integer>>of(
+        i -> { System.out.println("A" + i); return true; },
+        i -> { System.out.println("B" + i); return true; }
+    )))
     .run(executor);
+// Possible output:
+// B1
+// B2
+// B3
+// A0
+// A5
+// B4
+// ...
 ```
 
-Sometimes we need to fan-in sinks or fan-out a source. A motivating example can be found in `groupBy`, which is a sink
-that dynamically creates inner sinks to process elements with different keys. If we needed to "merge" the inner sinks,
-we would arrange for each of them to push to a common sink.
+Sometimes we need to fan-in sinks or fan-out a source. An example can be found in `groupBy`, which is a sink that
+dynamically creates inner sinks to process elements with different keys. If we needed to "merge" the inner sinks, we
+would arrange for each of them to push to a common sink.
 
 ``` java
 List<String> list = new ArrayList<>();
