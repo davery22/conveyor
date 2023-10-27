@@ -5,9 +5,10 @@ import java.util.function.BinaryOperator;
 import java.util.function.Supplier;
 
 /**
- * This is a crude shim of the "Gatherer" API proposed in
- * <a href="https://cr.openjdk.org/~vklang/Gatherers.html">https://cr.openjdk.org/~vklang/Gatherers.html</a>.
- * This interface is for prototyping purposes only. It is intended to be superseded by the official API once available.
+ * This is a crude shim of the "Gatherer" API proposed in <a href="https://openjdk.org/jeps/461">JEP-461</a>.
+ *
+ * <p>This interface is for prototyping purposes only. It is intended to be superseded by the official API once
+ * available.
  */
 public interface Gatherer<T,A,R> {
     interface Downstream<R> {

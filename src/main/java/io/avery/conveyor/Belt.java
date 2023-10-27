@@ -10,7 +10,7 @@ import java.util.stream.Stream;
  * Interrelated interfaces for expressing flow-controlled processing pipelines, where {@link Sink Sinks} accept elements
  * and {@link Source Sources} yield elements.
  *
- * TODO: Rephrase the README, except more technical-sounding
+ * <p>TODO: Rephrase the README, except more technical-sounding
  */
 public class Belt {
     private Belt() {}
