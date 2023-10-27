@@ -12,7 +12,7 @@ to understand, implement, and debug.
 
 Below is a walk-through introducing concepts.
 
-For more details and specific examples, see the [javadocs](TODO).
+For more details and specific examples, see the [javadocs](https://davery22.github.io/conveyor/javadoc/).
 
 For a recap of how some aspects of the design came to be, see the [design-notes](https://github.com/davery22/conveyor/blob/master/design-notes/01-the-first-segue.md).
 
