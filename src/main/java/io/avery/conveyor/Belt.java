@@ -10,7 +10,7 @@ import java.util.stream.Stream;
  * Interrelated interfaces for expressing flow-controlled processing pipelines, where {@link Sink Sinks} accept elements
  * and {@link Source Sources} yield elements.
  *
- * TODO: Regurgitate the README, except more technical-sounding
+ * TODO: Rephrase the README, except more technical-sounding
  */
 public class Belt {
     private Belt() {}
@@ -193,7 +193,7 @@ public class Belt {
         /**
          * Signals any nearest downstream boundary sources to stop yielding elements that arrive after this signal.
          *
-         * @implSpec A boundary sink should implement its {@link StepSink#push push} and
+         * @implSpec A linked boundary sink should implement its {@link StepSink#push push} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should return
          * {@code null} from {@link StepSource#pull pull} and {@code false} from {@link Source#drainToSink drainToSink}
@@ -217,7 +217,7 @@ public class Belt {
          * Signals any nearest downstream boundary sources to stop yielding elements and throw
          * {@link UpstreamException}.
          *
-         * @implSpec A boundary sink should implement its {@link StepSink#push push} and
+         * @implSpec A linked boundary sink should implement its {@link StepSink#push push} and
          * {@link #drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock. The linked boundary source should throw an
          * {@link UpstreamException}, wrapping the cause passed to this method, upon initiating any subsequent calls to
@@ -379,7 +379,7 @@ public class Belt {
          * Relinquishes any underlying resources held by this source.
          *
          * @implSpec Calling this method may cause this source to stop yielding elements from
-         * {@link StepSource#pull pull} and {@link #drainToSink drainToSink}. In that case, if this is a boundary
+         * {@link StepSource#pull pull} and {@link #drainToSink drainToSink}. In that case, if this is a linked boundary
          * source, the linked boundary sink should implement its {@link StepSink#push push} and
          * {@link Sink#drainFromSource drainFromSource} methods to discard elements and return {@code false} after this
          * method is called, to prevent unbounded buffering or deadlock.
