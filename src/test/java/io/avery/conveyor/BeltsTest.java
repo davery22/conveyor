@@ -13,7 +13,7 @@ import java.util.stream.Stream;
 class BeltsTest {
     
     // TODO: Remove
-    public static void main(String[] args) throws Exception {
+    void main() throws Exception {
         testSynchronizeStepSource();
         testSynchronizeStepSink();
         testRecoverStep();

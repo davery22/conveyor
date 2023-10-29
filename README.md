@@ -1,6 +1,6 @@
 # Conveyor
 
-A tool for processing data "like an assembly line". Processing can be split into stations that proceed concurrently.
+A library for processing data "like an assembly line". Processing can be split into stations that proceed concurrently.
 This facilitates efficient pipelining of IO-intensive work, complementary to `java.util.stream`'s focus on CPU-intensive
 work.
 
@@ -59,7 +59,7 @@ We can connect a `StepSource` to a `StepSink`, which will return a `Station`.
 ``` java
 Belt.StepSource<Integer> source = Belts.iteratorSource(List.of(1, 2, 3).iterator());
 Belt.StepSink<Integer> sink = element -> { System.out.println(element); return true; };
-Station station = source.andThen(sink); // Alternatively: sink.compose(source);
+Belt.Station station = source.andThen(sink); // Alternatively: sink.compose(source);
 ```
 
 A `Station` is a thing we can `run`, which will `pull` from the `StepSource` and `push` to the `StepSink`.
@@ -72,7 +72,19 @@ station.run(executor);
 // 3
 ```
 
-As the `Executor` suggests, `run` does its work asynchronously, by submitting a task to the executor.
+As the `Executor` suggests, `run` does its work asynchronously, by submitting a task to the executor. It is generally a
+good idea to use a thread-per-task executor here, to avoid deadlock when we start using multiple stations. Each station
+will run in its own thread.
+
+One way to create such an executor is by delegating to the `fork` method of a `StructuredTaskScope`.
+
+``` java
+Executor executor = runnable -> scope.fork(Executors.callable(runnable, null));
+// Or, equivalently:
+Executor executor = Belts.scopeExecutor(scope);
+```
+
+This approach has the added benefit of providing a means to wait for all stations to finish: `scope.join()`.
 
 ---
 
@@ -121,8 +133,8 @@ We can connect a `Source` to a `StepSink`, or a `StepSource` to a `Sink`. Both o
 `run`, just as before.
 
 ``` java
-Station station1 = source.andThen(stepSink);
-Station station2 = stepSource.andThen(sink);
+Belt.Station station1 = source.andThen(stepSink);
+Belt.Station station2 = stepSource.andThen(sink);
 ```
 
 What we _cannot_ do with a `Source` or `Sink` alone is "step" through elements. Processing - either by
@@ -149,8 +161,8 @@ Belt.Source<String> source = Belts.streamSource(Stream.of("a", "b", "c"));
 Belt.StepSegue<String, String> segue = Belts.buffer(256);
 Belt.StepSink<String> sink = str -> { System.out.println(str); return true; };
 
-Station station1 = source.andThen(segue.sink());
-Station station2 = segue.source().andThen(sink);
+Belt.Station station1 = source.andThen(segue.sink());
+Belt.Station station2 = segue.source().andThen(sink);
 
 station1.run(executor);
 station2.run(executor);
@@ -164,13 +176,13 @@ Notice how we now create 2 stations, and we need to `run` both of them to see re
 consolidated the stations under one "composite" station, so that we only need to explicitly `run` once.
 
 ``` java
-Station station = station1.andThen(station2);
+Belt.Station station = station1.andThen(station2);
 ```
 
 We can "chain" any number of stations, and we typically do so a bit less explicitly.
 
 ``` java
-Station station = Belts.streamSource(Stream.of("a", "b", "c"))
+Belt.Station station = Belts.streamSource(Stream.of("a", "b", "c"))
     .andThen(Belts.buffer(256))
     .andThen((String str) -> { System.out.println(str); return true; });
 
@@ -342,25 +354,39 @@ Belts.iteratorSource(List.of("now", "or", "never").iterator())
 // list will be [n, now, now, o, or, or, n, never, now]
 ```
 
-Finally, it's also possible to have cyclic flow. Below is a contrived example that sums the length of lines passed to
-`System.in`, printing the current sum after each input.
+Finally, it's also possible to have cyclic flow. Below is an example that cycles after 5 elements, incrementing elements
+in each cycle.
 
 ``` java
-// Create a buffer seeded with an initial 0
-var buffer = Belts.extrapolate(0, e -> Collections.emptyIterator(), 256);
-var probe = Belts.iteratorSource(
-    Stream.generate(new Scanner(System.in)::nextLine)
-        .takeWhile(line -> !"stop".equalsIgnoreCase(line))
-        .map(String::length)
-        .iterator()
-);
-
-Belts.zip(buffer.source(), probe, Integer::sum)
-    .andThen(Belts.broadcast(List.of(
-        buffer.sink(),
-        sum -> { System.out.println(sum); return true; })
+var buffer = Belts.<Integer>buffer(5);
+Belts
+    .concat(List.of(
+        Belts.streamSource(Stream.iterate(1, i -> i * 2).limit(5)),
+        buffer.source().andThen(Belts.filterMap(i -> i + 1))
     ))
+    .andThen(Belts.delay(_ -> Instant.now().plusSeconds(1), 1))
+    .andThen(Belts.broadcast(List.of(
+        i -> { System.out.println(i); return true; },
+        buffer.sink()
+    )))
     .run(executor);
+// Prints:
+// 1
+// 2
+// 4
+// 8
+// 16
+// 2
+// 3
+// 5
+// 9
+// 17
+// 3
+// 4
+// 6
+// 10
+// 18
+// ...
 ```
 
 ---
