@@ -16,6 +16,8 @@ For more details and specific examples, see the [javadocs](https://davery22.gith
 
 For a recap of how some aspects of the design came to be, see the [design-notes](https://github.com/davery22/conveyor/blob/master/design-notes/01-the-first-segue.md).
 
+This library depends on preview features of Java 21 - notably `StructuredTaskScope`.
+
 ---
 
 <a id="table-of-contents"></a>
@@ -73,8 +75,8 @@ station.run(executor);
 ```
 
 As the `Executor` suggests, `run` does its work asynchronously, by submitting a task to the executor. It is generally a
-good idea to use a thread-per-task executor here, to avoid deadlock when we start using multiple stations. Each station
-will run in its own thread.
+good idea to use a thread-per-task executor here, to avoid deadlock when we start chaining stations together. Each
+station will run in its own thread.
 
 One way to create such an executor is by delegating to the `fork` method of a `StructuredTaskScope`.
 
