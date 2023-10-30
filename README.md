@@ -4,9 +4,11 @@ A library for processing data "like an assembly line". Processing can be split i
 This facilitates efficient pipelining of IO-intensive work, complementary to `java.util.stream`'s focus on CPU-intensive
 work.
 
-Conveyor shares many of the ideals of Reactive Streams, but is reimagined for a world where threads are numerous and
-blocking is cheap. This shift enables approachable interfaces - based on blocking `push` and `pull` - that are practical
-to understand, implement, and debug.
+Conveyor is largely influenced by Akka Streams, as well as other Reactive APIs like RxJava and RxJS, and related APIs
+like Kotlin Flows, Go Channels, and Java's own BlockingQueues. Conveyor shares many of the ideals of Reactive Streams,
+but is reimagined for a new world where threads are numerous and blocking is cheap. This shift enables interfaces -
+based on blocking `push` and `pull` - that are more practical to understand, implement, and debug, since the call stack
+closely aligns with your implementation and usage.
 
 ---
 
