@@ -1,6 +1,6 @@
 package io.avery.conveyor;
 
-import java.util.concurrent.Executor;
+import java.util.concurrent.Callable;
 import java.util.stream.Stream;
 
 /**
@@ -34,16 +34,9 @@ public abstract class ProxySource<Out> implements Belt.Source<Out> {
     public void close() throws Exception {
         Belts.composedClose(sources());
     }
-    
-    /**
-     * Calls {@code run(executor)} on each upstream source, as if by
-     * {@snippet :
-     * this.sources().sequential().forEach(source -> source.run(executor));
-     * }
-     * @param executor the executor to submit tasks to
-     */
+
     @Override
-    public void run(Executor executor) {
-        sources().sequential().forEach(source -> source.run(executor));
+    public Stream<Callable<Void>> tasks() {
+        return sources().flatMap(Belt.Stage::tasks);
     }
 }

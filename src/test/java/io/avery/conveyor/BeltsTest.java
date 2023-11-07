@@ -11,22 +11,106 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 class BeltsTest {
-    
+
     // TODO: Remove
     void main() throws Exception {
-        testSynchronizeStepSource();
-        testSynchronizeStepSink();
-        testRecoverStep();
-        testRecover();
-        testFilterMap();
-        testAlsoClose();
-        testAlsoComplete();
-        testSplit();
-        testGroupBy();
-        testFlatMap();
-        testAdaptSourceOfSink();
-        testAdaptSinkOfSource();
-        testGather();
+//        testSynchronizeStepSource();
+//        testSynchronizeStepSink();
+//        testRecoverStep();
+//        testRecover();
+//        testFilterMap();
+//        testAlsoClose();
+//        testAlsoComplete();
+//        testSplit();
+//        testGroupBy();
+//        testFlatMap();
+//        testAdaptSourceOfSink();
+//        testAdaptSinkOfSource();
+//        testGather();
+
+        testAsyncException();
+//        testSyncException();
+    }
+
+    static ScopedValue<Function<Throwable, Throwable>> ASYNC_EXCEPTION_MAPPER = ScopedValue.newInstance();
+
+    static <T> T callInCapturedStackTrace(Callable<T> callable) throws Exception {
+        var trace = StackWalker.getInstance()
+            .walk(s -> s.skip(1).map(StackWalker.StackFrame::toStackTraceElement).toArray(StackTraceElement[]::new));
+        var prevMapper = ASYNC_EXCEPTION_MAPPER.orElse(t -> t);
+        Function<Throwable, Throwable> newMapper = cause -> {
+            var x = new AsyncException("SYNTHETIC TRACE", cause);
+            x.setStackTrace(trace);
+            return prevMapper.apply(x);
+        };
+        return ScopedValue.callWhere(ASYNC_EXCEPTION_MAPPER, newMapper, callable);
+    }
+
+    static Throwable wrapInCapturedStackTrace(Throwable cause) {
+        return ASYNC_EXCEPTION_MAPPER.orElse(t -> t).apply(cause);
+    }
+
+    static void testAsyncException() throws Exception {
+        callInCapturedStackTrace(() -> {
+            try (var scope = new StructuredTaskScope<>()) {
+                scope.fork(() -> callInCapturedStackTrace(() -> {
+                    try (var scope2 = new StructuredTaskScope<>()) {
+                        scope2.fork(() -> {
+                            var x = new IllegalStateException("uh-oh");
+                            wrapInCapturedStackTrace(x).printStackTrace();
+                            return null;
+                        });
+                        scope2.join();
+                    }
+                    return null;
+                }));
+                scope.join();
+            }
+            return null;
+        });
+    }
+
+    static void testSyncException() throws Exception {
+        try (var scope = new FailureHandlingScope(Throwable::printStackTrace)) {
+            var tasks = Belts.iteratorSource(List.of(1, 2, 3, 4, 5).iterator())
+                .andThen(Belts.flatMap((Integer i) -> Belts.iteratorSource(List.of(i, i+1, i+2).iterator()), t->{})
+                    .andThen(filterMapSink(i -> i % 3 != 0 ? i : null))
+                    .andThen(filterMapSink(i -> {
+                        if (i > 6) throw new IllegalStateException("uh-oh");
+                        return i;
+                    }))
+                    .andThen(Belts.buffer(256))
+                    .andThen((Integer i) -> { System.out.println(i); return true; })
+                )
+                .tasks().toList();
+            tasks.subList(0, tasks.size()-1).forEach(scope::fork);
+            tasks.getLast().call();
+
+            scope.join();
+        }
+    }
+
+    static <T, U> Belt.StepSinkOperator<T, U> filterMapSink(Function<? super T, ? extends U> mapper) {
+        class FilterMap extends ProxySink<T> implements Belt.StepSink<T> {
+            final Belt.StepSink<? super U> sink;
+
+            FilterMap(Belt.StepSink<? super U> sink) {
+                this.sink = sink;
+            }
+
+            @Override
+            public boolean push(T input) throws Exception {
+                U u = mapper.apply(input);
+                return u == null || sink.push(u);
+            }
+
+            @Override
+            protected Stream<? extends Belt.Sink<?>> sinks() {
+                return Stream.of(sink);
+            }
+        }
+
+        return FilterMap::new;
     }
     
     static void testSynchronizeStepSource() throws Exception {
@@ -44,8 +128,8 @@ class BeltsTest {
                 ))
                 .andThen(Belts.alsoClose(source))
                 .andThen(sink)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
@@ -74,8 +158,8 @@ class BeltsTest {
                 ))
                 .compose(Belts.alsoComplete(sink))
                 .compose(source)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
@@ -109,8 +193,8 @@ class BeltsTest {
                     )
                     .andThen((Belt.StepSink<Integer>) list::add)
                 )
-                .run(Belts.scopeExecutor(scope));
-                
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             assertEquals(List.of(1, 2, 3, 7, 8, 9), list);
@@ -139,8 +223,8 @@ class BeltsTest {
                         return true;
                     })
                 )
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             assertEquals(List.of(1, 2, 3, 7, 8, 9), list);
@@ -154,8 +238,8 @@ class BeltsTest {
             Belts.iteratorSource(List.of(1, 2, 3, 4, 5, 6).iterator())
                 .andThen(Belts.filterMap(i -> i % 2 == 0 ? null : -i))
                 .andThen((Belt.StepSink<Integer>) list::add)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             assertEquals(List.of(-1, -3, -5), list);
@@ -181,8 +265,8 @@ class BeltsTest {
                 ))
                 .andThen(Belts.alsoClose(source))
                 .andThen(sink)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
@@ -214,8 +298,8 @@ class BeltsTest {
                 ))
                 .compose(Belts.alsoComplete(sink))
                 .compose(source)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
@@ -247,8 +331,8 @@ class BeltsTest {
                    )
                    .compose(Belts.alsoComplete(sink))
                )
-               .run(Belts.scopeExecutor(scope));
-      
+               .tasks().forEach(scope::fork);
+
            scope.join();
            assertEquals(List.of(0, 0, 1, 0, 2, 2, 3, 2, 4, 4, 5, 4), list);
        }
@@ -272,8 +356,8 @@ class BeltsTest {
                     )
                     .compose(Belts.alsoComplete(sink))
                 )
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             assertEquals(List.of("n", "now", "now", "o", "or", "or", "n", "never", "now"), list);
         }
@@ -292,8 +376,8 @@ class BeltsTest {
                     )
                     .andThen((Belt.StepSink<String>) list::add)
                 )
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             assertEquals(List.of("color", "red", "color", "blue", "color", "green"), list);
         }
@@ -314,8 +398,8 @@ class BeltsTest {
                             Throwable::printStackTrace
                         ))
                 )))
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = Stream.concat(list1.stream(), list2.stream()).map(String::valueOf).collect(Collectors.joining());
@@ -345,8 +429,8 @@ class BeltsTest {
                         ))
                 ))
                 .andThen(sink)
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             
             String result = list.stream().map(String::valueOf).collect(Collectors.joining());
@@ -363,8 +447,8 @@ class BeltsTest {
                     Belts.gather(map((Integer i) -> i * 2))
                         .andThen((Belt.StepSink<Integer>) list::add)
                 )
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             assertEquals(List.of(2, 4, 6), list);
         }
@@ -387,8 +471,8 @@ class BeltsTest {
                              })
 //                    .andThen((Belt.StepSink<String>) list::add)
                 )
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             assertEquals(List.of(), list);
         }
@@ -401,7 +485,7 @@ class BeltsTest {
                 .andThen(Belts.<String>balanceMergeSink(4)
                     .andThen(Belts.buffer(16))
                 )
-                .run(Belts.scopeExecutor(scope));
+                .tasks().forEach(scope::fork);
             scope.join();
         }
     }
@@ -435,8 +519,8 @@ class BeltsTest {
                 )
                 .andThen(buffer.source())
                 .andThen((Belt.Sink<String>) source -> { source.forEach(System.out::println); return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
         }
     }
@@ -449,8 +533,8 @@ class BeltsTest {
                     t -> { }
                 ))
                 .andThen((Belt.StepSink<Integer>) e -> { System.out.println(e); return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
         }
     }
@@ -467,8 +551,8 @@ class BeltsTest {
                     i -> () -> i * 2
                 ))
                 .andThen((Belt.StepSink<Long>) e -> { a[0] += e; return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             System.out.println(a[0]);
         }
@@ -506,8 +590,8 @@ class BeltsTest {
                     Belts.<Long>buffer(4).andThen((Belt.Sink<Long>) source -> { source.forEach(e -> b[0] += e+2); return true; }),
                     Belts.<Long>buffer(4).andThen((Belt.Sink<Long>) source -> { source.forEach(e -> c[0] += e+3); return true; })
                 )))
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             System.out.println(a[0] + b[0] + c[0]);
         }
@@ -530,8 +614,8 @@ class BeltsTest {
                     return true;
                 })
                 .andThen((Belt.StepSink<Long>) e -> { res[0] += e; return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
             System.out.println(res[0]);
         }
@@ -548,8 +632,8 @@ class BeltsTest {
                     (s, c) -> () -> c + ":" + s
                 ))
                 .andThen((Belt.Sink<String>) source -> { source.forEach(System.out::println); return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
 
 //            lineSource()
@@ -609,8 +693,8 @@ class BeltsTest {
                     .andThen(Belts.buffer(16))
                 )
                 .andThen((Belt.Sink<String>) source -> { source.forEach(System.out::println); return true; })
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
         }
     }
@@ -629,8 +713,8 @@ class BeltsTest {
                     buffer.sink(),
                     e -> { System.out.println(e); return true; })
                 ))
-                .run(Belts.scopeExecutor(scope));
-            
+                .tasks().forEach(scope::fork);
+
             scope.join();
         }
     }

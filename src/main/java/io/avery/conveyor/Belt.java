@@ -1,7 +1,7 @@
 package io.avery.conveyor;
 
 import java.util.Objects;
-import java.util.concurrent.Executor;
+import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.stream.Collector;
 import java.util.stream.Stream;
@@ -29,65 +29,59 @@ public class Belt {
      *
      * (For a "stage" that accepts input elements and yields output elements, see {@link Segue Segue}.)
      *
-     * <p>Stages can be {@link #run run}, which will traverse each station enclosed by the stage and concurrently drain
-     * sources to sinks.
+     * <p>Stages contain zero or more "station {@link #tasks tasks}", which drain from a station's source to its sink.
      */
     public sealed interface Stage {
         /**
-         * Executes each station enclosed by this stage. Execution proceeds by recursively running the source and sink
-         * of the station, and submitting a task to the executor that:
+         * Returns a stream of station tasks enclosed by this stage. Each station task proceeds by:
+         *
          * <ol>
-         *     <li>drains the source to the sink
-         *     <li>completes the sink normally if no exception was thrown
-         *     <li>closes the source
-         *     <li>completes the sink abruptly if an exception was thrown, suppressing further exceptions
+         *     <li>draining the source to the sink
+         *     <li>completing the sink normally if no exception was thrown
+         *     <li>closing the source
+         *     <li>completing the sink abruptly if an exception was thrown, suppressing further exceptions
          * </ol>
          *
-         * <p>If any of steps 1-3 throw an exception, the initial exception will be caught and wrapped in a
-         * {@link java.util.concurrent.CompletionException CompletionException} thrown at the end of the task.
+         * <p>If any of steps 1-3 throw an exception, the initial exception is caught and re-thrown at the end of the
+         * task.
          *
          * <p>If the initial exception is an {@link InterruptedException}, or if any completions throw
          * {@code InterruptedException}, the thread interrupt status will be set when the exception is caught, and will
          * remain set until any subsequent throw of {@code InterruptedException}. (This ensures that recovery operators
          * see the interrupt, and do not unintentionally interfere with interrupt responsiveness.)
          *
-         * <p>The given executor should ideally spawn a new thread for each task. An executor with insufficient threads
-         * to run all enclosed stations concurrently may cause deadlock.
+         * @implSpec A stage that delegates to other stages should include their {@code tasks} in its own.
          *
-         * <p>If a station has already started running on any executor, subsequent runs of that station will
-         * short-circuit and do nothing.
-         *
-         * @implSpec A stage that delegates to other stages should call {@code run} on each stage before returning from
-         * this method.
-         *
-         * <p>The default implementation does nothing.
-         *
-         * @param executor the executor to submit tasks to
+         * <p>The default implementation returns an empty stream.
          */
-        default void run(Executor executor) { }
+        default Stream<Callable<Void>> tasks() { return Stream.empty(); }
     }
     
     /**
      * A {@link Stage Stage} that represents connected {@link Source Source} and {@link Sink Sink} stages. A station may
      * enclose:
+     *
      * <ul>
      *     <li>A {@code StepSource} connected to a {@code Sink}
      *     <li>A {@code Source} connected to a {@code StepSink}
-     *     <li>A {@code Station} connected to a {@code Station} (and thereby, any sequence of {@code Stations})
      * </ul>
      *
-     * <p>A station itself accepts no input and yields no output. The {@link #run run} method interacts with stations by
-     * draining enclosed sources to sinks.
+     * <p>A station itself accepts no input and yields no output. Instead, the station encloses a {@code Callable} task
+     * that will drain elements from the station's source to its sink, then complete the sink and close the source. The
+     * {@link #tasks tasks} method exposes this task, along with tasks from any upstream or downstream stations that
+     * were connected to form this station. These tasks should generally be concurrently run, in case sources or sinks
+     * connect across a boundary, to avoid the effects of unmitigated buffer depletion or saturation (including
+     * potential deadlock).
      *
-     * @see #run(Executor)
+     * @see #tasks()
      */
     public sealed interface Station extends Stage permits Belts.ClosedStation, Belts.ChainStation {
         /**
-         * Connects the {@code upstream} station before this station. Returns a new station that, when {@link #run run},
-         * runs this station and the {@code upstream} station.
+         * Connects the {@code upstream} station before this station. Returns a new station that includes the
+         * {@code upstream} station's {@link #tasks tasks} before this station's tasks.
          *
          * @param upstream the upstream station
-         * @return a new station that runs this station and the {@code upstream} station
+         * @return a new station that includes the upstream station's tasks before this station's tasks
          * @throws NullPointerException if upstream is null
          */
         default Station compose(Station upstream) {
@@ -96,10 +90,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} sink before this station. Returns a new sink that behaves like the
-         * {@code upstream} sink, except that {@link #run running} it will also run this station.
+         * {@code upstream} sink, except that its {@link #tasks tasks} will also include this station's tasks.
          *
          * @param upstream the upstream sink
-         * @return a new sink that also runs this station
+         * @return a new sink that also includes this station's tasks
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -109,10 +103,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} sink before this station. Returns a new sink that behaves like the
-         * {@code upstream} sink, except that {@link #run running} it will also run this station.
+         * {@code upstream} sink, except that its {@link #tasks tasks} will also include this station's tasks.
          *
          * @param upstream the upstream sink
-         * @return a new sink that also runs this station
+         * @return a new sink that also includes this station's tasks
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -121,11 +115,11 @@ public class Belt {
         }
         
         /**
-         * Connects the {@code downstream} station after this station. Returns a new station that, when
-         * {@link #run run}, runs this station and the {@code downstream} station.
+         * Connects the {@code downstream} station after this station. Returns a new station that includes the
+         * {@code downstream} station's {@link #tasks tasks} after this station's tasks.
          *
          * @param downstream the downstream station
-         * @return a new station that runs this station and the {@code before} station
+         * @return a new station that includes the downstream station's tasks after this station's tasks
          * @throws NullPointerException if downstream is null
          */
         default Station andThen(Station downstream) {
@@ -134,10 +128,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} source after this station. Returns a new source that behaves like the
-         * {@code downstream} source, except that {@link #run running} it will also run this station.
+         * {@code downstream} source, except that its {@link #tasks tasks} will also include this station's tasks.
          *
          * @param downstream the downstream source
-         * @return a new source that also runs this station
+         * @return a new source that also includes this station's tasks
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -147,10 +141,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} source after this station. Returns a new source that behaves like the
-         * {@code downstream} source, except that {@link #run running} it will also run this station.
+         * {@code downstream} source, except that its {@link #tasks tasks} will also include this station's tasks.
          *
          * @param downstream the downstream source
-         * @return a new source that also runs this station
+         * @return a new source that also includes this station's tasks
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -162,9 +156,9 @@ public class Belt {
     /**
      * A {@link Stage Stage} that accepts input elements.
      *
-     * <p>A sink may enclose a downstream station, which will {@link #run run} when the sink runs. Sinks generally
-     * should be run before accepting elements, in case the sink connects across a downstream boundary, to avoid the
-     * effects of unmitigated buffer saturation (including potential deadlock).
+     * <p>A sink may include {@link #tasks tasks} from downstream stations. Such tasks should generally be concurrently
+     * run while accepting elements, in case the sink connects across a downstream boundary, to avoid the effects of
+     * unmitigated buffer saturation (including potential deadlock).
      *
      * <p>This is a functional interface whose functional method is {@link #drainFromSource(StepSource)}.
      *
@@ -204,8 +198,8 @@ public class Belt {
          * throws an exception, subsequent exceptions should be suppressed onto the first exception. If completing any
          * sink throws {@link InterruptedException}, the thread interrupt status should be set when the exception is
          * caught, and remain set until any subsequent throw of {@code InterruptedException} (in accordance with
-         * {@link #run Stage.run}). The utility method {@link Belts#composedComplete(Stream)} is provided for common use
-         * cases.
+         * {@link #tasks Stage.tasks}). The utility method {@link Belts#composedComplete(Stream)} is provided for common
+         * use cases.
          *
          * <p>The default implementation does nothing.
          *
@@ -228,7 +222,7 @@ public class Belt {
          * an exception, subsequent exceptions should be suppressed onto the first exception. If completing any sink
          * throws {@link InterruptedException}, the thread interrupt status should be set when the exception is caught,
          * and remain set until any subsequent throw of {@code InterruptedException} (in accordance with
-         * {@link #run Stage.run}). The utility method {@link Belts#composedCompleteAbruptly(Stream, Throwable)} is
+         * {@link #tasks Stage.tasks}). The utility method {@link Belts#composedCompleteAbruptly(Stream, Throwable)} is
          * provided for common use cases.
          *
          * <p>The default implementation does nothing.
@@ -239,8 +233,8 @@ public class Belt {
         default void completeAbruptly(Throwable cause) throws Exception { }
         
         /**
-         * Connects the {@code upstream} source before this sink. Returns a new station that, when {@link #run run}, will
-         * drain from the {@code upstream} source to this sink.
+         * Connects the {@code upstream} source before this sink. Returns a new station that includes a
+         * {@link #tasks task} to drain from the {@code upstream} source to this sink.
          *
          * @param upstream the upstream source
          * @return a new station that will drain from the source to this sink
@@ -252,11 +246,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this sink. Returns a new sink that behaves like the segue's sink,
-         * except that {@link #run running} it will also run the station formed by connecting the segue's source to this
-         * sink.
+         * except that it includes a {@link #tasks task} to drain from the segue's source to this sink.
          *
          * @param upstream the upstream segue
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -266,11 +259,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this sink. Returns a new sink that behaves like the segue's sink,
-         * except that {@link #run running} it will also run the station formed by connecting the segue's source to this
-         * sink.
+         * except that it includes a {@link #tasks task} to drain from the segue's source to this sink.
          *
          * @param upstream the upstream segue
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -280,10 +272,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} station after this sink. Returns a new sink that behaves like this sink,
-         * except that {@link #run running} it will also run the {@code downstream} station.
+         * except that it includes {@link #tasks tasks} from the {@code downstream} station.
          *
          * @param downstream the downstream station
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes tasks from a downstream station
          * @throws NullPointerException if downstream is null
          */
         default Sink<In> andThen(Station downstream) {
@@ -348,9 +340,9 @@ public class Belt {
     /**
      * A {@link Stage Stage} that yields output elements.
      *
-     * <p>A source may enclose an upstream station, which will {@link #run run} when the source runs. Sources generally
-     * should be run before yielding elements, in case the source connects across an upstream boundary, to avoid the
-     * effects of unmitigated buffer depletion (including potential deadlock).
+     * <p>A source may include {@link #tasks tasks} from upstream stations. Such tasks should generally be concurrently
+     * run while yielding elements, in case the source connects across an upstream boundary, to avoid the effects of
+     * unmitigated buffer depletion (including potential deadlock).
      *
      * <p>This is a functional interface whose functional method is {@link #drainToSink(StepSink)}.
      *
@@ -448,10 +440,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} station before this source. Returns a new source that behaves like this source,
-         * except that {@link #run running} it will also run the {@code upstream} station.
+         * except that it includes {@link #tasks tasks} from the {@code upstream} station.
          *
          * @param upstream the upstream station
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes tasks from an upstream station
          * @throws NullPointerException if upstream is null
          */
         default Source<Out> compose(Station upstream) {
@@ -485,8 +477,8 @@ public class Belt {
         }
         
         /**
-         * Connects the {@code downstream} sink after this source. Returns a new station that, when {@link #run run},
-         * will drain from this source to the {@code downstream} sink.
+         * Connects the {@code downstream} sink after this source. Returns a new station that includes a
+         * {@link #tasks task} to drain from this source to the {@code downstream} sink.
          *
          * @param downstream the downstream sink
          * @return a new station that will drain from this source to the sink
@@ -498,11 +490,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this source. Returns a new source that behaves like the segue's
-         * source, except that {@link #run running} it will also run the station formed by connecting this source before
-         * the segue's sink.
+         * source, except that it includes a {@link #tasks task} to drain from this source to the segue's sink.
          *
          * @param downstream the downstream segue
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -512,11 +503,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this source. Returns a new source that behaves like the segue's
-         * source, except that {@link #run running} it will also run the station formed by connecting this source before
-         * the segue's sink.
+         * source, except that it includes a {@link #tasks task} to drain from this source to the segue's sink.
          *
          * @param downstream the downstream segue
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -595,8 +585,8 @@ public class Belt {
         }
         
         /**
-         * Connects the {@code upstream} source before this sink. Returns a new station that, when {@link #run run},
-         * will drain from the {@code upstream} source to this sink.
+         * Connects the {@code upstream} source before this sink. Returns a new station that includes a
+         * {@link #tasks task} to drain from the {@code upstream} source to this sink.
          *
          * @param upstream the upstream source
          * @return a new station that will drain from the source to this sink
@@ -608,11 +598,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this sink. Returns a new sink that behaves like the segue's sink,
-         * except that {@link #run running} it will also run the station formed by connecting the segue's source before
-         * this sink.
+         * except that it includes a {@link #tasks task} to drain from the segue's source to this sink.
          *
          * @param upstream the upstream segue
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -622,11 +611,10 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this sink. Returns a new sink that behaves like the segue's sink,
-         * except that {@link #run running} it will also run the station formed by connecting the segue's source before
-         * this sink.
+         * except that it includes a {@link #tasks task} to drain from the segue's source to this sink.
          *
          * @param upstream the upstream segue
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -731,8 +719,8 @@ public class Belt {
         }
         
         /**
-         * Connects the {@code downstream} sink after this source. Returns a new station that, when {@link #run run},
-         * will drain from this source to the {@code downstream} sink.
+         * Connects the {@code downstream} sink after this source. Returns a new station that includes a
+         * {@link #tasks task} to drain from this source to the {@code downstream} sink.
          *
          * @param downstream the downstream sink
          * @return a new station that will drain from this source to the sink
@@ -744,11 +732,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this source. Returns a new source that behaves like the segue's
-         * source, except that {@link #run running} it will also run the station formed by connecting this source before
-         * the segue's sink.
+         * source, except that it includes a {@link #tasks task} to drain from this source to the segue's sink.
          *
          * @param downstream the downstream segue
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -758,11 +745,10 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this source. Returns a new source that behaves like the segue's
-         * source, except that {@link #run running} it will also run the station formed by connecting this source before
-         * the segue's sink.
+         * source, except that it includes a {@link #tasks task} to drain from this source to the segue's sink.
          *
          * @param downstream the downstream segue
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -827,11 +813,11 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} source before this segue. Returns a new source that behaves like this segue's
-         * source, except that {@link Stage#run running} it will also run the station formed by connecting the
-         * {@code upstream} source before this segue's sink.
+         * source, except that it includes a {@link Stage#tasks task} to drain from the {@code upstream} source to this
+         * segue's sink.
          *
          * @param upstream the upstream source
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @throws NullPointerException if upstream is null
          */
         default Source<Out> compose(StepSource<? extends In> upstream) {
@@ -840,8 +826,8 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this segue. Returns a new segue that pairs the {@code upstream}
-         * segue's sink with a new source that behaves like this segue's source, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's sink with a new source that behaves like this segue's source, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -849,7 +835,7 @@ public class Belt {
          * }
          *
          * @param upstream the upstream segue
-         * @return a new segue whose source also runs an upstream station
+         * @return a new segue whose source also includes an upstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -859,8 +845,8 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this segue. Returns a new segue that pairs the {@code upstream}
-         * segue's sink with a new source that behaves like this segue's source, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's sink with a new source that behaves like this segue's source, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -868,7 +854,7 @@ public class Belt {
          * }
          *
          * @param upstream the upstream segue
-         * @return a new segue whose source also runs an upstream station
+         * @return a new segue whose source also includes an upstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -878,11 +864,11 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} sink after this segue. Returns a new sink that behaves like this segue's
-         * sink, except that {@link Stage#run running} it will also run the station formed by connecting this segue's
-         * source before the {@code downstream} sink.
+         * sink, except that it includes a {@link Stage#tasks task} to drain from this segue's source to the
+         * {@code downstream} sink.
          *
          * @param downstream the downstream sink
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @throws NullPointerException if downstream is null
          */
         default Sink<In> andThen(StepSink<? super Out> downstream) {
@@ -891,8 +877,8 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this segue. Returns a new segue that pairs the {@code downstream}
-         * segue's source with a new sink that behaves like this segue's sink, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's source with a new sink that behaves like this segue's sink, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -900,7 +886,7 @@ public class Belt {
          * }
          *
          * @param downstream the downstream segue
-         * @return a new segue whose sink also runs a downstream station
+         * @return a new segue whose sink also includes a downstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -910,8 +896,8 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this segue. Returns a new segue that pairs the {@code downstream}
-         * segue's source with a new sink that behaves like this segue's sink, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's source with a new sink that behaves like this segue's sink, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -919,7 +905,7 @@ public class Belt {
          * }
          *
          * @param downstream the downstream segue
-         * @return a new segue whose sink also runs a downstream station
+         * @return a new segue whose sink also includes a downstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -994,11 +980,11 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} source before this segue. Returns a new source that behaves like this segue's
-         * source, except that {@link Stage#run running} it will also run the station formed by connecting the
-         * {@code upstream} source before this segue's sink.
+         * source, except that it includes a {@link Stage#tasks task} to drain from the {@code upstream} source to this
+         * segue's sink.
          *
          * @param upstream the upstream source
-         * @return a new source that also runs an upstream station
+         * @return a new source that also includes an upstream task
          * @throws NullPointerException if upstream is null
          */
         default Source<Out> compose(Source<? extends In> upstream) {
@@ -1007,8 +993,8 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this segue. Returns a new segue that pairs the {@code upstream}
-         * segue's sink with a new source that behaves like this segue's source, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's sink with a new source that behaves like this segue's source, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -1016,7 +1002,7 @@ public class Belt {
          * }
          *
          * @param upstream the upstream segue
-         * @return a new segue whose source also runs an upstream station
+         * @return a new segue whose source also includes an upstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -1026,8 +1012,8 @@ public class Belt {
         
         /**
          * Connects the {@code upstream} segue before this segue. Returns a new segue that pairs the {@code upstream}
-         * segue's sink with a new source that behaves like this segue's source, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's sink with a new source that behaves like this segue's source, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -1035,7 +1021,7 @@ public class Belt {
          * }
          *
          * @param upstream the upstream segue
-         * @return a new segue whose source also runs an upstream station
+         * @return a new segue whose source also includes an upstream task
          * @param <T> the upstream sink element type
          * @throws NullPointerException if upstream is null
          */
@@ -1124,11 +1110,11 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} sink after this segue. Returns a new sink that behaves like this segue's
-         * sink, except that {@link Stage#run running} it will also run the station formed by connecting this segue's
-         * source before the {@code downstream} sink.
+         * sink, except that it includes a {@link Stage#tasks task} to drain from this segue's source to the
+         * {@code downstream} sink.
          *
          * @param downstream the downstream sink
-         * @return a new sink that also runs a downstream station
+         * @return a new sink that also includes a downstream task
          * @throws NullPointerException if downstream is null
          */
         default Sink<In> andThen(Sink<? super Out> downstream) {
@@ -1137,8 +1123,8 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this segue. Returns a new segue that pairs the {@code downstream}
-         * segue's source with a new sink that behaves like this segue's sink, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's source with a new sink that behaves like this segue's sink, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -1146,7 +1132,7 @@ public class Belt {
          * }
          *
          * @param downstream the downstream segue
-         * @return a new segue whose sink also runs a downstream station
+         * @return a new segue whose sink also includes a downstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */
@@ -1156,8 +1142,8 @@ public class Belt {
         
         /**
          * Connects the {@code downstream} segue after this segue. Returns a new segue that pairs the {@code downstream}
-         * segue's source with a new sink that behaves like this segue's sink, except that {@link Stage#run running}
-         * it will also run the station formed between segues.
+         * segue's source with a new sink that behaves like this segue's sink, except that it includes a
+         * {@link Stage#tasks task} to drain the interior source to sink.
          *
          * <p>This method behaves equivalently to:
          * {@snippet :
@@ -1165,7 +1151,7 @@ public class Belt {
          * }
          *
          * @param downstream the downstream segue
-         * @return a new segue whose sink also runs a downstream station
+         * @return a new segue whose sink also includes a downstream task
          * @param <T> the downstream source element type
          * @throws NullPointerException if downstream is null
          */

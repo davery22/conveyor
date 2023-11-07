@@ -1,6 +1,6 @@
 package io.avery.conveyor;
 
-import java.util.concurrent.Executor;
+import java.util.concurrent.Callable;
 import java.util.stream.Stream;
 
 /**
@@ -47,15 +47,8 @@ public abstract class ProxySink<In> implements Belt.Sink<In> {
         Belts.composedCompleteAbruptly(sinks(), cause);
     }
     
-    /**
-     * Calls {@code run(executor)} on each downstream sink, as if by
-     * {@snippet :
-     * this.sinks().sequential().forEach(sink -> sink.run(executor));
-     * }
-     * @param executor the executor to submit tasks to
-     */
     @Override
-    public void run(Executor executor) {
-        sinks().sequential().forEach(sink -> sink.run(executor));
+    public Stream<Callable<Void>> tasks() {
+        return sinks().flatMap(Belt.Stage::tasks);
     }
 }

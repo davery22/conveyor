@@ -1,7 +1,5 @@
 package io.avery.conveyor;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -45,7 +43,7 @@ public class Belts {
      *         ))
      *         .andThen(Belts.alsoClose(source))
      *         .andThen(sink)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -88,10 +86,10 @@ public class Belts {
                     lock.unlock();
                 }
             }
-            
+
             @Override
-            public void run(Executor executor) {
-                source.run(executor);
+            public Stream<Callable<Void>> tasks() {
+                return source.tasks();
             }
         }
         
@@ -119,7 +117,7 @@ public class Belts {
      *         ))
      *         .compose(Belts.alsoComplete(sink))
      *         .compose(source)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -172,10 +170,10 @@ public class Belts {
                     lock.unlock();
                 }
             }
-            
+
             @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            public Stream<Callable<Void>> tasks() {
+                return sink.tasks();
             }
         }
         
@@ -184,9 +182,9 @@ public class Belts {
     
     /**
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
-     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
-     * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
-     * running stations from the source are awaited.
+     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source.
+     * The source's tasks, if any, are run asynchronously, and the source itself is drained to the downstream sink. The
+     * downstream sink is then completed normally, and all tasks are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -213,7 +211,7 @@ public class Belts {
      *             )
      *             .andThen((Belt.StepSink<Integer>) list::add)
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -223,7 +221,7 @@ public class Belts {
      * }
      *
      * @param mapper a function that creates a source from an exception
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by the created source
      * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
      * @param <T> the sink element type
@@ -258,7 +256,7 @@ public class Belts {
                     try (var scope = new FailureHandlingScope("recoverStep-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
-                        source.run(scopeExecutor(scope));
+                        source.tasks().forEach(scope::fork);
                         running = true;
                         try (source) {
                             source.drainToSink(sink);
@@ -274,10 +272,10 @@ public class Belts {
                     throw e;
                 }
             }
-            
+
             @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            public Stream<Callable<Void>> tasks() {
+                return sink.tasks();
             }
         }
         
@@ -286,9 +284,9 @@ public class Belts {
     
     /**
      * Returns an operator that attempts to recover from abrupt completion before it reaches a downstream sink. When the
-     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source,
-     * which is then run and drained to the downstream sink. The downstream sink is then completed normally, and any
-     * running stations from the source are awaited.
+     * resultant upstream sink is completed abruptly, the {@code mapper} is applied to the cause to produce a source.
+     * The source's tasks, if any, are run asynchronously, and the source itself is drained to the downstream sink. The
+     * downstream sink is then completed normally, and all tasks are awaited.
      *
      * <p>If the {@code mapper} throws an exception, the downstream is completed abruptly with the original cause.
      * Otherwise, if draining the created source or completing the downstream sink throws an exception, the downstream
@@ -317,7 +315,7 @@ public class Belts {
      *                 return true;
      *             })
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -327,7 +325,7 @@ public class Belts {
      * }
      *
      * @param mapper a function that creates a source from an exception
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by the created source
      * @return an operator that attempts to recover from abrupt completion before it reaches a downstream sink
      * @param <T> the sink element type
@@ -362,7 +360,7 @@ public class Belts {
                     try (var scope = new FailureHandlingScope("recover-completeAbruptly",
                                                               Thread.ofVirtual().name("thread-", 0).factory(),
                                                               asyncExceptionHandler)) {
-                        source.run(scopeExecutor(scope));
+                        source.tasks().forEach(scope::fork);
                         running = true;
                         try (source) {
                             sink.drainFromSource(source);
@@ -378,10 +376,10 @@ public class Belts {
                     throw e;
                 }
             }
-            
+
             @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            public Stream<Callable<Void>> tasks() {
+                return sink.tasks();
             }
         }
         
@@ -401,7 +399,7 @@ public class Belts {
      *     Belts.iteratorSource(List.of(1, 2, 3, 4, 5, 6).iterator())
      *         .andThen(Belts.filterMap(i -> i % 2 == 0 ? null : -i))
      *         .andThen((Belt.StepSink<Integer>) list::add)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -476,7 +474,7 @@ public class Belts {
      *         ))
      *         .andThen(Belts.alsoClose(source))
      *         .andThen(sink)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -546,7 +544,7 @@ public class Belts {
      *         ))
      *         .compose(Belts.alsoComplete(sink))
      *         .compose(source)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -589,8 +587,8 @@ public class Belts {
     /**
      * Returns a sink that pushes input elements to consecutive inner sinks, using the {@code predicate} to determine
      * when to create each new sink. When the {@code predicate} returns {@code true} for an element, the current inner
-     * sink is completed and its running stations awaited, then a new inner sink is created by passing the element to
-     * the {@code sinkFactory}, and the new sink is run.
+     * sink is completed, and its asynchronously running tasks are awaited. Then a new inner sink is created by passing
+     * the element to the {@code sinkFactory}, and the new sink is run.
      *
      * <p>Example:
      * {@snippet :
@@ -611,7 +609,7 @@ public class Belts {
      *             )
      *             .compose(Belts.alsoComplete(sink))
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *     System.out.println(list);
@@ -623,7 +621,7 @@ public class Belts {
      * @param splitAfter if {@code true}, an element that passes the {@code predicate} will cause a new inner sink to be
      *                   created starting with the next element, rather than the current element
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by created sinks
      * @param sinkFactory a function that creates a sink, using the first element that will be pushed to that sink
      * @return a sink that pushes input elements to consecutive inner sinks, delimited by passing {@code predicate}
@@ -645,7 +643,6 @@ public class Belts {
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
                     Belt.StepSink<? super T> subSink = e -> true;
-                    var exec = scopeExecutor(scope);
                     try {
                         boolean drained = true;
                         boolean split = true;
@@ -654,7 +651,7 @@ public class Belts {
                                 subSink.complete();
                                 scope.join();
                                 subSink = sinkFactory.apply(val);
-                                subSink.run(exec);
+                                subSink.tasks().forEach(scope::fork);
                             }
                             split = splitAfter && predicate.test(val);
                             if (!subSink.push(val)) {
@@ -685,12 +682,13 @@ public class Belts {
     /**
      * Returns a sink that pushes input elements to the inner sink associated with the key that the {@code classifier}
      * computes for the element. When the {@code classifier} computes a previously-unseen key for an element, the
-     * {@code sinkFactory} is called with the key and element to create a new inner sink, which is then run. That first
-     * element, and subsequent elements that map to the same key, are pushed to that sink until the sink cancels.
+     * {@code sinkFactory} is called with the key and element to create a new inner sink, whose tasks are asynchronously
+     * run. That first element, and subsequent elements that map to the same key, are pushed to that sink until the sink
+     * cancels.
      *
      * <p>If {@code eagerCancel} is {@code true}, and any inner sink cancels, all inner sinks will be completed and
-     * running stations awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner
-     * sink cancels, it will be completed and its running stations awaited, before the outer sink resumes. Subsequent
+     * running tasks awaited, before the outer sink cancels. If {@code eagerCancel} is {@code false}, and any inner
+     * sink cancels, it will be completed and its running tasks awaited, before the outer sink resumes. Subsequent
      * elements that map to the canceled sink's key will be discarded.
      *
      * <p>Example:
@@ -712,7 +710,7 @@ public class Belts {
      *             )
      *             .compose(Belts.alsoComplete(sink))
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *     System.out.println(list);
@@ -722,7 +720,7 @@ public class Belts {
      *
      * @param classifier a classifier function mapping input elements to keys
      * @param eagerCancel if {@code true}, cancels draining when the first inner sink cancels; else never cancels
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by created sinks
      * @param sinkFactory a function that creates a sink, using a key and the first element that will be pushed to that
      *                    sink
@@ -776,7 +774,7 @@ public class Belts {
                                 // Note that running a sink per key could produce unbounded threads.
                                 // We leave this to the sinkFactory to resolve if necessary, eg by tracking
                                 // incomplete sinks and returning a no-op Sink if maxed (thus dropping elements).
-                                subSink.run(subScope);
+                                subSink.tasks().forEach(subScope::fork);
                             }
                             if (!scopedSink.sink.push(val)) {
                                 if (eagerCancel) {
@@ -808,10 +806,10 @@ public class Belts {
     /**
      * Returns an operator that replaces each element with the contents of a mapped source before it reaches a
      * downstream sink. The resultant upstream sink will apply the {@code mapper} to each element to produce a mapped
-     * source, run the source, push its contents downstream, then close it and await its running stations. (If a mapped
-     * source is {@code null}, it is discarded.)
+     * source, asynchronously run its tasks, push its contents downstream, then close it and await its running tasks.
+     * (If a mapped source is {@code null}, it is discarded.)
      *
-     * <p>If the mapped sources are known to never enclose stations / cross asynchronous boundaries, it may be possible
+     * <p>If the mapped sources are known to never enclose tasks / cross asynchronous boundaries, it may be possible
      * to replace usage of this operator with the {@link #gather gather} operator and a flat-mapping
      * {@link Gatherer Gatherer}.
      *
@@ -829,7 +827,7 @@ public class Belts {
      *             )
      *             .andThen((Belt.StepSink<String>) list::add)
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *     System.out.println(list);
@@ -838,7 +836,7 @@ public class Belts {
      * }
      *
      * @param mapper a function to be applied to the upstream elements, producing a mapped source
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by created sources
      * @return an operator that replaces each element with the contents of a mapped source
      * @param <T> the upstream element type
@@ -870,7 +868,7 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("flatMap-push",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    subSource.run(scopeExecutor(scope));
+                    subSource.tasks().forEach(scope::fork);
                     try (subSource) {
                         draining = subSource.drainToSink(sink);
                     }
@@ -891,8 +889,8 @@ public class Belts {
     /**
      * Returns an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
      * from. The resultant upstream sink will wrap any upstream source it drains from, to discard close signals, and
-     * then apply the {@code sourceMapper} to create a downstream source. The downstream source is then run, drained
-     * from, and closed, and its running stations are awaited.
+     * then apply the {@code sourceMapper} to create a downstream source. Then, the downstream source's tasks are run
+     * asynchronously, the source itself is drained from and closed, and all tasks are awaited.
      *
      * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sourceMapper} after the
      * upstream source, and then connecting the downstream sink after that. However, since close signals are expected to
@@ -920,7 +918,7 @@ public class Belts {
      *                     Throwable::printStackTrace
      *                 ))
      *         )))
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -933,7 +931,7 @@ public class Belts {
      * }
      *
      * @param sourceMapper an operator that connects after an upstream source to produce a downstream source
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by the created downstream source
      * @return an operator that connects the given {@code sourceMapper} after any source that a downstream sink drains
      * from
@@ -973,7 +971,7 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("adaptSourceOfSink-drainFromSource",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    newSource.run(scopeExecutor(scope));
+                    newSource.tasks().forEach(scope::fork);
                     try (newSource) {
                         sink.drainFromSource(newSource);
                     }
@@ -995,8 +993,8 @@ public class Belts {
     /**
      * Returns an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to.
      * The resultant downstream source will wrap any downstream sink it drains to, to discard completion signals, and
-     * then apply the {@code sinkMapper} to create an upstream sink. The upstream sink is then run, drained to, and
-     * completed, and its running stations are awaited.
+     * then apply the {@code sinkMapper} to create an upstream sink. Then, the upstream sink's tasks are run
+     * asynchronously, the sink itself is drained to and completed, and all tasks are awaited.
      *
      * <p>The effect of this operator is similar, but not equivalent to, connecting the {@code sinkMapper} before the
      * downstream sink, and then connecting the upstream source before that. However, since completion signals are
@@ -1025,7 +1023,7 @@ public class Belts {
      *                 ))
      *         ))
      *         .andThen(sink)
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *
@@ -1037,7 +1035,7 @@ public class Belts {
      * }
      *
      * @param sinkMapper an operator that connects before a downstream sink to produce an upstream sink
-     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running stations
+     * @param asyncExceptionHandler a function that consumes any exceptions thrown when asynchronously running tasks
      *                              enclosed by the created upstream sink
      * @return an operator that connects the given {@code sinkMapper} before any sink that an upstream source drains to
      * @param <T> the upstream element type
@@ -1075,7 +1073,7 @@ public class Belts {
                 try (var scope = new FailureHandlingScope("adaptSinkOfSource-drainToSink",
                                                           Thread.ofVirtual().name("thread-", 0).factory(),
                                                           asyncExceptionHandler)) {
-                    newSink.run(scopeExecutor(scope));
+                    newSink.tasks().forEach(scope::fork);
                     try {
                         source.drainToSink(newSink);
                         newSink.complete();
@@ -1117,7 +1115,7 @@ public class Belts {
      *             Belts.gather(Gatherers.map((Integer i) -> i * 2))
      *                 .andThen((Belt.StepSink<Integer>) list::add)
      *         )
-     *         .run(Belts.scopeExecutor(scope));
+     *         .tasks().forEach(scope::fork);
      *
      *     scope.join();
      *     System.out.println(list);
@@ -1219,10 +1217,10 @@ public class Belts {
                 state = CLOSED;
                 sink.completeAbruptly(cause);
             }
-            
+
             @Override
-            public void run(Executor executor) {
-                sink.run(executor);
+            public Stream<Callable<Void>> tasks() {
+                return sink.tasks();
             }
         }
         
@@ -2235,9 +2233,8 @@ public class Belts {
             T element = null;
             int state = RUNNING;
             
-            private static final int RUNNING    = 0;
-            private static final int COMPLETING = 1;
-            private static final int CLOSED     = 2;
+            private static final int RUNNING = 0;
+            private static final int CLOSED  = 1;
             
             class Sink implements Belt.StepSink<T> {
                 @Override
@@ -2247,14 +2244,14 @@ public class Belts {
                     try {
                         lock.lockInterruptibly();
                         try {
-                            if (state >= COMPLETING) {
+                            if (state == CLOSED) {
                                 return false;
                             }
                             element = input;
                             given.signal();
                             do {
                                 taken.await();
-                                if (state >= COMPLETING) {
+                                if (state == CLOSED) {
                                     return element == null;
                                 }
                             } while (element != null);
@@ -2271,11 +2268,12 @@ public class Belts {
                 public void complete() throws Exception {
                     lock.lockInterruptibly();
                     try {
-                        if (state >= COMPLETING) {
+                        if (state == CLOSED) {
                             return;
                         }
-                        state = COMPLETING;
+                        state = CLOSED;
                         taken.signalAll();
+                        given.signalAll();
                     } finally {
                         lock.unlock();
                     }
@@ -2991,24 +2989,7 @@ public class Belts {
         
         return new IteratorSource();
     }
-    
-    /**
-     * Returns an {@link Executor Executor} that delegates execution to the given {@code scope}.
-     *
-     * <p>The resultant executor behaves as if defined by:
-     * {@snippet :
-     * Executor executor = runnable -> scope.fork(Executors.callable(runnable, null));
-     * }
-     *
-     * @param scope the given scope
-     * @return an Executor that delegates to the given scope
-     * @throws NullPointerException if the scope is null
-     */
-    public static Executor scopeExecutor(StructuredTaskScope<?> scope) {
-        Objects.requireNonNull(scope);
-        return runnable -> scope.fork(Executors.callable(runnable, null));
-    }
-    
+
     /**
      * Closes each source, in encounter order. If closing any source throws an exception, the first such exception will
      * be caught and re-thrown before this method returns, with any subsequent exceptions suppressed onto it.
@@ -3121,7 +3102,7 @@ public class Belts {
     }
     
     // Used by groupBy (when eagerCancel=false) to wait for run() tasks to finish after completing a Sink
-    private static class SubScope implements Executor {
+    private static class SubScope {
         final StructuredTaskScope<?> scope;
         final Phaser phaser;
         
@@ -3130,8 +3111,7 @@ public class Belts {
             this.phaser = new Phaser(1);
         }
         
-        @Override
-        public void execute(Runnable task) {
+        public void fork(Callable<?> task) {
             if (phaser.register() < 0) {
                 // In case someone holds on to the Executor reference when they shouldn't
                 throw new IllegalStateException("SubScope is closed");
@@ -3139,7 +3119,7 @@ public class Belts {
             try {
                 scope.fork(() -> {
                     try {
-                        task.run();
+                        task.call();
                         return null;
                     } finally {
                         phaser.arriveAndDeregister();
@@ -3157,34 +3137,73 @@ public class Belts {
             phaser.awaitAdvanceInterruptibly(phase);
         }
     }
-    
+
+    // TODO: Call the right thing - the 'last' station
+    //  In some cases the 'last' station may not be meaningful - eg a fan-out sink - and we may not want to prefer it
+
+    // Option 1: Return a 'Block' that encloses Stations
+    //
+    // // Run sole station synchronously:
+    // ...stations().findAny().get().call()
+    //
+    // // Run all stations asynchronously:
+    // ...stations().forEach(scope::fork)
+    //
+    // // Run last station synchronously, others asynchronously:
+    // var stations = ...stations().toList();
+    // stations.subList(0, stations.size()-1).forEach(scope::fork);
+    // stations.getLast().call();
+    //
+    // ---------------
+    //
+    // Option 2: Return a Station that does not enclose itself
+    //
+    // // Run sole station synchronously:
+    // ...call()
+    //
+    // // Run all stations asynchronously:
+    // var station = ...
+    // station.stations().forEach(scope::fork);
+    // scope.fork(station);
+    //
+    // // Run last station synchronously, others asynchronously:
+    // var station = ...
+    // station.stations().forEach(scope::fork);
+    // station.call();
+    //
+    // ---------------
+    //
+    // Option 3: Return a Station that encloses itself
+    //
+    // // Run sole station synchronously:
+    // ...call()
+    //
+    // // Run all stations asynchronously:
+    // ...stations().forEach(scope::fork)
+    //
+    // // Run last station synchronously, others asynchronously:
+    // var station = ...
+    // station.stations().takeWhile(s -> s != station).forEach(scope::fork);
+    // station.call();
+
     static final class ClosedStation<T> implements Belt.Station {
         final Belt.Source<? extends T> source;
         final Belt.Sink<? super T> sink;
-        boolean ran = false;
-        
-        static final VarHandle RAN;
-        static {
-            try {
-                RAN = MethodHandles.lookup().findVarHandle(ClosedStation.class, "ran", boolean.class);
-            } catch (ReflectiveOperationException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
-        
+
         ClosedStation(Belt.Source<? extends T> source, Belt.Sink<? super T> sink) {
             this.source = Objects.requireNonNull(source);
             this.sink = Objects.requireNonNull(sink);
         }
-        
+
         @Override
-        public void run(Executor executor) {
-            source.run(executor);
-            sink.run(executor);
-            executor.execute(() -> {
-                if (!RAN.compareAndSet(this, false, true)) {
-                    return;
-                }
+        public Stream<Callable<Void>> tasks() {
+            return Stream.of(source.tasks(), Stream.of(task()), sink.tasks())
+                .flatMap(Function.identity());
+        }
+
+        public Callable<Void> task() {
+            return () -> {
+                // TODO: Re-add CAS, to ensure only runs once?
                 try (source) {
                     if (sink instanceof Belt.StepSink<? super T> ss) {
                         source.drainToSink(ss);
@@ -3192,13 +3211,18 @@ public class Belts {
                         sink.drainFromSource(ss);
                     }
                     sink.complete();
+                    return null;
                 } catch (Throwable ex) {
                     if (ex instanceof InterruptedException) { Thread.currentThread().interrupt(); }
                     try { sink.completeAbruptly(ex); }
-                    catch (Throwable t) { if (t instanceof InterruptedException) Thread.currentThread().interrupt(); ex.addSuppressed(t); }
-                    throw new CompletionException(ex);
+                    catch (Throwable t) {
+                        if (t instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+                        ex.addSuppressed(t);
+                    }
+                    if (ex instanceof InterruptedException) { Thread.interrupted(); }
+                    throw ex;
                 }
-            });
+            };
         }
     }
     
@@ -3211,9 +3235,8 @@ public class Belts {
             this.right = Objects.requireNonNull(right);
         }
         
-        public void run(Executor executor) {
-            left.run(executor);
-            right.run(executor);
+        public Stream<Callable<Void>> tasks() {
+            return Stream.of(left, right).flatMap(Belt.Stage::tasks);
         }
     }
     
